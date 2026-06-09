@@ -20,6 +20,10 @@ import {
   createScheduledAcousticPulse,
 } from "@/lib/calibration/pulse";
 import {
+  createPulseToneScheduler,
+  type PulseToneScheduler,
+} from "@/lib/calibration/playback";
+import {
   selectObservablePulse,
   selectUpcomingCalibrationTurn,
 } from "@/lib/calibration/session";
@@ -51,7 +55,7 @@ export function BlackmagicApp() {
   const observablePulseRef = useRef<AcousticPulse | null>(null);
   const observedPulseIdRef = useRef("");
   const flushedCalibrationEventRef = useRef("");
-  const pulseTimeoutRef = useRef<number | null>(null);
+  const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
   const peerCount =
     roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
   const constellation = useMemo(
@@ -138,7 +142,7 @@ export function BlackmagicApp() {
         acousticPulse: pulse,
         acousticObservation: calibrationRef.current.acousticObservation ?? null,
       };
-      scheduleOutputPulse(pulse, snapshotRef.current, pulseTimeoutRef);
+      scheduleOutputPulse(pulse, snapshotRef.current, pulseSchedulerRef);
       flushCalibrationEvent(calibrationEventKey("pulse", pulse.id));
     };
 
@@ -146,12 +150,16 @@ export function BlackmagicApp() {
     const timer = window.setInterval(publishPulse, 700);
     return () => {
       window.clearInterval(timer);
-      if (pulseTimeoutRef.current !== null) {
-        window.clearTimeout(pulseTimeoutRef.current);
-        pulseTimeoutRef.current = null;
-      }
     };
   }, [deviceId, flushCalibrationEvent, phase, roomState]);
+
+  useEffect(
+    () => () => {
+      void pulseSchedulerRef.current?.close();
+      pulseSchedulerRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (phase !== "listening" || !roomState) {
@@ -424,49 +432,20 @@ function pulseSearchBounds(pulse: AcousticPulse, snapshot: SensorSnapshot) {
 function scheduleOutputPulse(
   pulse: AcousticPulse,
   snapshot: SensorSnapshot,
-  timeoutRef: MutableRefObject<number | null>,
+  schedulerRef: MutableRefObject<PulseToneScheduler | null>,
 ) {
   const now = hostEpochNow(snapshot);
   if (now === null) {
     return;
   }
 
-  if (timeoutRef.current !== null) {
-    window.clearTimeout(timeoutRef.current);
-  }
-
-  timeoutRef.current = window.setTimeout(
-    () => void playPulseTone(pulse),
-    Math.max(0, pulse.emittedAtHostEpochMs - now),
-  );
-}
-
-async function playPulseTone(pulse: AcousticPulse) {
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  const context = new AudioContextClass();
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  const durationSeconds = pulse.durationMs / 1_000;
-
-  oscillator.type = "sine";
-  oscillator.frequency.setValueAtTime(pulse.frequencyHz, context.currentTime);
-  if (pulse.endFrequencyHz && pulse.endFrequencyHz !== pulse.frequencyHz) {
-    oscillator.frequency.linearRampToValueAtTime(
-      pulse.endFrequencyHz,
-      context.currentTime + durationSeconds,
-    );
-  }
-  gain.gain.setValueAtTime(0.0001, context.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.045, context.currentTime + 0.008);
-  gain.gain.exponentialRampToValueAtTime(
-    0.0001,
-    context.currentTime + durationSeconds,
-  );
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start();
-  oscillator.stop(context.currentTime + durationSeconds);
-  window.setTimeout(() => void context.close(), pulse.durationMs + 120);
+  schedulerRef.current ??= createPulseToneScheduler({
+    createContext: () => {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      return new AudioContextClass();
+    },
+  });
+  void schedulerRef.current.schedule(pulse, { hostEpochNowMs: now });
 }
 
 function clamp(value: number, min: number, max: number) {

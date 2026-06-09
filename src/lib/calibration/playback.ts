@@ -1,0 +1,150 @@
+import type { AcousticPulse } from "@/lib/session/registry";
+
+export type PulseToneParam = {
+  setValueAtTime(value: number, startTime: number): unknown;
+  linearRampToValueAtTime?(value: number, endTime: number): unknown;
+  exponentialRampToValueAtTime?(value: number, endTime: number): unknown;
+};
+
+export type PulseToneOscillator = {
+  type: OscillatorType | "sine";
+  frequency: PulseToneParam;
+  connect(destination: unknown): unknown;
+  disconnect?(): unknown;
+  start(when: number): unknown;
+  stop(when: number): unknown;
+  onended?: ((event: Event) => void) | null;
+};
+
+export type PulseToneGain = {
+  gain: PulseToneParam;
+  connect(destination: unknown): unknown;
+  disconnect?(): unknown;
+};
+
+export type PulseToneAudioContext = {
+  currentTime: number;
+  destination: unknown;
+  state?: AudioContextState | "running" | "suspended" | "closed";
+  resume?: () => Promise<void>;
+  close?: () => Promise<void>;
+  createOscillator(): PulseToneOscillator;
+  createGain(): PulseToneGain;
+};
+
+export type PulseToneScheduler = {
+  schedule(
+    pulse: AcousticPulse,
+    timing: { hostEpochNowMs: number },
+  ): Promise<void>;
+  close(): Promise<void>;
+};
+
+export type PulseToneSchedulerOptions = {
+  createContext: () => PulseToneAudioContext;
+  minimumLeadSeconds?: number;
+  peakGain?: number;
+};
+
+const DEFAULT_MINIMUM_LEAD_SECONDS = 0.02;
+const DEFAULT_PEAK_GAIN = 0.045;
+const FLOOR_GAIN = 0.0001;
+const ATTACK_SECONDS = 0.008;
+
+export function createPulseToneScheduler({
+  createContext,
+  minimumLeadSeconds = DEFAULT_MINIMUM_LEAD_SECONDS,
+  peakGain = DEFAULT_PEAK_GAIN,
+}: PulseToneSchedulerOptions): PulseToneScheduler {
+  let context: PulseToneAudioContext | null = null;
+
+  async function audioContext() {
+    context ??= createContext();
+    if (context.state === "suspended" && context.resume) {
+      await context.resume().catch(() => undefined);
+    }
+    return context;
+  }
+
+  return {
+    async schedule(pulse, { hostEpochNowMs }) {
+      const activeContext = await audioContext();
+      const startTime = pulseStartTimeSeconds({
+        pulse,
+        hostEpochNowMs,
+        audioContextCurrentTimeSeconds: activeContext.currentTime,
+        minimumLeadSeconds,
+      });
+      scheduleTone(activeContext, pulse, startTime, peakGain);
+    },
+
+    async close() {
+      const closingContext = context;
+      context = null;
+      await closingContext?.close?.().catch(() => undefined);
+    },
+  };
+}
+
+export function pulseStartTimeSeconds({
+  pulse,
+  hostEpochNowMs,
+  audioContextCurrentTimeSeconds,
+  minimumLeadSeconds = DEFAULT_MINIMUM_LEAD_SECONDS,
+}: {
+  pulse: AcousticPulse;
+  hostEpochNowMs: number;
+  audioContextCurrentTimeSeconds: number;
+  minimumLeadSeconds?: number;
+}) {
+  const intendedDelaySeconds =
+    (pulse.emittedAtHostEpochMs - hostEpochNowMs) / 1_000;
+  const boundedDelaySeconds = Math.max(
+    minimumLeadSeconds,
+    intendedDelaySeconds,
+  );
+
+  return roundTime(audioContextCurrentTimeSeconds + boundedDelaySeconds);
+}
+
+function scheduleTone(
+  context: PulseToneAudioContext,
+  pulse: AcousticPulse,
+  startTime: number,
+  peakGain: number,
+) {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  const durationSeconds = pulse.durationMs / 1_000;
+  const endTime = roundTime(startTime + durationSeconds);
+
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(pulse.frequencyHz, startTime);
+  if (
+    pulse.endFrequencyHz &&
+    pulse.endFrequencyHz !== pulse.frequencyHz &&
+    oscillator.frequency.linearRampToValueAtTime
+  ) {
+    oscillator.frequency.linearRampToValueAtTime(pulse.endFrequencyHz, endTime);
+  }
+
+  gain.gain.setValueAtTime(FLOOR_GAIN, startTime);
+  gain.gain.exponentialRampToValueAtTime?.(
+    Math.max(FLOOR_GAIN, peakGain),
+    roundTime(startTime + Math.min(ATTACK_SECONDS, durationSeconds / 2)),
+  );
+  gain.gain.exponentialRampToValueAtTime?.(FLOOR_GAIN, endTime);
+
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.onended = () => {
+    oscillator.disconnect?.();
+    gain.disconnect?.();
+  };
+  oscillator.start(startTime);
+  oscillator.stop(endTime);
+}
+
+function roundTime(value: number) {
+  return Number(value.toFixed(6));
+}
