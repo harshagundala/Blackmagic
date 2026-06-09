@@ -100,7 +100,7 @@ The live calibration loop now rotates emitters across all active room devices us
 
 Calibration events now bypass the slow periodic heartbeat path. When a device schedules a chirp or detects a peer chirp, it immediately flushes the latest calibration payload to the room store, then the normal heartbeat continues carrying sensor state and deduped event history. Devices also poll room state faster while listening and relax back before sensors start. This keeps Redis-backed polling simple while shaving event propagation latency.
 
-The visual constellation weights range edges by confidence, repeated sample count, and distance uncertainty. One noisy chirp can still produce a hint, but repeated low-uncertainty reciprocal observations pull the layout more strongly and show as higher-confidence motion. The rendered field is then transformed into the current phone's perspective: the local device is always the origin, source hints move through the same transform as phones, and available heading rotates the room so the display is relative to the direction the phone is pointing rather than pinned to the host.
+The visual constellation weights range edges by confidence, repeated sample count, and distance uncertainty. One noisy chirp can still produce a hint, but repeated low-uncertainty reciprocal observations pull the layout more strongly and show as higher-confidence motion. Live room state now also treats range evidence as fresh, not permanent: if a reciprocal chirp range is older than the active freshness window, it stops contributing coordinates or meter labels until another sample-domain exchange refreshes it. The rendered field is then transformed into the current phone's perspective: the local device is always the origin, source hints move through the same transform as phones, and available heading rotates the room so the display is relative to the direction the phone is pointing rather than pinned to the host.
 
 ## Active Pulse Ranging
 
@@ -112,5 +112,6 @@ The current V1 range path is intentionally conservative:
 4. Every phone, including the emitter, matches the pulse template inside a bounded recent audio sample window and publishes the detected sample index, host-estimated detected time, amplitude, confidence, and clock uncertainty.
 5. The room state waits for a reciprocal two-pulse exchange with four detected sample anchors: A hears A, A hears B, B hears A, and B hears B.
 6. The room state derives `meters = 343 / 2 * (deltaASeconds - deltaBSeconds)` using only same-device sample intervals, rejects negative or implausibly large propagation, and aggregates repeated exchanges with outlier-aware confidence.
+7. The room state expires old range evidence before it drives live localization, so a phone that moves or misses fresh chirps falls back to a low-confidence marker instead of keeping a stale precise distance.
 
 This is not yet the final detector. The next detector should move more matching work into the worklet, adapt chirp parameters to device response, and add GCC-PHAT-style cross-correlation over longer rolling history.

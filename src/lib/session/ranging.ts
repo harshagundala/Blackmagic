@@ -13,7 +13,13 @@ export type AcousticRange = {
   observedAtHostEpochMs: number;
 };
 
+export type AcousticRangeOptions = {
+  hostEpochNowMs?: number | null;
+  maxRangeAgeMs?: number;
+};
+
 const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
+const DEFAULT_MAX_RANGE_AGE_MS = 18_000;
 const MAX_SAME_ROOM_PROPAGATION_MS = 45;
 const MAX_RECIPROCAL_TURN_MS = 12_000;
 
@@ -34,7 +40,10 @@ type RawAcousticRange = AcousticRange & {
   amplitude: number;
 };
 
-export function deriveAcousticRanges(devices: RoomDevice[]): AcousticRange[] {
+export function deriveAcousticRanges(
+  devices: RoomDevice[],
+  options: AcousticRangeOptions = {},
+): AcousticRange[] {
   const deviceOrder = new Map(
     devices.map((device, index) => [device.deviceId, index]),
   );
@@ -86,11 +95,13 @@ export function deriveAcousticRanges(devices: RoomDevice[]): AcousticRange[] {
     }
   }
 
-  return aggregateRanges(rawRanges, deviceOrder).sort((a, b) =>
-    `${a.from}:${a.to}:${a.pulseId}`.localeCompare(
-      `${b.from}:${b.to}:${b.pulseId}`,
-    ),
-  );
+  return aggregateRanges(rawRanges, deviceOrder)
+    .filter((range) => isFreshRange(range, options))
+    .sort((a, b) =>
+      `${a.from}:${a.to}:${a.pulseId}`.localeCompare(
+        `${b.from}:${b.to}:${b.pulseId}`,
+      ),
+    );
 }
 
 function reciprocalPulsePairs(
@@ -384,6 +395,20 @@ function rangeConsensusTolerance(ranges: RawAcousticRange[]) {
     ranges.reduce((sum, range) => sum + range.distanceUncertaintyMeters, 0) /
     ranges.length;
   return Math.max(0.85, uncertaintyMeters * 3);
+}
+
+function isFreshRange(range: AcousticRange, options: AcousticRangeOptions) {
+  const hostEpochNowMs = options.hostEpochNowMs;
+  if (typeof hostEpochNowMs !== "number" || !Number.isFinite(hostEpochNowMs)) {
+    return true;
+  }
+
+  const maxRangeAgeMs = options.maxRangeAgeMs ?? DEFAULT_MAX_RANGE_AGE_MS;
+  if (maxRangeAgeMs <= 0) {
+    return false;
+  }
+
+  return hostEpochNowMs - range.observedAtHostEpochMs <= maxRangeAgeMs;
 }
 
 function median(values: number[]) {

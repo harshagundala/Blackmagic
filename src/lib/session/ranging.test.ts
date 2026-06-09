@@ -89,6 +89,34 @@ describe("acoustic room ranging", () => {
     expect(deriveAcousticRanges(devices)[0].confidence).toBeGreaterThan(0.45);
   });
 
+  test("expires stale reciprocal ranges before they drive live localization", () => {
+    const devices = reciprocalDevices({
+      hostPulse: pulse("host-pulse", 10_000),
+      phonePulse: pulse("phone-pulse", 20_000),
+      hostObservations: [
+        observation("host-pulse", 10_000, 100_000, 0.34, 0.92),
+        observation("phone-pulse", 20_050, 148_672, 0.32, 0.9),
+      ],
+      phoneObservations: [
+        observation("host-pulse", 10_008, 220_336, 0.31, 0.88),
+        observation("phone-pulse", 20_000, 268_336, 0.35, 0.93),
+      ],
+    });
+
+    expect(
+      deriveAcousticRanges(devices, {
+        hostEpochNowMs: 20_500,
+        maxRangeAgeMs: 12_000,
+      }),
+    ).toHaveLength(1);
+    expect(
+      deriveAcousticRanges(devices, {
+        hostEpochNowMs: 34_000,
+        maxRangeAgeMs: 12_000,
+      }),
+    ).toEqual([]);
+  });
+
   test("rejects contradictory two-sample reciprocal ranges instead of averaging them", () => {
     const devices = reciprocalDevices({
       hostPulses: [

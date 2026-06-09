@@ -160,7 +160,7 @@ export function createRedisSessionStore(
         devices,
         calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
         timeSync: deriveRoomTimeSync(devices),
-        ranges: deriveAcousticRanges(devices),
+        ranges: deriveAcousticRanges(devices, { hostEpochNowMs: timestamp }),
         audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,
       };
