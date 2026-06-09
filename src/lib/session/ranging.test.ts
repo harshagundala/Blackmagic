@@ -140,6 +140,72 @@ describe("acoustic room ranging", () => {
     expect(deriveAcousticRanges(devices)[0].confidence).toBeGreaterThan(0.5);
   });
 
+  test("folds reciprocal pulse observations into one unordered pair range", () => {
+    const devices: RoomDevice[] = [
+      {
+        deviceId: "host",
+        joinedAt: 1_000,
+        lastSeenAt: 2_000,
+        role: "host",
+        sessionKey: "room",
+        acousticPulses: [
+          {
+            id: "host-pulse",
+            emittedAtHostEpochMs: 10_000,
+            durationMs: 48,
+            frequencyHz: 17_200,
+            endFrequencyHz: 19_200,
+          },
+        ],
+        acousticObservations: [
+          {
+            pulseId: "phone-pulse",
+            detectedAtHostEpochMs: 12_006.2,
+            amplitude: 0.32,
+            confidence: 0.86,
+            clockUncertaintyMs: 2,
+          },
+        ],
+      },
+      {
+        deviceId: "phone-a",
+        joinedAt: 1_100,
+        lastSeenAt: 2_000,
+        role: "phone",
+        sessionKey: "room",
+        acousticPulses: [
+          {
+            id: "phone-pulse",
+            emittedAtHostEpochMs: 12_000,
+            durationMs: 48,
+            frequencyHz: 17_200,
+            endFrequencyHz: 19_200,
+          },
+        ],
+        acousticObservations: [
+          {
+            pulseId: "host-pulse",
+            detectedAtHostEpochMs: 10_006,
+            amplitude: 0.32,
+            confidence: 0.86,
+            clockUncertaintyMs: 2,
+          },
+        ],
+      },
+    ];
+
+    expect(deriveAcousticRanges(devices)).toEqual([
+      expect.objectContaining({
+        from: "host",
+        to: "phone-a",
+        pulseId: "phone-pulse",
+        pulseIds: ["host-pulse", "phone-pulse"],
+        samplesUsed: 2,
+        meters: 2.1,
+      }),
+    ]);
+  });
+
   test("rejects unmatched, negative, and implausibly late observations", () => {
     const devices: RoomDevice[] = [
       {

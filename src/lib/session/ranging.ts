@@ -21,6 +21,9 @@ type RawAcousticRange = AcousticRange & {
 };
 
 export function deriveAcousticRanges(devices: RoomDevice[]): AcousticRange[] {
+  const deviceOrder = new Map(
+    devices.map((device, index) => [device.deviceId, index]),
+  );
   const pulses = devices.flatMap((device) =>
     acousticPulseHistory(device).map((pulse) => ({
       device,
@@ -79,7 +82,7 @@ export function deriveAcousticRanges(devices: RoomDevice[]): AcousticRange[] {
     }
   }
 
-  return aggregateRanges(rawRanges).sort((a, b) =>
+  return aggregateRanges(rawRanges, deviceOrder).sort((a, b) =>
     `${a.from}:${a.to}:${a.pulseId}`.localeCompare(
       `${b.from}:${b.to}:${b.pulseId}`,
     ),
@@ -106,27 +109,36 @@ function acousticObservationHistory(device: RoomDevice) {
   );
 }
 
-function aggregateRanges(ranges: RawAcousticRange[]): AcousticRange[] {
-  const groups = new Map<string, RawAcousticRange[]>();
+function aggregateRanges(
+  ranges: RawAcousticRange[],
+  deviceOrder: Map<string, number>,
+): AcousticRange[] {
+  const groups = new Map<
+    string,
+    { from: string; to: string; ranges: RawAcousticRange[] }
+  >();
   for (const range of ranges) {
-    const key = `${range.from}:${range.to}`;
-    groups.set(key, [...(groups.get(key) ?? []), range]);
+    const pair = canonicalPair(range.from, range.to, deviceOrder);
+    const key = `${pair.from}:${pair.to}`;
+    const group = groups.get(key) ?? { ...pair, ranges: [] };
+    group.ranges.push(range);
+    groups.set(key, group);
   }
 
   return [...groups.values()].map((group) => {
-    const sorted = [...group].sort((a, b) => a.meters - b.meters);
+    const sorted = [...group.ranges].sort((a, b) => a.meters - b.meters);
     const median = sorted[Math.floor(sorted.length / 2)];
     const deviations = sorted
       .map((item) => Math.abs(item.meters - median.meters))
       .sort((a, b) => a - b);
     const medianDeviation = deviations[Math.floor(deviations.length / 2)] ?? 0;
     const threshold = Math.max(0.5, medianDeviation * 3);
-    const inliers = group.filter(
+    const inliers = group.ranges.filter(
       (item) =>
         item.confidence >= 0.2 &&
         Math.abs(item.meters - median.meters) <= threshold,
     );
-    const kept = inliers.length > 0 ? inliers : group;
+    const kept = inliers.length > 0 ? inliers : group.ranges;
     const weightSum = kept.reduce(
       (sum, item) => sum + Math.max(0.001, item.confidence),
       0,
@@ -149,8 +161,8 @@ function aggregateRanges(ranges: RawAcousticRange[]): AcousticRange[] {
     )[0];
 
     return {
-      from: latest.from,
-      to: latest.to,
+      from: group.from,
+      to: group.to,
       pulseId: latest.pulseId,
       pulseIds: kept
         .sort((a, b) => a.observedAtHostEpochMs - b.observedAtHostEpochMs)
@@ -169,6 +181,19 @@ function aggregateRanges(ranges: RawAcousticRange[]): AcousticRange[] {
       observedAtHostEpochMs: latest.observedAtHostEpochMs,
     };
   });
+}
+
+function canonicalPair(
+  a: string,
+  b: string,
+  deviceOrder: Map<string, number>,
+) {
+  const aOrder = deviceOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
+  const bOrder = deviceOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
+  if (aOrder < bOrder || (aOrder === bOrder && a.localeCompare(b) <= 0)) {
+    return { from: a, to: b };
+  }
+  return { from: b, to: a };
 }
 
 function uniqueBy<T>(items: T[], keyFor: (item: T) => string) {
