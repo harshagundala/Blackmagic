@@ -465,6 +465,80 @@ describe("session registry", () => {
     expect(state.ranges).toEqual([]);
   });
 
+  test("invalidates acoustic range history when a participant moves", () => {
+    let now = 20_000;
+    const registry = createSessionRegistry({ now: () => now });
+    const meters = 2.4;
+    const timeOfFlightSamples = Math.round((meters / 343) * 48_000);
+    const turnSamples = 48_000;
+    const hostSelfSample = 100_000;
+    const phoneHearHostSample = 220_000 + timeOfFlightSamples;
+
+    registry.claim("https://blackmagic.app/", "host");
+    registry.claim("https://blackmagic.app/", "phone-a");
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      acousticPulse: acousticPulse("host-pulse", 10_000),
+    });
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      acousticObservation: acousticObservation(
+        "host-pulse",
+        10_000,
+        hostSelfSample,
+      ),
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      acousticObservation: acousticObservation(
+        "host-pulse",
+        10_008,
+        phoneHearHostSample,
+      ),
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      acousticPulse: acousticPulse("phone-pulse", 14_000),
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      acousticObservation: acousticObservation(
+        "phone-pulse",
+        14_000,
+        phoneHearHostSample + turnSamples,
+      ),
+    });
+    const ranged = registry.heartbeat("https://blackmagic.app/", "host", {
+      acousticObservation: acousticObservation(
+        "phone-pulse",
+        14_008,
+        hostSelfSample + turnSamples + timeOfFlightSamples * 2,
+      ),
+    });
+
+    expect(ranged.ranges).toEqual([
+      expect.objectContaining({
+        from: "host",
+        to: "phone-a",
+        meters: 2.4,
+      }),
+    ]);
+
+    now = 21_000;
+    const moved = registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      motion: "active",
+      motionAccelerationMagnitude: 3.2,
+      motionRotationRateDegPerSec: 118,
+      motionStability: 0.14,
+    });
+    const phone = moved.devices.find((device) => device.deviceId === "phone-a");
+
+    expect(moved.ranges).toEqual([]);
+    expect(phone).toEqual(
+      expect.objectContaining({
+        acousticPulse: null,
+        acousticPulses: [],
+        acousticObservation: null,
+        acousticObservations: [],
+      }),
+    );
+  });
+
   test("prunes stale non-host phones while keeping an active host", () => {
     let now = 1_000;
     const registry = createSessionRegistry({ now: () => now, staleAfterMs: 5_000 });
@@ -536,5 +610,32 @@ function audioFrame() {
     audioElapsedMs: 1_000,
     hostEstimatedEpochMs: 1_700_000_001_000,
     timingConfidence: 0.88,
+  };
+}
+
+function acousticPulse(id: string, emittedAtHostEpochMs: number) {
+  return {
+    id,
+    emittedAtHostEpochMs,
+    durationMs: 48,
+    frequencyHz: 17_200,
+    endFrequencyHz: 19_200,
+    sampleRate: 48_000,
+  };
+}
+
+function acousticObservation(
+  pulseId: string,
+  detectedAtHostEpochMs: number,
+  detectedSampleIndex: number,
+) {
+  return {
+    pulseId,
+    detectedAtHostEpochMs,
+    detectedSampleIndex,
+    sampleRate: 48_000,
+    amplitude: 0.34,
+    confidence: 0.9,
+    clockUncertaintyMs: 2,
   };
 }

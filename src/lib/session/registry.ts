@@ -164,6 +164,7 @@ export type SessionRegistryOptions = {
 
 export const DEFAULT_STALE_AFTER_MS = 12_000;
 const MAX_ACOUSTIC_HISTORY = 8;
+const MIN_MOTION_STABILITY_FOR_RANGING = 0.35;
 
 export function createSessionRegistry(options: SessionRegistryOptions = {}) {
   const sessions = new Map<string, SessionRecord>();
@@ -442,16 +443,25 @@ export function mergeHeartbeat(
   heartbeat: DeviceHeartbeat,
 ): DeviceHeartbeat {
   const sanitized = sanitizeHeartbeat(heartbeat);
-  const acousticPulses = appendAcousticPulseHistory(
-    previous?.acousticPulses,
-    previous?.acousticPulse,
-    sanitized.acousticPulse,
-  );
-  const acousticObservations = appendAcousticObservationHistory(
-    previous?.acousticObservations,
-    previous?.acousticObservation,
-    sanitized.acousticObservation,
-  );
+  const resetAcousticHistory = shouldResetAcousticHistoryForMotion(sanitized);
+  const acousticPulse = resetAcousticHistory ? null : sanitized.acousticPulse;
+  const acousticObservation = resetAcousticHistory
+    ? null
+    : sanitized.acousticObservation;
+  const acousticPulses = resetAcousticHistory
+    ? []
+    : appendAcousticPulseHistory(
+        previous?.acousticPulses,
+        previous?.acousticPulse,
+        acousticPulse,
+      );
+  const acousticObservations = resetAcousticHistory
+    ? []
+    : appendAcousticObservationHistory(
+        previous?.acousticObservations,
+        previous?.acousticObservation,
+        acousticObservation,
+      );
   const voiceEvents = appendVoiceEventHistory(
     previous?.voiceEvents,
     previous?.voiceEvent,
@@ -460,10 +470,20 @@ export function mergeHeartbeat(
 
   return {
     ...sanitized,
+    acousticPulse,
+    acousticObservation,
     acousticPulses,
     acousticObservations,
     voiceEvents,
   };
+}
+
+function shouldResetAcousticHistoryForMotion(heartbeat: DeviceHeartbeat) {
+  return (
+    heartbeat.motion === "active" &&
+    typeof heartbeat.motionStability === "number" &&
+    heartbeat.motionStability < MIN_MOTION_STABILITY_FOR_RANGING
+  );
 }
 
 function appendAcousticPulseHistory(
