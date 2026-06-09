@@ -200,7 +200,10 @@ function deriveReciprocalRange(
     secondSelfAnchor,
   ];
   const meters = (propagationMs / 1_000) * SPEED_OF_SOUND_METERS_PER_SECOND;
-  const timingUncertaintyMs = reciprocalTimingUncertaintyMs(anchors);
+  const timingUncertaintyMs = reciprocalTimingUncertaintyMs(
+    anchors,
+    Math.max(intervalOnFirstMs, intervalOnSecondMs),
+  );
 
   return {
     from: first.device.deviceId,
@@ -214,7 +217,7 @@ function deriveReciprocalRange(
       (timingUncertaintyMs / 1_000) * SPEED_OF_SOUND_METERS_PER_SECOND,
       2,
     ),
-    confidence: reciprocalRangeConfidence(anchors),
+    confidence: reciprocalRangeConfidence(anchors, timingUncertaintyMs),
     observedAtHostEpochMs: Math.max(...anchors.map((anchor) => anchor.hostEpochMs)),
     amplitude: average(anchors.map((anchor) => anchor.amplitude)),
   };
@@ -231,7 +234,9 @@ function sampleAnchorFor({
     isUsableSampleRate(observation.sampleRate)
   ) {
     return {
-      sampleIndex: Math.round(observation.detectedSampleIndex),
+      // Keep the fractional sample index: the detector resolves sub-sample
+      // peaks and one sample is already ~7 mm of sound travel at 48 kHz.
+      sampleIndex: observation.detectedSampleIndex,
       sampleRate: observation.sampleRate,
       confidence: observation.confidence,
       amplitude: observation.amplitude,
@@ -259,20 +264,47 @@ function compatibleSampleRates(left: number, right: number) {
   return Math.abs(left - right) / Math.max(left, right) < 0.01;
 }
 
-function reciprocalTimingUncertaintyMs(anchors: SampleAnchor[]) {
-  return Math.max(
-    ...anchors.map((anchor) => 1_000 / anchor.sampleRate),
+// Relative audio-crystal rate tolerance between two phones (±25 ppm each).
+// The ETOA equation measures both intervals on different audio clocks, so
+// their rate mismatch over the reciprocal turn is the dominant error term.
+const RELATIVE_AUDIO_CLOCK_RATE_TOLERANCE = 5e-5;
+// Sub-sample interpolation leaves a residual fraction of one sample period.
+const SUBSAMPLE_RESIDUAL_FRACTION = 0.35;
+// A weak correlation peak in a reverberant room can sit anywhere inside the
+// correlation envelope (~1 / chirp bandwidth, about 0.5 ms for a 2 kHz sweep).
+const DETECTION_ENVELOPE_MS = 0.5;
+
+function reciprocalTimingUncertaintyMs(
+  anchors: SampleAnchor[],
+  turnIntervalMs: number,
+) {
+  // Host-clock offset uncertainty is deliberately absent: the reciprocal
+  // equation only uses same-device sample intervals, so it cancels.
+  const quantizationMs =
+    Math.max(...anchors.map((anchor) => 1_000 / anchor.sampleRate)) *
+    SUBSAMPLE_RESIDUAL_FRACTION;
+  const rateDriftMs =
+    Math.max(0, turnIntervalMs) * RELATIVE_AUDIO_CLOCK_RATE_TOLERANCE;
+  const worstConfidence = Math.min(
+    ...anchors.map((anchor) => Math.max(0, Math.min(1, anchor.confidence))),
   );
+  const detectionMs = DETECTION_ENVELOPE_MS * (1 - worstConfidence);
+
+  return quantizationMs + rateDriftMs + detectionMs;
 }
 
-function reciprocalRangeConfidence(anchors: SampleAnchor[]) {
+function reciprocalRangeConfidence(
+  anchors: SampleAnchor[],
+  timingUncertaintyMs: number,
+) {
   const confidenceMean = average(anchors.map((anchor) => anchor.confidence));
   const amplitudeScore = Math.min(
     1,
     Math.max(0, average(anchors.map((anchor) => anchor.amplitude))) / 0.28,
   );
+  const timingScore = 1 / (1 + Math.max(0, timingUncertaintyMs) / 2);
   return round(
-    Math.max(0, Math.min(1, confidenceMean * amplitudeScore)),
+    Math.max(0, Math.min(1, confidenceMean * amplitudeScore * timingScore)),
     3,
   );
 }

@@ -1,5 +1,6 @@
 export type DelayEstimate = {
   lagSamples: number;
+  refinedLagSamples: number;
   confidence: number;
   score: number;
 };
@@ -41,15 +42,17 @@ export function estimateDelaySamples(
   }
 
   if (reference.length === 0) {
-    return { lagSamples: 0, confidence: 0, score: 0 };
+    return { lagSamples: 0, refinedLagSamples: 0, confidence: 0, score: 0 };
   }
 
+  const scores = new Float64Array(2 * options.maxLag + 1);
   let bestLag = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   let secondBestScore = Number.NEGATIVE_INFINITY;
 
   for (let lag = -options.maxLag; lag <= options.maxLag; lag += 1) {
     const score = normalizedCorrelation(reference, observed, lag);
+    scores[lag + options.maxLag] = score;
 
     if (score > bestScore) {
       secondBestScore = bestScore;
@@ -65,9 +68,33 @@ export function estimateDelaySamples(
 
   return {
     lagSamples: bestLag,
+    refinedLagSamples: refinePeakLag(scores, bestLag, options.maxLag),
     confidence,
     score: bestScore,
   };
+}
+
+function refinePeakLag(scores: Float64Array, bestLag: number, maxLag: number) {
+  const index = bestLag + maxLag;
+  if (index <= 0 || index >= scores.length - 1) {
+    return bestLag;
+  }
+
+  const previous = scores[index - 1];
+  const peak = scores[index];
+  const next = scores[index + 1];
+  const curvature = previous - 2 * peak + next;
+  if (!(curvature < 0)) {
+    return bestLag;
+  }
+
+  // Parabolic vertex between integer lags recovers the band-limited peak.
+  const offset = (0.5 * (previous - next)) / curvature;
+  if (!Number.isFinite(offset)) {
+    return bestLag;
+  }
+
+  return bestLag + Math.max(-0.5, Math.min(0.5, offset));
 }
 
 function normalizedCorrelation(

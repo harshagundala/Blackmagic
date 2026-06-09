@@ -1,3 +1,4 @@
+import { isPlausibleAudioSnippet } from "../acoustics/audio-snippet";
 import {
   timestampConfidence,
   type AudioFrameTimestamp,
@@ -121,6 +122,38 @@ type SessionRecord = {
   changedAt: number;
   claims: Map<string, RoomDevice>;
 };
+
+// Raw-audio snippets are server-side reconciliation evidence (~2.6 KB per
+// voice event). Clients only need the refined timestamps the reconciler
+// derived from them, so API responses ship room state without the blobs.
+export function compactRoomStateForTransport(state: RoomState): RoomState {
+  return {
+    ...state,
+    devices: state.devices.map((device) => ({
+      ...device,
+      voiceEvent: stripAudioSnippet(device.voiceEvent),
+      voiceEvents: device.voiceEvents
+        ? device.voiceEvents.map((event) => stripAudioSnippet(event)!)
+        : device.voiceEvents,
+    })),
+    audioEvents: state.audioEvents.map((event) => ({
+      ...event,
+      observations: event.observations.map((observation) => ({
+        ...observation,
+        audioSnippet: null,
+      })),
+    })),
+  };
+}
+
+function stripAudioSnippet<T extends { audioSnippet?: unknown } | null | undefined>(
+  event: T,
+): T {
+  if (!event || !event.audioSnippet) {
+    return event;
+  }
+  return { ...event, audioSnippet: null };
+}
 
 export type SessionRegistry = ReturnType<typeof createSessionRegistry>;
 
@@ -267,8 +300,19 @@ export function selectRoomCalibrationTurn(
   devices: RoomDevice[],
   hostEpochNowMs: number,
 ) {
+  // Only devices that are actually capturing audio take emitter turns: a
+  // suspended or mic-blocked phone cannot self-record its chirp, so giving it
+  // a slot guarantees a wasted exchange. The filter runs on shared room
+  // state, so every device derives the same rotation.
+  const emitterCapable = devices.filter(
+    (device) => device.mic === "active" && device.audioFrame,
+  );
+  if (emitterCapable.length < 2) {
+    return null;
+  }
+
   return selectUpcomingCalibrationTurn(
-    devices.map((device) => device.deviceId),
+    emitterCapable.map((device) => device.deviceId),
     hostEpochNowMs,
   );
 }
@@ -577,7 +621,7 @@ function sanitizeAcousticPulse(
     emittedSampleIndex:
       emittedSampleIndex === null
         ? null
-        : Math.max(0, Math.round(emittedSampleIndex)),
+        : Math.max(0, roundSampleIndex(emittedSampleIndex)),
     sampleRate: sampleRate && sampleRate > 0 ? sampleRate : null,
     durationMs,
     frequencyHz,
@@ -615,7 +659,7 @@ function sanitizeAcousticObservation(
     detectedSampleIndex:
       detectedSampleIndex === null
         ? null
-        : Math.max(0, Math.round(detectedSampleIndex)),
+        : Math.max(0, roundSampleIndex(detectedSampleIndex)),
     sampleRate: sampleRate && sampleRate > 0 ? sampleRate : null,
     amplitude,
     confidence,
@@ -695,6 +739,23 @@ function sanitizeVoiceActivityEvent(
       }),
     motionStability,
     audioFingerprint: sanitizeSpeechFingerprint(event.audioFingerprint),
+    audioSnippet: isPlausibleAudioSnippet(event.audioSnippet)
+      ? {
+          sampleRate: event.audioSnippet.sampleRate,
+          sourceSampleRate: event.audioSnippet.sourceSampleRate,
+          startSampleIndex: Math.max(
+            0,
+            roundSampleIndex(event.audioSnippet.startSampleIndex),
+          ),
+          centerSampleIndex: Math.max(
+            0,
+            roundSampleIndex(event.audioSnippet.centerSampleIndex),
+          ),
+          windowMs: event.audioSnippet.windowMs,
+          peakLevel: Math.max(0, Math.min(1, event.audioSnippet.peakLevel)),
+          encodedSamples: event.audioSnippet.encodedSamples,
+        }
+      : null,
   };
 }
 
@@ -765,6 +826,12 @@ function sanitizeSpeechFingerprint(
   }
 
   return sanitized;
+}
+
+// Sub-sample detector precision matters at 48 kHz (one sample ≈ 7 mm of sound
+// travel), so sample indices keep three decimals instead of rounding to ints.
+function roundSampleIndex(value: number) {
+  return Number(value.toFixed(3));
 }
 
 function clampNumber(value: number | null | undefined, min: number, max: number) {

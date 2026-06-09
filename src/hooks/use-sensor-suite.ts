@@ -12,6 +12,7 @@ import {
 import {
   audioSampleTimestamp,
   estimateClockOffset,
+  projectClockModel,
   retainClockExchanges,
   robustClockModel,
   type AudioFrameTimestamp,
@@ -32,6 +33,7 @@ import {
   detectVoiceActivityEvent,
   type VoiceActivityGate,
 } from "@/lib/acoustics/voice-activity";
+import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
 import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
 import type { AcousticObservation, AcousticPulse } from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
@@ -42,6 +44,16 @@ import {
 } from "@/lib/sensors/fusion";
 
 type SensorState = "idle" | "active" | "blocked";
+
+export type CaptureProcessingReport = {
+  echoCancellation: boolean | null;
+  noiseSuppression: boolean | null;
+  autoGainControl: boolean | null;
+  // True only when the browser confirmed all voice processing is off. iOS
+  // Safari can silently ignore the constraints; detection quality drops when
+  // it does, so the UI and confidence scoring need to know.
+  rawCaptureVerified: boolean;
+};
 
 export type SensorSnapshot = MotionSensorMetadata & {
   mic: SensorState;
@@ -67,6 +79,8 @@ export type SensorSnapshot = MotionSensorMetadata & {
   locationSpeedMetersPerSecond: number | null;
   locationCapturedAtEpochMs: number | null;
   clock: ClockModel | null;
+  captureProcessing: CaptureProcessingReport | null;
+  audioContextState: AudioContextState | null;
 };
 
 const idleSnapshot: SensorSnapshot = {
@@ -94,11 +108,14 @@ const idleSnapshot: SensorSnapshot = {
   locationSpeedMetersPerSecond: null,
   locationCapturedAtEpochMs: null,
   clock: null,
+  captureProcessing: null,
+  audioContextState: null,
 };
 
 const CLOCK_SYNC_INTERVAL_MS = 1_000;
 const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
+const MAX_CLOCK_SEARCH_SLACK_MS = 120;
 const ANALYSER_WINDOW_SAMPLES = 4096;
 const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
 const STREAMING_MATCH_MAX_LATE_MS = 45;
@@ -124,6 +141,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const clockExchangesRef = useRef<ClockExchange[]>([]);
   const clockModelRef = useRef<ClockModel | null>(null);
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const lifecycleCleanupRef = useRef<(() => void) | null>(null);
   const voiceGateRef = useRef<VoiceActivityGate>({
     open: false,
     lastEventHostEpochMs: null,
@@ -153,6 +172,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       locationWatchRef.current = null;
     }
     clockSyncRunRef.current += 1;
+    lifecycleCleanupRef.current?.();
+    lifecycleCleanupRef.current = null;
+    void wakeLockRef.current?.release().catch(() => undefined);
+    wakeLockRef.current = null;
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -234,12 +257,42 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       });
       mediaStreamRef.current = stream;
 
+      // Verify what the browser actually granted: iOS Safari treats audio
+      // constraints as best-effort and active voice processing attenuates the
+      // near-ultrasound chirp band.
+      const audioTrack = stream.getAudioTracks()[0] ?? null;
+      const trackSettings = audioTrack?.getSettings?.() ?? null;
+      const captureProcessing: CaptureProcessingReport = {
+        echoCancellation: booleanOrNull(trackSettings?.echoCancellation),
+        noiseSuppression: booleanOrNull(trackSettings?.noiseSuppression),
+        autoGainControl: booleanOrNull(trackSettings?.autoGainControl),
+        rawCaptureVerified:
+          trackSettings?.echoCancellation === false &&
+          trackSettings?.noiseSuppression === false &&
+          trackSettings?.autoGainControl === false,
+      };
+
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       const audioContext = new AudioContextClass();
       if (audioContext.state === "suspended") {
         await audioContext.resume().catch(() => undefined);
       }
       audioContextRef.current = audioContext;
+      setSnapshot((current) => ({
+        ...current,
+        captureProcessing,
+        audioContextState: audioContext.state,
+      }));
+      lifecycleCleanupRef.current = attachAudioLifecycle({
+        audioContext,
+        audioTrack,
+        wakeLockRef,
+        setSnapshot,
+        resyncClock: () =>
+          void syncClock(setSnapshot, clockExchangesRef, (clock) => {
+            clockModelRef.current = clock;
+          }),
+      });
       const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
       rollingAudioRef.current = rollingAudio;
       const streamingMatcher = new StreamingPulseMatcher({
@@ -394,6 +447,75 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   }
 }
 
+// iOS Safari suspends the audio context on tab backgrounding, phone calls,
+// and Siri, throttles timers while hidden, and auto-locks the screen during a
+// passive listening session. This wires the recovery paths: resume the
+// context on state changes and visibility, hold a screen wake lock so the
+// session survives, surface mic-track loss, and re-sync the clock as soon as
+// the page returns (it drifted while throttled).
+function attachAudioLifecycle({
+  audioContext,
+  audioTrack,
+  wakeLockRef,
+  setSnapshot,
+  resyncClock,
+}: {
+  audioContext: AudioContext;
+  audioTrack: MediaStreamTrack | null;
+  wakeLockRef: MutableRefObject<WakeLockSentinel | null>;
+  setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>;
+  resyncClock: () => void;
+}) {
+  const requestWakeLock = async () => {
+    try {
+      wakeLockRef.current =
+        (await navigator.wakeLock?.request("screen")) ?? null;
+    } catch {
+      wakeLockRef.current = null;
+    }
+  };
+
+  const onAudioStateChange = () => {
+    setSnapshot((current) => ({
+      ...current,
+      audioContextState: audioContext.state,
+    }));
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().catch(() => undefined);
+    }
+  };
+
+  const onVisibilityChange = () => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().catch(() => undefined);
+    }
+    void requestWakeLock();
+    resyncClock();
+  };
+
+  const onTrackEnded = () => {
+    setSnapshot((current) => ({ ...current, mic: "blocked" }));
+  };
+
+  audioContext.addEventListener("statechange", onAudioStateChange);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  audioTrack?.addEventListener("ended", onTrackEnded);
+  void requestWakeLock();
+
+  return () => {
+    audioContext.removeEventListener("statechange", onAudioStateChange);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    audioTrack?.removeEventListener("ended", onTrackEnded);
+  };
+}
+
+function booleanOrNull(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
 async function requestMotionPermission() {
   const orientation =
     typeof DeviceOrientationEvent === "undefined"
@@ -423,6 +545,7 @@ async function syncClock(
     const server = (await response.json()) as {
       serverReceiveEpochMs: number;
       serverSendEpochMs: number;
+      serverInstanceId?: string | null;
     };
 
     const exchange: ClockExchange = {
@@ -431,6 +554,7 @@ async function syncClock(
       serverReceiveEpochMs: server.serverReceiveEpochMs,
       serverSendEpochMs: server.serverSendEpochMs,
       clientReceivePerfMs,
+      serverInstanceId: server.serverInstanceId ?? null,
     };
     const estimate = estimateClockOffset(exchange);
     exchangesRef.current = retainClockExchanges(exchangesRef.current, exchange);
@@ -520,10 +644,21 @@ function attachSpeechFingerprint(
     bins: 32,
     alignmentBins: 96,
   });
+  // The raw-audio snippet is what lets the room reconciler run GCC-PHAT over
+  // what this microphone actually heard; the fingerprint stays as a cheap
+  // fallback when a peer cannot provide a snippet.
+  const audioSnippet = captureAudioSnippet({
+    samples: audioWindow.samples,
+    sampleRate: audioWindow.sampleRate,
+    startSampleIndex: audioWindow.startSampleIndex,
+    centerSampleIndex: event.sampleIndex,
+    windowMs: 240,
+  });
 
   return {
     ...event,
     audioFingerprint,
+    audioSnippet,
   };
 }
 
@@ -619,19 +754,31 @@ function updateStreamingMatcherPulse(
     return;
   }
 
+  // Widen the detector search window by the current clock error bound so a
+  // pulse is not missed just because this device's host-clock estimate is
+  // early or late. Capped so a degraded clock cannot explode the search cost.
+  const projected = projectClockModel(clock, performance.now());
+  const clockSlackMs = Math.min(
+    MAX_CLOCK_SEARCH_SLACK_MS,
+    Math.max(0, Number.isFinite(projected.maxErrorMs) ? projected.maxErrorMs : MAX_CLOCK_SEARCH_SLACK_MS),
+  );
+  const clockSlackSamples = Math.ceil(
+    (clockSlackMs / 1_000) * audioContext.sampleRate,
+  );
+
   matcher.track({
     id: pulse.id,
     frequencyHz: pulse.frequencyHz,
     endFrequencyHz: pulse.endFrequencyHz,
     durationMs: pulse.durationMs,
-    expectedStartSampleIndex: hostEpochMsToSampleIndex(
-      pulse.emittedAtHostEpochMs,
-      audioContext,
-      clock,
+    expectedStartSampleIndex: Math.max(
+      0,
+      hostEpochMsToSampleIndex(pulse.emittedAtHostEpochMs, audioContext, clock) -
+        clockSlackSamples,
     ),
-    maxLateSamples: Math.ceil(
-      (STREAMING_MATCH_MAX_LATE_MS / 1_000) * audioContext.sampleRate,
-    ),
+    maxLateSamples:
+      Math.ceil((STREAMING_MATCH_MAX_LATE_MS / 1_000) * audioContext.sampleRate) +
+      2 * clockSlackSamples,
   });
 }
 
@@ -652,7 +799,7 @@ function hostEpochMsToSampleIndex(
   const clientPerformanceNowMs =
     hostEpochMs -
     (performance.timeOrigin || Date.now() - performance.now()) -
-    clock.offsetMs;
+    projectClockModel(clock, performance.now()).offsetMs;
   const targetAudioContextTimeSeconds =
     anchorAudioContextTimeSeconds +
     (clientPerformanceNowMs - anchorPerformanceNowMs) / 1_000;
@@ -701,6 +848,10 @@ function timestampAudioFrame(
   const sampleIndex = Math.round(
     audioContextTimeSeconds * audioContext.sampleRate,
   );
+  // Project the clock to "now" so drift since the last echo exchange moves
+  // the offset instead of silently widening the error, and staleness honestly
+  // widens the published uncertainty.
+  const projected = projectClockModel(clock, performanceNowMs);
 
   return audioSampleTimestamp({
     anchorAudioContextTimeSeconds: audioContextTimeSeconds,
@@ -708,10 +859,10 @@ function timestampAudioFrame(
     sampleIndex,
     sampleRate: audioContext.sampleRate,
     clientPerfOriginEpochMs: performance.timeOrigin || Date.now() - performance.now(),
-    clockOffsetMs: clock.offsetMs,
-    clockUncertaintyMs: clock.uncertaintyMs,
+    clockOffsetMs: projected.offsetMs,
+    clockUncertaintyMs: projected.uncertaintyMs,
     clockQuality: clock.quality,
-    clockMaxErrorMs: clock.maxErrorMs,
+    clockMaxErrorMs: projected.maxErrorMs,
     clockBestRoundTripMs: clock.bestRoundTripMs,
     clockJitterMs: clock.jitterMs,
     clockSamplesUsed: clock.samplesUsed,

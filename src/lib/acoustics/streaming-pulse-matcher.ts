@@ -1,6 +1,7 @@
 import {
   detectPulse,
   synthesizePulseTemplate,
+  synthesizeQuadraturePulseTemplate,
   type PulseDetection,
 } from "./pulse-detector";
 import { RollingSampleBuffer } from "./rolling-buffer";
@@ -77,12 +78,15 @@ export class StreamingPulseMatcher {
       return null;
     }
 
-    const template = synthesizePulseTemplate({
+    const templateOptions = {
       frequencyHz: pulse.frequencyHz,
       endFrequencyHz: pulse.endFrequencyHz ?? undefined,
       durationMs: pulse.durationMs,
       sampleRate: this.options.sampleRate,
-    });
+    };
+    const template = synthesizePulseTemplate(templateOptions);
+    const quadratureTemplate =
+      synthesizeQuadraturePulseTemplate(templateOptions);
     const searchStartSample = Math.max(
       0,
       pulse.expectedStartSampleIndex - window.startSampleIndex,
@@ -102,6 +106,7 @@ export class StreamingPulseMatcher {
       searchEndSample,
       minScore: this.options.minScore,
       minPeakRatio: this.options.minPeakRatio,
+      quadratureTemplate,
     });
     if (!detection) {
       return null;
@@ -109,7 +114,7 @@ export class StreamingPulseMatcher {
 
     const nextDetection = {
       pulseId: pulse.id,
-      startSampleIndex: window.startSampleIndex + detection.startSample,
+      startSampleIndex: window.startSampleIndex + detection.refinedStartSample,
       detection,
     };
     if (!shouldEmitDetection(this.emittedDetection, nextDetection)) {

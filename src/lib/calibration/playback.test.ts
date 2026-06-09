@@ -89,7 +89,7 @@ function fakeAudioContext() {
 
 function fakeOscillator() {
   return {
-    type: "sine",
+    type: "sine" as OscillatorType,
     frequency: {
       setValueAtTime: vi.fn(),
       linearRampToValueAtTime: vi.fn(),

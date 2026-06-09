@@ -14,18 +14,23 @@ type SessionClaimResponse = {
   sessionKey: string;
 };
 
+export type RoomConnectionState = "connecting" | "live" | "reconnecting";
+
 type RoomSession = {
   deviceId: string;
   role: SessionRole | null;
   roomState: RoomState | null;
   claimReady: boolean;
+  connection: RoomConnectionState;
+  // Resolves true only when the server acknowledged the heartbeat; calibration
+  // emitters use this to confirm a pulse advertisement landed before playing.
   heartbeat: (
     snapshot: SensorSnapshot,
     calibration?: Pick<
       DeviceHeartbeat,
       "acousticPulse" | "acousticObservation"
     >,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 };
 
 export type RoomSessionOptions = {
@@ -39,6 +44,9 @@ export function useRoomSession({
   const [role, setRole] = useState<SessionRole | null>(null);
   const [sessionKey, setSessionKey] = useState("");
   const [roomState, setRoomState] = useState<RoomState | null>(null);
+  const [connection, setConnection] = useState<RoomConnectionState>(
+    "connecting",
+  );
   const urlRef = useRef("");
   const roomRevisionRef = useRef(0);
 
@@ -91,17 +99,19 @@ export function useRoomSession({
     applyRoomState(state);
   }, [applyRoomState]);
 
-  useEffect(() => {
-    void pollState();
-    const timer = window.setInterval(() => void pollState(), pollIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [pollIntervalMs, pollState, sessionKey]);
-
+  // One transport loop: the long-poll wait endpoint both pushes changes and,
+  // on its server-side timeout, acts as the periodic refresh — running an
+  // interval poll alongside it only doubled traffic. Errors back off
+  // exponentially and surface as a connection state instead of being silent.
   useEffect(() => {
     let cancelled = false;
     let controller: AbortController | null = null;
+    let failureCount = 0;
 
     async function waitForChanges() {
+      // Fast first paint before the long-poll settles in.
+      await pollState().catch(() => undefined);
+
       while (!cancelled) {
         if (!urlRef.current) {
           await sleep(250);
@@ -122,6 +132,8 @@ export function useRoomSession({
           });
           if (response.ok) {
             applyRoomState((await response.json()) as RoomState);
+            failureCount = 0;
+            setConnection("live");
             continue;
           }
         } catch {
@@ -130,7 +142,13 @@ export function useRoomSession({
           }
         }
 
-        await sleep(Math.min(1_000, pollIntervalMs));
+        failureCount += 1;
+        setConnection(failureCount >= 2 ? "reconnecting" : "live");
+        const backoffMs = Math.min(
+          5_000,
+          Math.min(1_000, pollIntervalMs) * 2 ** Math.min(4, failureCount - 1),
+        );
+        await sleep(backoffMs);
       }
     }
 
@@ -139,7 +157,19 @@ export function useRoomSession({
       cancelled = true;
       controller?.abort();
     };
-  }, [applyRoomState, pollIntervalMs, sessionKey]);
+  }, [applyRoomState, pollIntervalMs, pollState, sessionKey]);
+
+  // iOS Safari freezes timers and sockets while the tab is hidden. On return,
+  // resync immediately instead of waiting for the next long-poll cycle.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void pollState().catch(() => undefined);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [pollState]);
 
   const heartbeat = useCallback(
     async (
@@ -150,7 +180,7 @@ export function useRoomSession({
       > = {},
     ) => {
       if (!urlRef.current) {
-        return;
+        return false;
       }
 
       const response = await fetch("/api/session/heartbeat", {
@@ -210,10 +240,17 @@ export function useRoomSession({
             locationCapturedAtEpochMs: snapshot.locationCapturedAtEpochMs,
           },
         }),
-      });
-      if (response.ok) {
-        applyRoomState((await response.json()) as RoomState);
+      }).catch(() => null);
+      if (response?.ok) {
+        const state = (await response
+          .json()
+          .catch(() => null)) as RoomState | null;
+        if (state) {
+          applyRoomState(state);
+          return true;
+        }
       }
+      return false;
     },
     [applyRoomState, deviceId],
   );
@@ -223,6 +260,7 @@ export function useRoomSession({
     role,
     roomState,
     claimReady: role !== null,
+    connection,
     heartbeat,
   };
 }

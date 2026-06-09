@@ -2,6 +2,7 @@ import {
   estimateConstellation,
   type ConstellationLayout,
   type PairwiseDistance,
+  type PhonePoint,
 } from "./layout";
 import type { RoomState, SessionRole } from "@/lib/session/registry";
 import type { ReconciledAudioEvent } from "@/lib/session/audio-events";
@@ -21,11 +22,16 @@ export type RoomConstellation = {
   layout: ConstellationLayout;
   devices: RoomConstellationDevice[];
   audioSources: RoomAudioSourceHint[];
+  // Solved points in the anchor-centered frame, before the perspective
+  // transform. Feed these back as previousCanonicalPoints on the next frame
+  // so the solver stays rotation/reflection-stable over time.
+  canonicalPoints: Record<string, PhonePoint>;
 };
 
 export type RoomConstellationOptions = {
   perspectiveDeviceId?: string | null;
   headingDegrees?: number | null;
+  previousCanonicalPoints?: Record<string, PhonePoint> | null;
 };
 
 export type RoomAudioSourceHint = {
@@ -59,6 +65,7 @@ export function estimateRoomConstellation(
   const layout = estimateConstellation(participantIds, distances, {
     anchorId: room.hostDeviceId,
     iterations: distances.length > 0 ? 850 : 0,
+    previousPoints: options.previousCanonicalPoints ?? null,
   });
   const localizedDeviceIds = localizedDevicesFor(ranges);
   const honestLayout = {
@@ -105,6 +112,7 @@ export function estimateRoomConstellation(
         room.updatedAt,
         localizationDeviceIds,
       ),
+      canonicalPoints: { ...honestLayout.points },
     },
     room,
     options,
@@ -170,6 +178,7 @@ function applyPerspective(
       ...source,
       ...transformPoint(source),
     })),
+    canonicalPoints: constellation.canonicalPoints,
   };
 }
 

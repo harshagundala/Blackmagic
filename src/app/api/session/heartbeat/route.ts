@@ -1,5 +1,8 @@
 import { getSessionStore } from "@/lib/session/server-registry";
-import type { DeviceHeartbeat } from "@/lib/session/registry";
+import {
+  compactRoomStateForTransport,
+  type DeviceHeartbeat,
+} from "@/lib/session/registry";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
@@ -17,5 +20,5 @@ export async function POST(request: Request) {
     body.deviceId,
     body.heartbeat,
   );
-  return Response.json(state);
+  return Response.json(compactRoomStateForTransport(state));
 }

@@ -12,10 +12,12 @@ export type PulseDetectionOptions = {
   minPeakRatio?: number;
   searchStartSample?: number;
   searchEndSample?: number;
+  quadratureTemplate?: Float32Array | number[];
 };
 
 export type PulseDetection = {
   startSample: number;
+  refinedStartSample: number;
   score: number;
   peakRatio: number;
   confidence: number;
@@ -37,12 +39,28 @@ export function synthesizeTonePulse({
   });
 }
 
-export function synthesizePulseTemplate({
-  frequencyHz,
-  endFrequencyHz,
-  durationMs,
-  sampleRate,
-}: TonePulseOptions) {
+export function synthesizePulseTemplate(options: TonePulseOptions) {
+  return synthesizePhasedPulseTemplate(options, 0);
+}
+
+// The quadrature (90-degree shifted) copy of the template lets the detector
+// score the correlation envelope instead of the raw carrier. Near Nyquist the
+// real correlation oscillates at the carrier period, so envelope scoring is
+// what prevents the matcher from locking onto a neighboring carrier cycle and
+// keeps detection robust to phase shifts from device audio processing.
+export function synthesizeQuadraturePulseTemplate(options: TonePulseOptions) {
+  return synthesizePhasedPulseTemplate(options, Math.PI / 2);
+}
+
+function synthesizePhasedPulseTemplate(
+  {
+    frequencyHz,
+    endFrequencyHz,
+    durationMs,
+    sampleRate,
+  }: TonePulseOptions,
+  phaseOffsetRadians: number,
+) {
   const length = Math.max(1, Math.round((durationMs / 1_000) * sampleRate));
   const samples = new Float32Array(length);
   const durationSeconds = durationMs / 1_000;
@@ -55,8 +73,9 @@ export function synthesizePulseTemplate({
     const seconds = index / sampleRate;
     const phase =
       2 *
-      Math.PI *
-      (frequencyHz * seconds + 0.5 * sweepHzPerSecond * seconds * seconds);
+        Math.PI *
+        (frequencyHz * seconds + 0.5 * sweepHzPerSecond * seconds * seconds) +
+      phaseOffsetRadians;
     const taper =
       samples.length === 1
         ? 1
@@ -89,12 +108,30 @@ export function detectPulse(
     return null;
   }
 
+  const quadrature = options.quadratureTemplate ?? null;
+  const quadratureEnergy =
+    quadrature && quadrature.length === template.length
+      ? energy(quadrature, 0, quadrature.length)
+      : 0;
+  const scoreAt =
+    quadrature && quadratureEnergy > 0
+      ? (offset: number) =>
+          envelopeTemplateScore(
+            samples,
+            template,
+            quadrature,
+            offset,
+            (templateEnergy + quadratureEnergy) / 2,
+          )
+      : (offset: number) =>
+          normalizedTemplateScore(samples, template, offset, templateEnergy);
+
   let bestStart = start;
   let bestScore = Number.NEGATIVE_INFINITY;
   let bestStrength = Number.NEGATIVE_INFINITY;
 
   for (let offset = start; offset <= end; offset += 1) {
-    const score = normalizedTemplateScore(samples, template, offset, templateEnergy);
+    const score = scoreAt(offset);
     const strength = score * rmsAt(samples, offset, template.length);
     if (
       score > bestScore + SCORE_TIE_EPSILON ||
@@ -113,10 +150,9 @@ export function detectPulse(
     if (Math.abs(offset - bestStart) <= exclusionRadius) {
       continue;
     }
-    const score = normalizedTemplateScore(samples, template, offset, templateEnergy);
     secondBestStrength = Math.max(
       secondBestStrength,
-      score * rmsAt(samples, offset, template.length),
+      scoreAt(offset) * rmsAt(samples, offset, template.length),
     );
   }
 
@@ -128,6 +164,13 @@ export function detectPulse(
     return null;
   }
 
+  const refinedStartSample = refinePeakSample(
+    scoreAt,
+    bestStart,
+    start,
+    end,
+    bestScore,
+  );
   const segment = samples.slice(bestStart, bestStart + template.length);
   const scoreConfidence = (bestScore - minScore) / Math.max(0.001, 1 - minScore);
   const ratioConfidence =
@@ -138,12 +181,41 @@ export function detectPulse(
 
   return {
     startSample: bestStart,
+    refinedStartSample: round(refinedStartSample, 3),
     score: round(bestScore, 4),
     peakRatio: round(peakRatio, 3),
     confidence: round(clamp01(scoreConfidence) * gatedPeakConfidence, 3),
     amplitude: round(maxAbs(segment), 4),
     rms: round(rms(segment), 4),
   };
+}
+
+function refinePeakSample(
+  scoreAt: (offset: number) => number,
+  bestStart: number,
+  searchStart: number,
+  searchEnd: number,
+  bestScore: number,
+) {
+  if (bestStart <= searchStart || bestStart >= searchEnd) {
+    return bestStart;
+  }
+
+  const previous = scoreAt(bestStart - 1);
+  const next = scoreAt(bestStart + 1);
+  const curvature = previous - 2 * bestScore + next;
+  if (!(curvature < 0)) {
+    return bestStart;
+  }
+
+  // Parabolic vertex of the three-point correlation neighborhood; the true
+  // peak of a band-limited correlation can sit between integer lags.
+  const offset = (0.5 * (previous - next)) / curvature;
+  if (!Number.isFinite(offset)) {
+    return bestStart;
+  }
+
+  return bestStart + Math.max(-0.5, Math.min(0.5, offset));
 }
 
 function normalizedTemplateScore(
@@ -163,6 +235,29 @@ function normalizedTemplateScore(
 
   const denominator = Math.sqrt(templateEnergy * segmentEnergy);
   return denominator === 0 ? 0 : dot / denominator;
+}
+
+function envelopeTemplateScore(
+  samples: Float32Array | number[],
+  inPhase: Float32Array | number[],
+  quadrature: Float32Array | number[],
+  start: number,
+  meanTemplateEnergy: number,
+) {
+  let dotI = 0;
+  let dotQ = 0;
+  let segmentEnergy = 0;
+  for (let index = 0; index < inPhase.length; index += 1) {
+    const sample = samples[start + index];
+    dotI += sample * inPhase[index];
+    dotQ += sample * quadrature[index];
+    segmentEnergy += sample * sample;
+  }
+
+  const denominator = Math.sqrt(meanTemplateEnergy * segmentEnergy);
+  return denominator === 0
+    ? 0
+    : Math.sqrt(dotI * dotI + dotQ * dotQ) / denominator;
 }
 
 function energy(samples: Float32Array | number[], start: number, length: number) {

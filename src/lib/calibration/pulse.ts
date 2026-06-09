@@ -5,6 +5,7 @@ import type {
 import {
   detectPulse,
   synthesizePulseTemplate,
+  synthesizeQuadraturePulseTemplate,
   type PulseDetectionOptions,
 } from "../acoustics/pulse-detector";
 import {
@@ -119,19 +120,23 @@ export function createMatchedToneObservation({
   audioWindow,
   ...detectionOptions
 }: MatchedToneObservationInput): AcousticObservation | null {
-  const template = synthesizePulseTemplate({
+  const templateOptions = {
     frequencyHz: pulse.frequencyHz,
     endFrequencyHz: pulse.endFrequencyHz ?? undefined,
     durationMs: pulse.durationMs,
     sampleRate: audioWindow.sampleRate,
+  };
+  const template = synthesizePulseTemplate(templateOptions);
+  const detection = detectPulse(audioWindow.samples, template, {
+    quadratureTemplate: synthesizeQuadraturePulseTemplate(templateOptions),
+    ...detectionOptions,
   });
-  const detection = detectPulse(audioWindow.samples, template, detectionOptions);
   if (!detection) {
     return null;
   }
 
   const detectedSampleIndex =
-    audioWindow.startSampleIndex + detection.startSample;
+    audioWindow.startSampleIndex + detection.refinedStartSample;
   const timestamp = audioSampleTimestamp({
     sampleIndex: detectedSampleIndex,
     sampleRate: audioWindow.sampleRate,

@@ -33,7 +33,7 @@ describe("streaming pulse matcher", () => {
     };
     const template = synthesizePulseTemplate({
       frequencyHz: pulse.frequencyHz,
-      endFrequencyHz: pulse.endFrequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz ?? undefined,
       durationMs: pulse.durationMs,
       sampleRate,
     });
@@ -73,7 +73,7 @@ describe("streaming pulse matcher", () => {
     };
     const template = synthesizePulseTemplate({
       frequencyHz: pulse.frequencyHz,
-      endFrequencyHz: pulse.endFrequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz ?? undefined,
       durationMs: pulse.durationMs,
       sampleRate,
     });
@@ -106,7 +106,7 @@ describe("streaming pulse matcher", () => {
     };
     const template = synthesizePulseTemplate({
       frequencyHz: pulse.frequencyHz,
-      endFrequencyHz: pulse.endFrequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz ?? undefined,
       durationMs: pulse.durationMs,
       sampleRate,
     });

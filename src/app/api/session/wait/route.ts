@@ -1,3 +1,4 @@
+import { compactRoomStateForTransport } from "@/lib/session/registry";
 import { getSessionStore } from "@/lib/session/server-registry";
 import { waitForRoomStateRevision } from "@/lib/session/wait";
 
@@ -21,10 +22,12 @@ export async function GET(request: Request) {
   );
 
   return Response.json(
-    await waitForRoomStateRevision(getSessionStore(), sessionUrl, {
-      afterRevision,
-      timeoutMs,
-    }),
+    compactRoomStateForTransport(
+      await waitForRoomStateRevision(getSessionStore(), sessionUrl, {
+        afterRevision,
+        timeoutMs,
+      }),
+    ),
   );
 }
 

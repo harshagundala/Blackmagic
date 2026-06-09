@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createSessionRegistry } from "./registry";
+import { createSessionRegistry, type DeviceHeartbeat } from "./registry";
 
 describe("session registry", () => {
   test("makes the first device at a URL the host", () => {
@@ -49,7 +49,14 @@ describe("session registry", () => {
     registry.claim("https://blackmagic.app/", "host");
     expect(registry.state("https://blackmagic.app/").calibrationTurn).toBeNull();
 
-    registry.claim("https://blackmagic.app/", "phone-a");
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      mic: "active",
+      audioFrame: audioFrame(),
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      mic: "active",
+      audioFrame: audioFrame(),
+    });
 
     expect(registry.state("https://blackmagic.app/").calibrationTurn).toEqual({
       emitterId: "host",
@@ -58,6 +65,18 @@ describe("session registry", () => {
       pulseEmittedAtHostEpochMs: 3_400,
       pulseDurationMs: 48,
     });
+  });
+
+  test("waits for two capture-ready devices before publishing calibration turns", () => {
+    const registry = createSessionRegistry({ now: () => 100 });
+
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      mic: "active",
+      audioFrame: audioFrame(),
+    });
+    registry.claim("https://blackmagic.app/", "phone-a");
+
+    expect(registry.state("https://blackmagic.app/").calibrationTurn).toBeNull();
   });
 
   test("summarizes room time sync health for localization gating", () => {
@@ -154,6 +173,7 @@ describe("session registry", () => {
         clockOffsetStabilityMs: 0.9,
         audioElapsedMs: 10_000,
         hostEstimatedEpochMs: 1_700_000_002_002,
+        timingConfidence: 0.74,
       },
       motion: "active",
       heading: "idle",
@@ -279,7 +299,7 @@ describe("session registry", () => {
     const registry = createSessionRegistry({ now: () => 30_000 });
 
     registry.claim("https://blackmagic.app/", "host");
-    const heartbeat = {
+    const heartbeat: DeviceHeartbeat = {
       motion: "active",
       motionAccelerationMagnitude: 0.42,
       motionRotationRateDegPerSec: 3.5,
@@ -496,3 +516,25 @@ describe("session registry", () => {
     ]);
   });
 });
+
+function audioFrame() {
+  return {
+    audioContextTimeSeconds: 1,
+    sampleIndex: 48_000,
+    sampleRate: 48_000,
+    clientPerfOriginEpochMs: 1_700_000_000_000,
+    performanceNowMs: 1_000,
+    clockOffsetMs: 0,
+    clockUncertaintyMs: 2,
+    clockQuality: 0.98,
+    clockMaxErrorMs: 3,
+    clockBestRoundTripMs: 6,
+    clockJitterMs: 0.3,
+    clockSamplesUsed: 8,
+    clockOutliersRejected: 0,
+    clockOffsetStabilityMs: 0.3,
+    audioElapsedMs: 1_000,
+    hostEstimatedEpochMs: 1_700_000_001_000,
+    timingConfidence: 0.88,
+  };
+}

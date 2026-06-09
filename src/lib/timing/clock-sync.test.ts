@@ -3,6 +3,7 @@ import {
   audioFrameTimestamp,
   audioSampleTimestamp,
   estimateClockOffset,
+  projectClockModel,
   retainClockExchanges,
   robustClockModel,
   type ClockExchange,
@@ -38,10 +39,61 @@ describe("clock sync metadata", () => {
     expect(model.offsetMs).toBeCloseTo(101, 1);
     expect(model.bestRoundTripMs).toBe(28);
     expect(model.jitterMs).toBeCloseTo(0.816, 3);
-    expect(model.maxErrorMs).toBeCloseTo(14.816, 3);
-    expect(model.uncertaintyMs).toBeLessThan(20);
+    // Conservative bound: best half-round-trip plus twice the offset scatter.
+    expect(model.maxErrorMs).toBeCloseTo(15.633, 3);
+    expect(model.uncertaintyMs).toBeLessThan(model.maxErrorMs);
     expect(model.quality).toBeGreaterThan(0.8);
     expect(model.samplesUsed).toBe(3);
+    expect(model.driftMsPerSecond).toBe(0);
+  });
+
+  test("models only the dominant server instance when exchanges mix instances", () => {
+    const sameInstance = [
+      makeExchange(100, 30, { instanceId: "a", receiveAtPerfMs: 1_100 }),
+      makeExchange(101, 28, { instanceId: "a", receiveAtPerfMs: 1_400 }),
+      makeExchange(100, 32, { instanceId: "a", receiveAtPerfMs: 1_700 }),
+    ];
+    const skewedInstance = [
+      makeExchange(146, 26, { instanceId: "b", receiveAtPerfMs: 1_550 }),
+    ];
+
+    const model = robustClockModel([...sameInstance, ...skewedInstance]);
+
+    expect(model.offsetMs).toBeCloseTo(100, 0);
+    expect(model.crossInstanceRejected).toBe(1);
+  });
+
+  test("fits clock drift over a long exchange history and projects it forward", () => {
+    // 0.1 ms/s drift: offset grows by 1 ms every 10 seconds.
+    const exchanges = Array.from({ length: 10 }, (_, index) =>
+      makeExchange(100 + index * 0.1, 24, {
+        receiveAtPerfMs: 1_000 + index * 1_000,
+      }),
+    );
+
+    const model = robustClockModel(exchanges);
+
+    expect(model.driftMsPerSecond).toBeCloseTo(0.0001 * 1_000, 2);
+    expect(model.sampleSpanMs).toBeGreaterThanOrEqual(6_000);
+
+    const projected = projectClockModel(model, model.referencePerfMs! + 10_000);
+    expect(projected.ageMs).toBe(10_000);
+    expect(projected.offsetMs).toBeCloseTo(model.offsetMs + 1, 0);
+    expect(projected.uncertaintyMs).toBeGreaterThan(model.uncertaintyMs);
+  });
+
+  test("widens projected uncertainty for a stale model with no drift estimate", () => {
+    const model = robustClockModel([
+      makeExchange(100, 30, { receiveAtPerfMs: 2_000 }),
+      makeExchange(101, 28, { receiveAtPerfMs: 2_400 }),
+    ]);
+
+    const fresh = projectClockModel(model, model.referencePerfMs!);
+    const stale = projectClockModel(model, model.referencePerfMs! + 60_000);
+
+    expect(fresh.uncertaintyMs).toBeCloseTo(model.uncertaintyMs, 3);
+    expect(stale.uncertaintyMs).toBeGreaterThan(model.uncertaintyMs + 3);
+    expect(stale.maxErrorMs).toBeGreaterThan(model.maxErrorMs + 3);
   });
 
   test("rejects offset outliers even when they have attractive round trips", () => {
@@ -175,11 +227,18 @@ describe("clock sync metadata", () => {
   });
 });
 
-function makeExchange(offsetMs: number, roundTripMs: number): ClockExchange {
+function makeExchange(
+  offsetMs: number,
+  roundTripMs: number,
+  options: { instanceId?: string; receiveAtPerfMs?: number } = {},
+): ClockExchange {
   const clientPerfOriginEpochMs = 10_000;
-  const clientSendPerfMs = 1_000;
   const serverProcessingMs = 4;
   const oneWayMs = roundTripMs / 2;
+  const clientReceivePerfMs =
+    options.receiveAtPerfMs ?? 1_000 + roundTripMs + serverProcessingMs;
+  const clientSendPerfMs =
+    clientReceivePerfMs - roundTripMs - serverProcessingMs;
   const clientSendEpochMs = clientPerfOriginEpochMs + clientSendPerfMs;
 
   return {
@@ -187,6 +246,7 @@ function makeExchange(offsetMs: number, roundTripMs: number): ClockExchange {
     clientSendPerfMs,
     serverReceiveEpochMs: clientSendEpochMs + offsetMs + oneWayMs,
     serverSendEpochMs: clientSendEpochMs + offsetMs + oneWayMs + serverProcessingMs,
-    clientReceivePerfMs: clientSendPerfMs + roundTripMs + serverProcessingMs,
+    clientReceivePerfMs,
+    serverInstanceId: options.instanceId ?? null,
   };
 }

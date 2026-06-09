@@ -83,7 +83,7 @@ describe("acoustic room ranging", () => {
           "phone-pulse-2",
         ],
         samplesUsed: 2,
-        meters: 3.04,
+        meters: expect.closeTo(3.04, 1),
       }),
     ]);
     expect(deriveAcousticRanges(devices)[0].confidence).toBeGreaterThan(0.45);
@@ -202,6 +202,77 @@ describe("acoustic room ranging", () => {
     ];
 
     expect(deriveAcousticRanges(devices)).toEqual([]);
+  });
+
+  test("preserves fractional sample anchors for centimeter-scale resolution", () => {
+    const meters = 1.0107; // ≈ 141.45 samples of flight at 48 kHz
+    const timeOfFlightSamples =
+      (meters / SPEED_OF_SOUND_METERS_PER_SECOND) * SAMPLE_RATE;
+    const turnaroundSamples = SAMPLE_RATE;
+    const hostSelfSample = 100_000.25;
+    const phoneSeesHostSample = 220_000.5 + timeOfFlightSamples;
+    const phoneSelfSample = phoneSeesHostSample + turnaroundSamples;
+    const hostSeesPhoneSample =
+      hostSelfSample + turnaroundSamples + timeOfFlightSamples * 2;
+    const devices = reciprocalDevices({
+      hostPulse: pulse("host-pulse", 10_000),
+      phonePulse: pulse("phone-pulse", 20_000),
+      hostObservations: [
+        observation("host-pulse", 50_000, hostSelfSample, 0.34, 0.92),
+        observation("phone-pulse", 20_050, hostSeesPhoneSample, 0.32, 0.9),
+      ],
+      phoneObservations: [
+        observation("host-pulse", 9_990, phoneSeesHostSample, 0.31, 0.88),
+        observation("phone-pulse", 80_000, phoneSelfSample, 0.35, 0.93),
+      ],
+    });
+
+    expect(deriveAcousticRanges(devices)[0].meters).toBeCloseTo(meters, 2);
+  });
+
+  test("widens timing uncertainty with the reciprocal turn interval", () => {
+    const makeDevices = (turnaroundSamples: number) => {
+      const timeOfFlightSamples = 420;
+      const hostSelfSample = 100_000;
+      const phoneSeesHostSample = 220_000 + timeOfFlightSamples;
+      return reciprocalDevices({
+        hostPulse: pulse("host-pulse", 10_000),
+        phonePulse: pulse("phone-pulse", 20_000),
+        hostObservations: [
+          observation("host-pulse", 50_000, hostSelfSample, 0.34, 0.92),
+          observation(
+            "phone-pulse",
+            20_050,
+            hostSelfSample + turnaroundSamples + timeOfFlightSamples * 2,
+            0.32,
+            0.9,
+          ),
+        ],
+        phoneObservations: [
+          observation("host-pulse", 9_990, phoneSeesHostSample, 0.31, 0.88),
+          observation(
+            "phone-pulse",
+            80_000,
+            phoneSeesHostSample + turnaroundSamples,
+            0.35,
+            0.93,
+          ),
+        ],
+      });
+    };
+
+    const quickTurn = deriveAcousticRanges(makeDevices(SAMPLE_RATE))[0];
+    const slowTurn = deriveAcousticRanges(makeDevices(SAMPLE_RATE * 8))[0];
+
+    // Audio-crystal rate mismatch accumulates over the turn interval, so the
+    // eight-second exchange must be reported as less certain.
+    expect(slowTurn.timingUncertaintyMs).toBeGreaterThan(
+      quickTurn.timingUncertaintyMs + 0.2,
+    );
+    expect(slowTurn.distanceUncertaintyMeters).toBeGreaterThan(
+      quickTurn.distanceUncertaintyMeters,
+    );
+    expect(slowTurn.confidence).toBeLessThan(quickTurn.confidence);
   });
 
   test("rejects unmatched and physically implausible reciprocal exchanges", () => {

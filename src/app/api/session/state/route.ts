@@ -1,3 +1,4 @@
+import { compactRoomStateForTransport } from "@/lib/session/registry";
 import { getSessionStore } from "@/lib/session/server-registry";
 
 export async function GET(request: Request) {
@@ -8,5 +9,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "missing_url" }, { status: 400 });
   }
 
-  return Response.json(await getSessionStore().state(sessionUrl));
+  return Response.json(
+    compactRoomStateForTransport(await getSessionStore().state(sessionUrl)),
+  );
 }

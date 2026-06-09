@@ -56,6 +56,7 @@ describe("session stores", () => {
         clockUncertaintyMs: 2,
         audioElapsedMs: 5_000,
         hostEstimatedEpochMs: 1_780_000_002_001.5,
+        timingConfidence: 0.85,
       },
       motion: "active",
       heading: "active",
@@ -115,7 +116,14 @@ describe("session stores", () => {
       expect.objectContaining({ calibrationTurn: null }),
     );
 
-    await store.claim("https://blackmagic.app/", "phone-a");
+    await store.heartbeat("https://blackmagic.app/", "host", {
+      mic: "active",
+      audioFrame: audioFrame(),
+    });
+    await store.heartbeat("https://blackmagic.app/", "phone-a", {
+      mic: "active",
+      audioFrame: audioFrame(),
+    });
 
     await expect(store.state("https://blackmagic.app/")).resolves.toEqual(
       expect.objectContaining({
@@ -211,6 +219,28 @@ describe("session stores", () => {
     ).toBe("redis");
   });
 });
+
+function audioFrame() {
+  return {
+    audioContextTimeSeconds: 1,
+    sampleIndex: 48_000,
+    sampleRate: 48_000,
+    clientPerfOriginEpochMs: 1_700_000_000_000,
+    performanceNowMs: 1_000,
+    clockOffsetMs: 0,
+    clockUncertaintyMs: 2,
+    clockQuality: 0.98,
+    clockMaxErrorMs: 3,
+    clockBestRoundTripMs: 6,
+    clockJitterMs: 0.3,
+    clockSamplesUsed: 8,
+    clockOutliersRejected: 0,
+    clockOffsetStabilityMs: 0.3,
+    audioElapsedMs: 1_000,
+    hostEstimatedEpochMs: 1_700_000_001_000,
+    timingConfidence: 0.88,
+  };
+}
 
 class FakeRedisSessionClient implements RedisSessionClient {
   private readonly strings = new Map<string, string>();

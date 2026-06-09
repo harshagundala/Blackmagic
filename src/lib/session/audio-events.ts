@@ -1,4 +1,8 @@
 import {
+  estimateRawAudioOffset,
+  type AudioSnippet,
+} from "../acoustics/audio-snippet";
+import {
   estimateFingerprintOffset,
   type SpeechFingerprint,
 } from "../acoustics/speech-fingerprint";
@@ -23,6 +27,7 @@ export type VoiceActivityEvent = {
   timingConfidence?: number | null;
   motionStability?: number | null;
   audioFingerprint?: SpeechFingerprint | null;
+  audioSnippet?: AudioSnippet | null;
 };
 
 export type AudioEventDevice = {
@@ -50,8 +55,11 @@ export type ReconciledAudioEventObservation = {
   timingConfidence?: number | null;
   motionStability?: number | null;
   audioFingerprint?: SpeechFingerprint | null;
+  audioSnippet?: AudioSnippet | null;
   fingerprintOffsetMs?: number | null;
   fingerprintCorrelation?: number | null;
+  rawAudioOffsetMs?: number | null;
+  rawAudioCorrelation?: number | null;
   refinedDetectedAtHostEpochMs?: number | null;
 };
 
@@ -67,6 +75,7 @@ export type ReconciledAudioEvent = {
   timestampUncertaintyMs: number;
   timingConfidence: number;
   fingerprintAlignmentConfidence?: number | null;
+  rawAudioAlignmentConfidence?: number | null;
   confidence: number;
 };
 
@@ -190,8 +199,11 @@ function reconcileCluster(
       timingConfidence: event.timingConfidence ?? null,
       motionStability: event.motionStability ?? null,
       audioFingerprint: event.audioFingerprint ?? null,
+      audioSnippet: event.audioSnippet ?? null,
       fingerprintOffsetMs: null,
       fingerprintCorrelation: null,
+      rawAudioOffsetMs: null,
+      rawAudioCorrelation: null,
       refinedDetectedAtHostEpochMs: null,
     }))
     .sort(
@@ -199,7 +211,9 @@ function reconcileCluster(
         a.detectedAtHostEpochMs - b.detectedAtHostEpochMs ||
         a.deviceId.localeCompare(b.deviceId),
     );
-  const observations = alignObservationsWithFingerprints(rawObservations).sort(
+  const observations = alignObservationsWithRawAudio(
+    alignObservationsWithFingerprints(rawObservations),
+  ).sort(
     (a, b) =>
       observationHostTime(a) - observationHostTime(b) ||
       a.deviceId.localeCompare(b.deviceId),
@@ -235,6 +249,7 @@ function reconcileCluster(
   const timingScore = 1 / (1 + (timeSpreadMs + meanUncertaintyMs) / 160);
   const timingQualityScore = 0.65 + meanTimingConfidence * 0.35;
   const fingerprintAlignmentConfidence = meanFingerprintCorrelation(observations);
+  const rawAudioAlignmentConfidence = meanRawAudioCorrelation(observations);
 
   return {
     id: `voice:${Math.round(startedAtHostEpochMs)}:${observations[0].eventId}`,
@@ -248,6 +263,7 @@ function reconcileCluster(
     timestampUncertaintyMs: round(timestampUncertaintyMs),
     timingConfidence: round(meanTimingConfidence * timingScore),
     fingerprintAlignmentConfidence,
+    rawAudioAlignmentConfidence,
     confidence: round(
       Math.max(0, Math.min(1, meanConfidence * timingScore * timingQualityScore)),
     ),
@@ -294,6 +310,70 @@ function alignObservationsWithFingerprints(
       ),
     };
   });
+}
+
+// Raw-audio GCC-PHAT alignment is the strongest evidence available: it works
+// on what the microphones actually captured, so it supersedes both host-clock
+// timestamps and the coarse fingerprint alignment when its correlation holds.
+const MIN_RAW_AUDIO_CORRELATION = 0.42;
+
+function alignObservationsWithRawAudio(
+  observations: ReconciledAudioEventObservation[],
+): ReconciledAudioEventObservation[] {
+  const reference = observations.find((observation) => observation.audioSnippet);
+  if (!reference?.audioSnippet) {
+    return observations;
+  }
+
+  return observations.map((observation) => {
+    if (!observation.audioSnippet) {
+      return observation;
+    }
+    if (observation === reference) {
+      return {
+        ...observation,
+        rawAudioOffsetMs: 0,
+        rawAudioCorrelation: 1,
+        refinedDetectedAtHostEpochMs: observation.detectedAtHostEpochMs,
+      };
+    }
+
+    const offset = estimateRawAudioOffset(
+      reference.audioSnippet,
+      observation.audioSnippet,
+    );
+    if (!offset || offset.correlation < MIN_RAW_AUDIO_CORRELATION) {
+      return observation;
+    }
+
+    return {
+      ...observation,
+      rawAudioOffsetMs: offset.offsetMs,
+      rawAudioCorrelation: offset.correlation,
+      refinedDetectedAtHostEpochMs: round(
+        reference.detectedAtHostEpochMs + offset.offsetMs,
+      ),
+    };
+  });
+}
+
+function meanRawAudioCorrelation(
+  observations: ReconciledAudioEventObservation[],
+) {
+  const correlations = observations
+    .map((observation) => observation.rawAudioCorrelation)
+    .filter(
+      (correlation): correlation is number =>
+        typeof correlation === "number" && Number.isFinite(correlation),
+    );
+  if (correlations.length <= 1) {
+    return null;
+  }
+
+  return round(
+    correlations.reduce((total, correlation) => total + correlation, 0) /
+      correlations.length,
+  );
 }
 
 function observationHostTime(observation: ReconciledAudioEventObservation) {

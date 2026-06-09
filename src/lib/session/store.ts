@@ -96,12 +96,15 @@ export function createRedisSessionStore(
       const previous = parseDevice(await redis.hget(keys.devices, deviceId));
 
       if (!hostDeviceId) {
-        const claimedHost = await redis.setnx(keys.host, deviceId);
-        hostDeviceId =
-          claimedHost === 1 ? deviceId : (await redis.get(keys.host)) ?? deviceId;
-        if (hostDeviceId === deviceId && claimedHost !== 1) {
-          await redis.set(keys.host, deviceId);
+        // Atomic claim: only SETNX can install a host. Never plain-SET as a
+        // fallback — that's how two racing devices both became host. If the
+        // key expires between SETNX and GET, retry rather than clobber.
+        for (let attempt = 0; attempt < 3 && !hostDeviceId; attempt += 1) {
+          const claimedHost = await redis.setnx(keys.host, deviceId);
+          hostDeviceId =
+            claimedHost === 1 ? deviceId : await redis.get(keys.host);
         }
+        hostDeviceId ??= deviceId;
       }
 
       const device: RoomDevice = {
@@ -295,18 +298,39 @@ async function pruneRedisSession(
   ttlSeconds: number,
 ) {
   const devices = await readRedisDevices(redis, keys);
-  const activeDevices = devices.filter(
-    (device) => timestamp - device.lastSeenAt <= staleAfterMs,
+  const staleCandidates = devices.filter(
+    (device) => timestamp - device.lastSeenAt > staleAfterMs,
   );
-  const staleDeviceIds = devices
-    .filter((device) => timestamp - device.lastSeenAt > staleAfterMs)
-    .map((device) => device.deviceId);
   let changed = false;
 
-  if (staleDeviceIds.length > 0) {
-    await redis.hdel(keys.devices, ...staleDeviceIds);
+  // Re-read each stale candidate immediately before deleting: a device can
+  // heartbeat between the bulk read and the delete, and pruning that fresh
+  // record would ghost a live phone. The remaining one-round-trip window
+  // self-heals on the device's next heartbeat.
+  const confirmedStaleIds: string[] = [];
+  const revivedDevices: RoomDevice[] = [];
+  for (const candidate of staleCandidates) {
+    const latest = parseDevice(
+      await redis.hget(keys.devices, candidate.deviceId),
+    );
+    if (!latest || timestamp - latest.lastSeenAt > staleAfterMs) {
+      confirmedStaleIds.push(candidate.deviceId);
+    } else {
+      revivedDevices.push(latest);
+    }
+  }
+
+  if (confirmedStaleIds.length > 0) {
+    await redis.hdel(keys.devices, ...confirmedStaleIds);
     changed = true;
   }
+
+  const activeDevices = [
+    ...devices.filter(
+      (device) => timestamp - device.lastSeenAt <= staleAfterMs,
+    ),
+    ...revivedDevices,
+  ];
 
   if (activeDevices.length === 0) {
     await redis.del(keys.host, keys.devices);

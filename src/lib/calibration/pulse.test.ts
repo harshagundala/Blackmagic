@@ -78,7 +78,7 @@ describe("active acoustic pulse metadata", () => {
     const sampleRate = 48_000;
     const template = synthesizePulseTemplate({
       frequencyHz: pulse.frequencyHz,
-      endFrequencyHz: pulse.endFrequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz ?? undefined,
       durationMs: pulse.durationMs,
       sampleRate,
     });

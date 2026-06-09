@@ -30,7 +30,9 @@ import {
 import {
   selectObservablePulse,
 } from "@/lib/calibration/session";
+import type { PhonePoint } from "@/lib/positioning/layout";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
+import { projectClockModel } from "@/lib/timing/clock-sync";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
 import type {
   AcousticObservation,
@@ -39,6 +41,10 @@ import type {
 } from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
+
+// A chirp commits to playback only if its advertisement was acknowledged at
+// least this long before the scheduled emission, so peers can poll it in time.
+const MIN_COMMIT_LEAD_MS = 600;
 type CalibrationHeartbeat = Pick<
   DeviceHeartbeat,
   "acousticPulse" | "acousticObservation"
@@ -46,7 +52,7 @@ type CalibrationHeartbeat = Pick<
 
 export function BlackmagicApp() {
   const [phase, setPhase] = useState<Phase>("arriving");
-  const { deviceId, heartbeat, roomState } = useRoomSession({
+  const { deviceId, heartbeat, roomState, connection } = useRoomSession({
     pollIntervalMs: roomStatePollingIntervalMs({
       listening: phase === "listening",
     }),
@@ -62,7 +68,7 @@ export function BlackmagicApp() {
   const constellation = useMemo(
     () =>
       roomState
-        ? estimateRoomConstellation(roomState, {
+        ? solveConstellationWithTemporalSeed(roomState, {
             perspectiveDeviceId: deviceId,
             headingDegrees: sensors.snapshot.headingDegrees,
           })
@@ -84,18 +90,18 @@ export function BlackmagicApp() {
   }, [phase, sensors]);
 
   const flushCalibrationEvent = useCallback(
-    (eventKey: string) => {
+    async (eventKey: string) => {
       if (
         !shouldFlushCalibrationEvent(
           flushedCalibrationEventRef.current,
           eventKey,
         )
       ) {
-        return;
+        return false;
       }
 
       flushedCalibrationEventRef.current = eventKey;
-      void heartbeat(snapshotRef.current, calibrationRef.current);
+      return heartbeat(snapshotRef.current, calibrationRef.current);
     },
     [heartbeat],
   );
@@ -118,7 +124,7 @@ export function BlackmagicApp() {
       return;
     }
 
-    const publishPulse = () => {
+    const publishPulse = async () => {
       const hostEpochNowMs = hostEpochNow(snapshotRef.current);
       if (hostEpochNowMs === null) {
         return;
@@ -145,12 +151,29 @@ export function BlackmagicApp() {
         acousticPulse: pulse,
         acousticObservation: calibrationRef.current.acousticObservation ?? null,
       };
+      // Advertise first and only chirp once the server acknowledged the
+      // advertisement with enough lead for peers to poll it. An unannounced
+      // chirp wastes the slot: nobody is listening for it.
+      const acknowledged = await flushCalibrationEvent(
+        calibrationEventKey("pulse", pulse.id),
+      );
+      const remainingLeadMs =
+        pulse.emittedAtHostEpochMs - (hostEpochNow(snapshotRef.current) ?? 0);
+      if (!acknowledged) {
+        // The advertisement never landed; allow the interval to retry while
+        // there is still lead instead of burning the slot silently.
+        publishedPulseIdRef.current = "";
+        flushedCalibrationEventRef.current = "";
+        return;
+      }
+      if (remainingLeadMs < MIN_COMMIT_LEAD_MS) {
+        return;
+      }
       scheduleOutputPulse(pulse, snapshotRef.current, pulseSchedulerRef);
-      flushCalibrationEvent(calibrationEventKey("pulse", pulse.id));
     };
 
-    publishPulse();
-    const timer = window.setInterval(publishPulse, 700);
+    void publishPulse();
+    const timer = window.setInterval(() => void publishPulse(), 700);
     return () => {
       window.clearInterval(timer);
     };
@@ -215,7 +238,7 @@ export function BlackmagicApp() {
       acousticPulse: calibrationRef.current.acousticPulse ?? null,
       acousticObservation: observation,
     };
-    flushCalibrationEvent(
+    void flushCalibrationEvent(
       calibrationEventKey(
         "observation",
         acousticObservationPublishKey(observation),
@@ -223,15 +246,21 @@ export function BlackmagicApp() {
     );
   }, [flushCalibrationEvent, phase, sensors.snapshot]);
 
-  const pulse =
-    phase === "listening"
-      ? Math.min(1, Math.max(0.12, sensors.snapshot.micLevel * 24))
-      : 0.16;
+  const listening = phase === "listening";
+  const pulse = listening
+    ? Math.min(1, Math.max(0.12, sensors.snapshot.micLevel * 24))
+    : 0.16;
   const phoneMarkers = createPhoneMarkers(
     constellation?.devices.filter(
       (device) => device.deviceId !== deviceId,
     ) ?? [],
   );
+  const peerCount = Math.max(0, (roomState?.devices.length ?? 1) - 1);
+  const syncLabel = describeTimeSync(roomState?.timeSync ?? null, peerCount);
+  const captureFiltered =
+    sensors.snapshot.captureProcessing !== null &&
+    !sensors.snapshot.captureProcessing.rawCaptureVerified;
+  const reconnecting = connection === "reconnecting";
 
   return (
     <main
@@ -282,6 +311,25 @@ export function BlackmagicApp() {
         }}
       />
 
+      <header
+        className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between px-6 pt-[max(20px,env(safe-area-inset-top))] font-mono text-[10px] uppercase tracking-[0.14em] text-black/45 transition-opacity duration-700"
+        style={{ opacity: listening ? 1 : 0 }}
+      >
+        <span className="flex items-center gap-2">
+          {reconnecting
+            ? "reconnecting"
+            : peerCount === 0
+              ? "alone so far"
+              : `${peerCount} ${peerCount === 1 ? "phone" : "phones"} nearby`}
+        </span>
+        <span className="flex flex-col items-end gap-1 text-right">
+          <span>{syncLabel}</span>
+          {captureFiltered ? (
+            <span className="text-[#b45309]">filtered mic</span>
+          ) : null}
+        </span>
+      </header>
+
       <div className="absolute inset-0 overflow-hidden px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(28px,env(safe-area-inset-top))]">
         <div
           aria-hidden
@@ -318,8 +366,82 @@ export function BlackmagicApp() {
           ))}
         </div>
       </div>
+
+      <div
+        className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-4 transition-opacity duration-1000"
+        style={{ opacity: listening ? 0 : 1 }}
+      >
+        <h1
+          className="text-[44px] leading-none tracking-tight text-[#06070a]"
+          style={{
+            animation: "arrival-rise 1.1s cubic-bezier(.2,.8,.2,1) both",
+            fontFamily:
+              "var(--font-display), Georgia, 'Times New Roman', serif",
+            fontVariationSettings: "'opsz' 60, 'SOFT' 40, 'WONK' 1",
+          }}
+        >
+          blackmagic
+        </h1>
+        <p
+          className="font-mono text-[11px] uppercase tracking-[0.22em] text-black/40"
+          style={{
+            animation: "arrival-rise 1.1s cubic-bezier(.2,.8,.2,1) 220ms both",
+          }}
+        >
+          tap anywhere — the room starts listening
+        </p>
+      </div>
     </main>
   );
+}
+
+function describeTimeSync(
+  timeSync: NonNullable<
+    Parameters<typeof estimateRoomConstellation>[0]
+  >["timeSync"] | null,
+  peerCount: number,
+) {
+  if (!timeSync || peerCount === 0) {
+    return "open this url on another phone";
+  }
+
+  switch (timeSync.status) {
+    case "ready":
+      return timeSync.worstLocalizationErrorMs !== null
+        ? `sync ±${Math.max(1, Math.round(timeSync.worstLocalizationErrorMs))}ms`
+        : "sync ready";
+    case "warming":
+      return "tuning clocks";
+    case "degraded":
+      return "coarse sync";
+    default:
+      return "waiting for phones";
+  }
+}
+
+// Memo cache feeding each solve the previous frame's canonical layout so the
+// constellation stays rotation/reflection-stable over time. Keyed by the
+// viewing device; the alignment is idempotent, so a repeated render with the
+// same room state is harmless.
+const temporalLayoutSeeds = new Map<string, Record<string, PhonePoint>>();
+
+function solveConstellationWithTemporalSeed(
+  roomState: NonNullable<Parameters<typeof estimateRoomConstellation>[0]>,
+  options: {
+    perspectiveDeviceId: string;
+    headingDegrees: number | null;
+  },
+) {
+  const constellation = estimateRoomConstellation(roomState, {
+    ...options,
+    previousCanonicalPoints:
+      temporalLayoutSeeds.get(options.perspectiveDeviceId) ?? null,
+  });
+  temporalLayoutSeeds.set(
+    options.perspectiveDeviceId,
+    constellation.canonicalPoints,
+  );
+  return constellation;
 }
 
 function hostEpochNow(snapshot: SensorSnapshot) {
@@ -331,7 +453,12 @@ function hostEpochNow(snapshot: SensorSnapshot) {
     return null;
   }
 
-  return performance.timeOrigin + performance.now() + snapshot.clock.offsetMs;
+  const nowPerfMs = performance.now();
+  return (
+    performance.timeOrigin +
+    nowPerfMs +
+    projectClockModel(snapshot.clock, nowPerfMs).offsetMs
+  );
 }
 
 function maybeCreateObservation(

@@ -4,6 +4,10 @@ export type ClockExchange = {
   serverReceiveEpochMs: number;
   serverSendEpochMs: number;
   clientReceivePerfMs: number;
+  // Identifies which server process answered. Serverless platforms run many
+  // instances whose Date.now() baselines differ; offsets are only comparable
+  // within one instance.
+  serverInstanceId?: string | null;
 };
 
 export type ClockOffsetEstimate = {
@@ -28,6 +32,24 @@ export type ClockModel = {
   quality: number;
   samplesUsed: number;
   outliersRejected: number;
+  // Samples discarded because they came from a different server instance than
+  // the dominant one; their offsets are not comparable.
+  crossInstanceRejected: number;
+  // Measured relative clock drift between this device and the server, in
+  // milliseconds of offset change per second of elapsed time. Zero when the
+  // exchange history is too short to fit a slope.
+  driftMsPerSecond: number;
+  // performance.now() of the newest exchange used by the model; lets callers
+  // age the model with projectClockModel().
+  referencePerfMs: number | null;
+  sampleSpanMs: number;
+};
+
+export type ProjectedClock = {
+  offsetMs: number;
+  uncertaintyMs: number;
+  maxErrorMs: number;
+  ageMs: number;
 };
 
 export type AudioFrameTimestampInput = {
@@ -98,12 +120,27 @@ export function retainClockExchanges(
     .slice(-maxSamples);
 }
 
-export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
-  const estimates = exchanges
-    .map(estimateClockOffset)
-    .sort((a, b) => a.roundTripMs - b.roundTripMs);
+const MIN_DRIFT_FIT_SAMPLES = 6;
+const MIN_DRIFT_FIT_SPAN_MS = 4_000;
+const MAX_PLAUSIBLE_DRIFT_MS_PER_SECOND = 0.5;
+// Allowance for unmodeled drift while the model ages, roughly a 60 ppm
+// crystal mismatch, used when no drift slope could be fitted.
+const DEFAULT_DRIFT_ALLOWANCE_MS_PER_SECOND = 0.06;
 
-  if (estimates.length === 0) {
+type EstimatePair = {
+  estimate: ClockOffsetEstimate;
+  exchange: ClockExchange;
+};
+
+export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
+  const allPairs: EstimatePair[] = exchanges.map((exchange) => ({
+    estimate: estimateClockOffset(exchange),
+    exchange,
+  }));
+  const pairs = dominantInstancePairs(allPairs);
+  const crossInstanceRejected = allPairs.length - pairs.length;
+
+  if (pairs.length === 0) {
     return {
       offsetMs: 0,
       uncertaintyMs: Number.POSITIVE_INFINITY,
@@ -115,9 +152,16 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
       quality: 0,
       samplesUsed: 0,
       outliersRejected: 0,
+      crossInstanceRejected,
+      driftMsPerSecond: 0,
+      referencePerfMs: null,
+      sampleSpanMs: 0,
     };
   }
 
+  const estimates = pairs
+    .map((pair) => pair.estimate)
+    .sort((a, b) => a.roundTripMs - b.roundTripMs);
   const offsetMedian = median(
     estimates.map((estimate) => estimate.offsetMs).sort((a, b) => a - b),
   );
@@ -126,25 +170,47 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
     .sort((a, b) => a - b);
   const medianDeviation = median(deviations);
   const offsetOutlierThresholdMs = Math.max(6, medianDeviation * 3);
-  const offsetFiltered = estimates.filter(
-    (estimate) =>
-      Math.abs(estimate.offsetMs - offsetMedian) <= offsetOutlierThresholdMs,
+  const offsetFiltered = pairs.filter(
+    (pair) =>
+      Math.abs(pair.estimate.offsetMs - offsetMedian) <=
+      offsetOutlierThresholdMs,
   );
-  const outliersRejected = estimates.length - offsetFiltered.length;
-  const keepCount = Math.max(1, Math.ceil(estimates.length * 0.75));
-  const kept = (offsetFiltered.length > 0 ? offsetFiltered : estimates)
-    .sort((a, b) => a.roundTripMs - b.roundTripMs)
+  const outliersRejected = pairs.length - offsetFiltered.length;
+  const keepCount = Math.max(1, Math.ceil(pairs.length * 0.75));
+  const kept = (offsetFiltered.length > 0 ? offsetFiltered : pairs)
+    .sort((a, b) => a.estimate.roundTripMs - b.estimate.roundTripMs)
     .slice(0, keepCount);
-  const offsets = kept.map((estimate) => estimate.offsetMs).sort((a, b) => a - b);
-  const offsetMs = median(offsets);
-  const jitterMs = rms(offsets.map((offset) => offset - offsetMs));
-  const bestUncertainty = Math.min(...kept.map((estimate) => estimate.uncertaintyMs));
-  const bestRoundTripMs = Math.min(...kept.map((estimate) => estimate.roundTripMs));
-  const worstAcceptedRoundTripMs = Math.max(
-    ...kept.map((estimate) => estimate.roundTripMs),
+  const referencePerfMs = Math.max(
+    ...kept.map((pair) => pair.exchange.clientReceivePerfMs),
   );
-  const maxErrorMs = round(bestUncertainty + jitterMs);
-  const uncertaintyMs = maxErrorMs;
+  const sampleSpanMs =
+    referencePerfMs -
+    Math.min(...kept.map((pair) => pair.exchange.clientReceivePerfMs));
+
+  const drift = fitDrift(kept, referencePerfMs);
+  const offsets = kept
+    .map((pair) => pair.estimate.offsetMs)
+    .sort((a, b) => a - b);
+  const offsetMs = drift ? drift.offsetAtReferenceMs : median(offsets);
+  const jitterMs = drift
+    ? drift.residualRmsMs
+    : rms(offsets.map((offset) => offset - offsetMs));
+  const bestUncertainty = Math.min(
+    ...kept.map((pair) => pair.estimate.uncertaintyMs),
+  );
+  const bestRoundTripMs = Math.min(
+    ...kept.map((pair) => pair.estimate.roundTripMs),
+  );
+  const worstAcceptedRoundTripMs = Math.max(
+    ...kept.map((pair) => pair.estimate.roundTripMs),
+  );
+  // uncertaintyMs is a one-sigma style figure; maxErrorMs is the conservative
+  // bound: the best exchange's half round trip (NTP offset error bound) plus
+  // twice the observed scatter.
+  const uncertaintyMs = round(
+    Math.sqrt((bestUncertainty / 2) ** 2 + jitterMs ** 2),
+  );
+  const maxErrorMs = round(bestUncertainty + 2 * jitterMs);
   const quality = round(Math.max(0, Math.min(1, 1 - maxErrorMs / 100)));
 
   return {
@@ -158,6 +224,119 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
     quality,
     samplesUsed: kept.length,
     outliersRejected,
+    crossInstanceRejected,
+    driftMsPerSecond: drift ? round(drift.slopeMsPerSecond) : 0,
+    referencePerfMs: round(referencePerfMs),
+    sampleSpanMs: round(sampleSpanMs),
+  };
+}
+
+// Ages a clock model to "now": applies the fitted drift slope to the offset
+// and widens the error bounds for unmodeled drift since the last exchange.
+export function projectClockModel(
+  model: ClockModel,
+  nowPerfMs: number,
+): ProjectedClock {
+  if (
+    model.referencePerfMs === null ||
+    !Number.isFinite(nowPerfMs) ||
+    !Number.isFinite(model.uncertaintyMs)
+  ) {
+    return {
+      offsetMs: model.offsetMs,
+      uncertaintyMs: model.uncertaintyMs,
+      maxErrorMs: model.maxErrorMs,
+      ageMs: 0,
+    };
+  }
+
+  const ageMs = Math.max(0, nowPerfMs - model.referencePerfMs);
+  const ageSeconds = ageMs / 1_000;
+  const driftAllowancePerSecond =
+    model.driftMsPerSecond === 0
+      ? DEFAULT_DRIFT_ALLOWANCE_MS_PER_SECOND
+      : Math.max(0.02, Math.abs(model.driftMsPerSecond) * 0.35);
+  const growthMs = driftAllowancePerSecond * ageSeconds;
+
+  return {
+    offsetMs: round(model.offsetMs + model.driftMsPerSecond * ageSeconds),
+    uncertaintyMs: round(model.uncertaintyMs + growthMs),
+    maxErrorMs: round(model.maxErrorMs + growthMs),
+    ageMs: round(ageMs),
+  };
+}
+
+function dominantInstancePairs(pairs: EstimatePair[]): EstimatePair[] {
+  const groups = new Map<string, EstimatePair[]>();
+  for (const pair of pairs) {
+    const key = pair.exchange.serverInstanceId ?? "unknown";
+    const group = groups.get(key) ?? [];
+    group.push(pair);
+    groups.set(key, group);
+  }
+
+  let dominant: EstimatePair[] = [];
+  let dominantLatest = Number.NEGATIVE_INFINITY;
+  for (const group of groups.values()) {
+    const latest = Math.max(
+      ...group.map((pair) => pair.exchange.clientReceivePerfMs),
+    );
+    if (
+      group.length > dominant.length ||
+      (group.length === dominant.length && latest > dominantLatest)
+    ) {
+      dominant = group;
+      dominantLatest = latest;
+    }
+  }
+
+  return dominant;
+}
+
+function fitDrift(pairs: EstimatePair[], referencePerfMs: number) {
+  if (pairs.length < MIN_DRIFT_FIT_SAMPLES) {
+    return null;
+  }
+
+  const times = pairs.map((pair) => pair.exchange.clientReceivePerfMs);
+  const spanMs = Math.max(...times) - Math.min(...times);
+  if (spanMs < MIN_DRIFT_FIT_SPAN_MS) {
+    return null;
+  }
+
+  const meanTime = times.reduce((sum, value) => sum + value, 0) / times.length;
+  const offsets = pairs.map((pair) => pair.estimate.offsetMs);
+  const meanOffset =
+    offsets.reduce((sum, value) => sum + value, 0) / offsets.length;
+
+  let covariance = 0;
+  let variance = 0;
+  for (let index = 0; index < pairs.length; index += 1) {
+    const dt = times[index] - meanTime;
+    covariance += dt * (offsets[index] - meanOffset);
+    variance += dt * dt;
+  }
+  if (variance === 0) {
+    return null;
+  }
+
+  const slopeMsPerMs = covariance / variance;
+  const slopeMsPerSecond = slopeMsPerMs * 1_000;
+  if (Math.abs(slopeMsPerSecond) > MAX_PLAUSIBLE_DRIFT_MS_PER_SECOND) {
+    return null;
+  }
+
+  const offsetAtReferenceMs =
+    meanOffset + slopeMsPerMs * (referencePerfMs - meanTime);
+  const residuals = pairs.map((pair, index) => {
+    const predicted = meanOffset + slopeMsPerMs * (times[index] - meanTime);
+    return pair.estimate.offsetMs - predicted;
+  });
+
+  return {
+    slopeMsPerSecond,
+    offsetAtReferenceMs,
+    residualRmsMs: rms(residuals),
   };
 }
 

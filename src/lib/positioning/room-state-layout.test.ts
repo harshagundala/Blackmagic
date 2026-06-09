@@ -10,7 +10,7 @@ import type { RoomTimeSyncState } from "@/lib/session/timing-health";
 
 describe("room state constellation", () => {
   test("uses acoustic ranges before falling back to radial placement", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 10_000,
@@ -44,7 +44,7 @@ describe("room state constellation", () => {
           observedAtHostEpochMs: 10_006,
         },
       ],
-    };
+    });
 
     const layout = estimateRoomConstellation(room);
 
@@ -62,7 +62,7 @@ describe("room state constellation", () => {
   });
 
   test("does not assign precise peer coordinates before range evidence exists", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 10_000,
@@ -83,7 +83,7 @@ describe("room state constellation", () => {
         },
       ],
       ranges: [],
-    };
+    });
 
     const layout = estimateRoomConstellation(room);
 
@@ -106,7 +106,7 @@ describe("room state constellation", () => {
   });
 
   test("uses reciprocal acoustic ranges when no clock localization gate is ready yet", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 10_000,
@@ -127,7 +127,7 @@ describe("room state constellation", () => {
         },
       ],
       timeSync: roomTimeSync({
-        status: "syncing",
+        status: "warming",
         synchronizedDeviceIds: [],
         localizationDeviceIds: [],
         roomConfidence: 0,
@@ -139,7 +139,7 @@ describe("room state constellation", () => {
           confidence: 0.91,
         }),
       ],
-    };
+    });
 
     const phone = estimateRoomConstellation(room).devices.find(
       (device) => device.deviceId === "phone-a",
@@ -154,7 +154,7 @@ describe("room state constellation", () => {
   });
 
   test("recenters device and source coordinates on the current phone", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 20_000,
@@ -226,7 +226,7 @@ describe("room state constellation", () => {
           confidence: 0.76,
         },
       ],
-    };
+    });
 
     const hostAnchored = estimateRoomConstellation(room);
     const selfAnchored = estimateRoomConstellation(room, {
@@ -259,7 +259,7 @@ describe("room state constellation", () => {
   });
 
   test("labels peer distance from the current phone perspective", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 22_000,
@@ -312,7 +312,7 @@ describe("room state constellation", () => {
           samplesUsed: 5,
         }),
       ],
-    };
+    });
 
     const phoneAnchored = estimateRoomConstellation(room, {
       perspectiveDeviceId: "phone-a",
@@ -333,7 +333,7 @@ describe("room state constellation", () => {
   });
 
   test("rotates self-centered coordinates by the current phone heading", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 10_000,
@@ -362,7 +362,7 @@ describe("room state constellation", () => {
         },
       ],
       ranges: [],
-    };
+    });
 
     const selfAnchored = estimateRoomConstellation(room, {
       perspectiveDeviceId: "phone-a",
@@ -394,7 +394,7 @@ describe("room state constellation", () => {
   });
 
   test("ignores acoustic ranges from devices that are not localization-ready", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 30_000,
@@ -440,7 +440,7 @@ describe("room state constellation", () => {
           distanceUncertaintyMeters: 0.1,
         }),
       ],
-    };
+    });
 
     const layout = estimateRoomConstellation(room);
     const phoneA = layout.devices.find((device) => device.deviceId === "phone-a");
@@ -462,7 +462,7 @@ describe("room state constellation", () => {
   });
 
   test("projects reconciled audio events toward the arrival leader side", () => {
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 20_000,
@@ -534,7 +534,7 @@ describe("room state constellation", () => {
           confidence: 0.76,
         },
       ],
-    };
+    });
 
     const constellation = estimateRoomConstellation(room);
     const source = constellation.audioSources[0];
@@ -571,7 +571,7 @@ describe("room state constellation", () => {
       eventId: "voice:bad-clock-leader",
       emittedAtHostEpochMs: 80_000,
     });
-    const room: RoomState = {
+    const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
       updatedAt: 80_500,
@@ -612,7 +612,7 @@ describe("room state constellation", () => {
         }),
       ],
       audioEvents: [event],
-    };
+    });
 
     const source = estimateRoomConstellation(room).audioSources[0];
 
@@ -755,6 +755,29 @@ describe("room state constellation", () => {
     expect(fit?.residualMs).toBeLessThan(2);
   });
 });
+
+function makeRoomState(
+  overrides: Partial<RoomState> &
+    Pick<RoomState, "sessionKey" | "hostDeviceId" | "updatedAt" | "devices">,
+): RoomState {
+  return {
+    revision: 1,
+    changedAt: 0,
+    calibrationTurn: null,
+    timeSync: {
+      status: "solo",
+      synchronizedDeviceIds: [],
+      localizationDeviceIds: [],
+      roomConfidence: 0,
+      medianMaxErrorMs: null,
+      worstLocalizationErrorMs: null,
+      devices: [],
+    },
+    ranges: [],
+    audioEvents: [],
+    ...overrides,
+  };
+}
 
 function acousticRange(
   overrides: Partial<AcousticRange> = {},
