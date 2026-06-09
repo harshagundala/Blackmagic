@@ -72,18 +72,25 @@ export function estimateRoomConstellation(
       ]),
     ),
   };
+  const distanceAnchorDeviceId = options.perspectiveDeviceId ?? room.hostDeviceId;
 
   const devices = room.devices.map((device) => {
     const point = honestLayout.points[device.deviceId] ?? { x: 0, y: 0 };
-    const range = strongestRangeForDevice(ranges, device.deviceId);
+    const confidenceRange = strongestRangeForDevice(ranges, device.deviceId);
+    const distanceRange = directRangeForDevice(
+      ranges,
+      device.deviceId,
+      distanceAnchorDeviceId,
+    );
     const localized = localizedDeviceIds.has(device.deviceId);
     return {
       deviceId: device.deviceId,
       role: device.role,
       x: point.x,
       y: point.y,
-      distanceMeters: range?.meters ?? null,
-      confidence: localized && range ? rangeLayoutWeight(range) : 0.12,
+      distanceMeters: distanceRange?.meters ?? null,
+      confidence:
+        localized && confidenceRange ? rangeLayoutWeight(confidenceRange) : 0.12,
       localized,
     };
   });
@@ -212,6 +219,24 @@ function isLocalizationReadyRange(
 function strongestRangeForDevice(ranges: AcousticRange[], deviceId: string) {
   return ranges
     .filter((range) => range.from === deviceId || range.to === deviceId)
+    .sort((a, b) => rangeLayoutWeight(b) - rangeLayoutWeight(a))[0];
+}
+
+function directRangeForDevice(
+  ranges: AcousticRange[],
+  deviceId: string,
+  anchorDeviceId: string | null | undefined,
+) {
+  if (!anchorDeviceId || anchorDeviceId === deviceId) {
+    return null;
+  }
+
+  return ranges
+    .filter(
+      (range) =>
+        (range.from === anchorDeviceId && range.to === deviceId) ||
+        (range.from === deviceId && range.to === anchorDeviceId),
+    )
     .sort((a, b) => rangeLayoutWeight(b) - rangeLayoutWeight(a))[0];
 }
 

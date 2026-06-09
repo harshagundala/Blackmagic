@@ -258,6 +258,80 @@ describe("room state constellation", () => {
     );
   });
 
+  test("labels peer distance from the current phone perspective", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 22_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 22_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 22_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-b",
+          joinedAt: 1_600,
+          lastSeenAt: 22_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      ranges: [
+        acousticRange({
+          from: "host",
+          to: "phone-a",
+          meters: 2,
+          confidence: 0.86,
+          distanceUncertaintyMeters: 0.2,
+          samplesUsed: 5,
+        }),
+        acousticRange({
+          from: "host",
+          to: "phone-b",
+          meters: 4,
+          confidence: 0.98,
+          distanceUncertaintyMeters: 0.08,
+          samplesUsed: 8,
+        }),
+        acousticRange({
+          from: "phone-a",
+          to: "phone-b",
+          meters: 3,
+          confidence: 0.84,
+          distanceUncertaintyMeters: 0.2,
+          samplesUsed: 5,
+        }),
+      ],
+    };
+
+    const phoneAnchored = estimateRoomConstellation(room, {
+      perspectiveDeviceId: "phone-a",
+    });
+
+    expect(phoneAnchored.devices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          deviceId: "host",
+          distanceMeters: 2,
+        }),
+        expect.objectContaining({
+          deviceId: "phone-b",
+          distanceMeters: 3,
+        }),
+      ]),
+    );
+  });
+
   test("rotates self-centered coordinates by the current phone heading", () => {
     const room: RoomState = {
       sessionKey: "room",
