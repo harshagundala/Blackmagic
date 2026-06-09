@@ -2,6 +2,7 @@ import { rms } from "./delay";
 
 export type TonePulseOptions = {
   frequencyHz: number;
+  endFrequencyHz?: number;
   durationMs: number;
   sampleRate: number;
 };
@@ -27,12 +28,33 @@ export function synthesizeTonePulse({
   durationMs,
   sampleRate,
 }: TonePulseOptions) {
+  return synthesizePulseTemplate({
+    frequencyHz,
+    durationMs,
+    sampleRate,
+  });
+}
+
+export function synthesizePulseTemplate({
+  frequencyHz,
+  endFrequencyHz,
+  durationMs,
+  sampleRate,
+}: TonePulseOptions) {
   const length = Math.max(1, Math.round((durationMs / 1_000) * sampleRate));
   const samples = new Float32Array(length);
+  const durationSeconds = durationMs / 1_000;
+  const sweepHzPerSecond =
+    durationSeconds === 0
+      ? 0
+      : ((endFrequencyHz ?? frequencyHz) - frequencyHz) / durationSeconds;
 
   for (let index = 0; index < samples.length; index += 1) {
     const seconds = index / sampleRate;
-    const phase = 2 * Math.PI * frequencyHz * seconds;
+    const phase =
+      2 *
+      Math.PI *
+      (frequencyHz * seconds + 0.5 * sweepHzPerSecond * seconds * seconds);
     const taper =
       samples.length === 1
         ? 1

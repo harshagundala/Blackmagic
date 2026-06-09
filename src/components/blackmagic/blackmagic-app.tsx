@@ -313,7 +313,13 @@ async function playPulseTone(pulse: AcousticPulse) {
   const durationSeconds = pulse.durationMs / 1_000;
 
   oscillator.type = "sine";
-  oscillator.frequency.value = pulse.frequencyHz;
+  oscillator.frequency.setValueAtTime(pulse.frequencyHz, context.currentTime);
+  if (pulse.endFrequencyHz && pulse.endFrequencyHz !== pulse.frequencyHz) {
+    oscillator.frequency.linearRampToValueAtTime(
+      pulse.endFrequencyHz,
+      context.currentTime + durationSeconds,
+    );
+  }
   gain.gain.setValueAtTime(0.0001, context.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.045, context.currentTime + 0.008);
   gain.gain.exponentialRampToValueAtTime(

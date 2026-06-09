@@ -18,6 +18,7 @@ export type AcousticPulse = {
   emittedAtHostEpochMs: number;
   durationMs: number;
   frequencyHz: number;
+  endFrequencyHz?: number | null;
 };
 
 export type AcousticObservation = {
@@ -293,6 +294,7 @@ function sanitizeAcousticPulse(
   const emittedAtHostEpochMs = finiteNumber(pulse.emittedAtHostEpochMs);
   const durationMs = finiteNumber(pulse.durationMs);
   const frequencyHz = finiteNumber(pulse.frequencyHz);
+  const endFrequencyHz = finiteNumber(pulse.endFrequencyHz);
 
   if (
     typeof pulse.id !== "string" ||
@@ -311,6 +313,7 @@ function sanitizeAcousticPulse(
     emittedAtHostEpochMs,
     durationMs,
     frequencyHz,
+    endFrequencyHz: endFrequencyHz && endFrequencyHz > 0 ? endFrequencyHz : null,
   };
 }
 

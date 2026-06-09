@@ -63,7 +63,7 @@ The deployed V1 now keeps a bounded, low-latency exchange history instead of tru
 
 For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential.
 
-The first detector is now a normalized matched filter over a short local audio window. The observer synthesizes the expected pulse template from the advertised frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full chirp/GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
+The first detector is now a normalized matched filter over a rolling local audio window. The observer synthesizes the expected pulse template from the advertised start frequency, end frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 
 The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. If worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
 
@@ -71,9 +71,9 @@ The capture path now prefers an `AudioWorkletProcessor` that posts render-quantu
 
 The current V1 range path is intentionally conservative:
 
-1. The host schedules a short 18.5 kHz pulse slightly in the future using its current host-clock model.
-2. The host publishes the pulse id, intended host epoch, frequency, and duration through the normal heartbeat.
+1. The host schedules a short 17.2-19.2 kHz chirp slightly in the future using its current host-clock model.
+2. The host publishes the pulse id, intended host epoch, start frequency, end frequency, and duration through the normal heartbeat.
 3. A peer that matches the pulse template inside its recent audio sample window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
 4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
 
-This is not yet the final detector. The next detector should use a more robust chirp template, run matching inside or closer to the worklet, and add GCC-PHAT-style cross-correlation over longer rolling history.
+This is not yet the final detector. The next detector should run matching inside or closer to the worklet, adapt chirp parameters to device response, and add GCC-PHAT-style cross-correlation over longer rolling history.

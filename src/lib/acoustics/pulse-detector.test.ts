@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   detectPulse,
+  synthesizePulseTemplate,
   synthesizeTonePulse,
 } from "./pulse-detector";
 
@@ -53,6 +54,30 @@ describe("matched pulse detector", () => {
     );
     expect(detection?.confidence).toBeGreaterThan(0.8);
     expect(detection?.score).toBeGreaterThan(0.9);
+  });
+
+  test("finds a linear chirp pulse without relying on a single tone", () => {
+    const template = synthesizePulseTemplate({
+      frequencyHz: 1_600,
+      endFrequencyHz: 3_400,
+      durationMs: 18,
+      sampleRate: 48_000,
+    });
+    const samples = noisyWindow(2_560);
+    add(samples, 900, template);
+
+    const detection = detectPulse(samples, template, {
+      minScore: 0.42,
+      minPeakRatio: 3,
+    });
+
+    expect(detection).toEqual(
+      expect.objectContaining({
+        startSample: 900,
+        score: expect.closeTo(1, 2),
+      }),
+    );
+    expect(detection?.confidence).toBeGreaterThan(0.8);
   });
 
   test("rejects uncorrelated low-energy windows", () => {

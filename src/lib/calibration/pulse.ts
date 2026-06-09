@@ -4,14 +4,15 @@ import type {
 } from "@/lib/session/registry";
 import {
   detectPulse,
-  synthesizeTonePulse,
+  synthesizePulseTemplate,
   type PulseDetectionOptions,
 } from "../acoustics/pulse-detector";
 import { audioSampleTimestamp } from "../timing/clock-sync";
 
 const DEFAULT_LEAD_MS = 2_200;
 const DEFAULT_DURATION_MS = 48;
-const DEFAULT_FREQUENCY_HZ = 18_500;
+const DEFAULT_FREQUENCY_HZ = 17_200;
+const DEFAULT_END_FREQUENCY_HZ = 19_200;
 const MIN_OBSERVATION_LEVEL = 0.012;
 const MAX_PROPAGATION_MS = 45;
 
@@ -22,6 +23,7 @@ export type ScheduledPulseInput = {
   leadMs?: number;
   durationMs?: number;
   frequencyHz?: number;
+  endFrequencyHz?: number;
 };
 
 export type ToneObservationInput = {
@@ -55,6 +57,7 @@ export function createScheduledAcousticPulse({
   leadMs = DEFAULT_LEAD_MS,
   durationMs = DEFAULT_DURATION_MS,
   frequencyHz = DEFAULT_FREQUENCY_HZ,
+  endFrequencyHz = DEFAULT_END_FREQUENCY_HZ,
 }: ScheduledPulseInput): AcousticPulse {
   const emittedAtHostEpochMs = Math.round(hostEpochNowMs + leadMs);
 
@@ -63,6 +66,7 @@ export function createScheduledAcousticPulse({
     emittedAtHostEpochMs,
     durationMs,
     frequencyHz,
+    endFrequencyHz,
   };
 }
 
@@ -100,8 +104,9 @@ export function createMatchedToneObservation({
   audioWindow,
   ...detectionOptions
 }: MatchedToneObservationInput): AcousticObservation | null {
-  const template = synthesizeTonePulse({
+  const template = synthesizePulseTemplate({
     frequencyHz: pulse.frequencyHz,
+    endFrequencyHz: pulse.endFrequencyHz ?? undefined,
     durationMs: pulse.durationMs,
     sampleRate: audioWindow.sampleRate,
   });

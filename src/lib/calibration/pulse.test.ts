@@ -4,7 +4,7 @@ import {
   createScheduledAcousticPulse,
   createToneObservation,
 } from "./pulse";
-import { synthesizeTonePulse } from "../acoustics/pulse-detector";
+import { synthesizePulseTemplate } from "../acoustics/pulse-detector";
 
 describe("active acoustic pulse metadata", () => {
   test("schedules a future host-aligned pulse with a stable id", () => {
@@ -19,7 +19,8 @@ describe("active acoustic pulse metadata", () => {
       id: "host-a:7:22200",
       emittedAtHostEpochMs: 22_200,
       durationMs: 48,
-      frequencyHz: 18_500,
+      frequencyHz: 17_200,
+      endFrequencyHz: 19_200,
     });
   });
 
@@ -71,10 +72,12 @@ describe("active acoustic pulse metadata", () => {
       leadMs: 0,
       durationMs: 12,
       frequencyHz: 2_000,
+      endFrequencyHz: 3_200,
     });
     const sampleRate = 48_000;
-    const template = synthesizeTonePulse({
+    const template = synthesizePulseTemplate({
       frequencyHz: pulse.frequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz,
       durationMs: pulse.durationMs,
       sampleRate,
     });

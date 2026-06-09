@@ -47,6 +47,13 @@ describe("session registry", () => {
       motion: "active",
       heading: "idle",
       location: "blocked",
+      acousticPulse: {
+        id: "chirp-1",
+        emittedAtHostEpochMs: 10_500,
+        durationMs: 48,
+        frequencyHz: 17_200,
+        endFrequencyHz: 19_200,
+      },
     });
 
     expect(state.devices).toEqual([
@@ -63,6 +70,11 @@ describe("session registry", () => {
         clockBestRoundTripMs: 12,
         clockJitterMs: 1.2,
         clockSamplesUsed: 5,
+        acousticPulse: expect.objectContaining({
+          id: "chirp-1",
+          frequencyHz: 17_200,
+          endFrequencyHz: 19_200,
+        }),
         audioFrame: expect.objectContaining({
           sampleIndex: 480_000,
           hostEstimatedEpochMs: 1_700_000_002_002,
