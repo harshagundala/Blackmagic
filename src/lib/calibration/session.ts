@@ -1,0 +1,130 @@
+import type { PairwiseDistance } from "@/lib/positioning/layout";
+
+export type PhonePair = {
+  from: string;
+  to: string;
+};
+
+export type CalibrationSlot = PhonePair & {
+  sequence: number;
+  startsAtMs: number;
+  durationMs: number;
+};
+
+export type CalibrationPlanOptions = {
+  chirpsPerPair?: number;
+  slotDurationMs?: number;
+  guardMs?: number;
+};
+
+export type CalibrationPlan = {
+  pairs: PhonePair[];
+  slots: CalibrationSlot[];
+  durationMs: number;
+};
+
+export type PairwiseMeasurement = PhonePair & {
+  meters: number;
+  confidence: number;
+};
+
+export function createPairwiseCalibrationPlan(
+  participantIds: string[],
+  options: CalibrationPlanOptions = {},
+): CalibrationPlan {
+  const ids = [...new Set(participantIds.filter(Boolean))];
+  const chirpsPerPair = options.chirpsPerPair ?? 4;
+  const slotDurationMs = options.slotDurationMs ?? 360;
+  const guardMs = options.guardMs ?? 120;
+  const strideMs = slotDurationMs + guardMs;
+  const pairs: PhonePair[] = [];
+
+  for (let fromIndex = 0; fromIndex < ids.length; fromIndex += 1) {
+    for (let toIndex = fromIndex + 1; toIndex < ids.length; toIndex += 1) {
+      pairs.push({ from: ids[fromIndex], to: ids[toIndex] });
+    }
+  }
+
+  const slots: CalibrationSlot[] = [];
+  for (const pair of pairs) {
+    for (let chirp = 0; chirp < chirpsPerPair; chirp += 1) {
+      const sequence = slots.length;
+      slots.push({
+        ...pair,
+        sequence,
+        startsAtMs: sequence * strideMs,
+        durationMs: slotDurationMs,
+      });
+    }
+  }
+
+  return {
+    pairs,
+    slots,
+    durationMs: slots.length * strideMs,
+  };
+}
+
+export function summarizePairwiseMeasurements(
+  measurements: PairwiseMeasurement[],
+): PairwiseDistance[] {
+  const groups = new Map<
+    string,
+    { from: string; to: string; measurements: PairwiseMeasurement[] }
+  >();
+
+  for (const measurement of measurements) {
+    if (measurement.meters <= 0 || measurement.confidence <= 0) {
+      continue;
+    }
+
+    const key = [...[measurement.from, measurement.to].sort()].join(":");
+    const group =
+      groups.get(key) ?? {
+        from: measurement.from,
+        to: measurement.to,
+        measurements: [],
+      };
+    group.measurements.push(measurement);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()]
+    .map((group) => {
+      const sorted = [...group.measurements].sort((a, b) => a.meters - b.meters);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const deviations = sorted
+        .map((item) => Math.abs(item.meters - median.meters))
+        .sort((a, b) => a - b);
+      const medianDeviation = deviations[Math.floor(deviations.length / 2)] ?? 0;
+      const inliers = group.measurements.filter((item) => {
+        const threshold = Math.max(0.35, medianDeviation * 3);
+        return item.confidence >= 0.25 && Math.abs(item.meters - median.meters) <= threshold;
+      });
+      const kept = inliers.length > 0 ? inliers : group.measurements;
+      const confidenceMean =
+        kept.reduce((sum, item) => sum + item.confidence, 0) / kept.length;
+      const spread =
+        kept.reduce(
+          (sum, item) => sum + Math.abs(item.meters - median.meters),
+          0,
+        ) / kept.length;
+      const weight = Math.max(0.05, confidenceMean / (1 + spread * 2));
+
+      return {
+        from: group.from,
+        to: group.to,
+        meters: roundMeters(median.meters),
+        weight: roundWeight(weight),
+      };
+    })
+    .sort((a, b) => `${a.from}:${a.to}`.localeCompare(`${b.from}:${b.to}`));
+}
+
+function roundMeters(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function roundWeight(value: number) {
+  return Number(value.toFixed(3));
+}
