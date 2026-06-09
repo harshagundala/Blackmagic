@@ -216,6 +216,70 @@ describe("audio event reconciliation", () => {
       }),
     );
   });
+
+  test("uses fingerprints to bridge clock-skewed observations outside the nominal cluster window", () => {
+    const events = deriveReconciledAudioEvents([
+      {
+        deviceId: "host",
+        voiceEvents: [
+          voiceEvent({
+            id: "host-skew-bridge",
+            detectedAtHostEpochMs: 60_000,
+            clockUncertaintyMs: 3,
+            clockMaxErrorMs: 3,
+            audioFingerprint: {
+              sampleRate: 1_000,
+              startSampleIndex: 0,
+              centerSampleIndex: 200,
+              hopMs: 5,
+              windowMs: 80,
+              values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+            },
+          }),
+        ],
+      },
+      {
+        deviceId: "phone-a",
+        voiceEvents: [
+          voiceEvent({
+            id: "phone-skew-bridge",
+            detectedAtHostEpochMs: 60_150,
+            clockUncertaintyMs: 180,
+            clockMaxErrorMs: 180,
+            clockBestRoundTripMs: 260,
+            clockJitterMs: 18,
+            clockSamplesUsed: 2,
+            clockOffsetStabilityMs: 20,
+            timingConfidence: 0.08,
+            audioFingerprint: {
+              sampleRate: 1_000,
+              startSampleIndex: 0,
+              centerSampleIndex: 200,
+              hopMs: 5,
+              windowMs: 80,
+              values: [0, 0, 0, 0.1, 0.35, 1, 0.7, 0.28],
+            },
+          }),
+        ],
+      },
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual(
+      expect.objectContaining({
+        observedDeviceIds: ["host", "phone-a"],
+        timeSpreadMs: 10,
+        timestampUncertaintyMs: 180,
+      }),
+    );
+    expect(events[0].observations[1]).toEqual(
+      expect.objectContaining({
+        deviceId: "phone-a",
+        fingerprintOffsetMs: 10,
+        refinedDetectedAtHostEpochMs: 60_010,
+      }),
+    );
+  });
 });
 
 function voiceEvent(

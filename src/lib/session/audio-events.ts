@@ -77,6 +77,8 @@ export type AudioEventReconciliationOptions = {
 
 const DEFAULT_CLUSTER_WINDOW_MS = 80;
 const DEFAULT_MAX_EVENTS = 8;
+const MIN_FINGERPRINT_CLUSTER_CORRELATION = 0.55;
+const MAX_FINGERPRINT_CLUSTER_EXTENSION_MS = 320;
 
 export function deriveReconciledAudioEvents(
   devices: AudioEventDevice[],
@@ -99,12 +101,7 @@ export function deriveReconciledAudioEvents(
   const clusters: Array<typeof observations> = [];
   for (const observation of observations) {
     const current = clusters[clusters.length - 1];
-    if (
-      !current ||
-      observation.event.detectedAtHostEpochMs -
-        current[0].event.detectedAtHostEpochMs >
-        clusterWindowMs
-    ) {
+    if (!current || !belongsToCluster(observation, current, clusterWindowMs)) {
       clusters.push([observation]);
     } else {
       current.push(observation);
@@ -112,6 +109,62 @@ export function deriveReconciledAudioEvents(
   }
 
   return clusters.map(reconcileCluster).slice(-maxEvents);
+}
+
+function belongsToCluster(
+  observation: { deviceId: string; event: VoiceActivityEvent },
+  cluster: Array<{ deviceId: string; event: VoiceActivityEvent }>,
+  clusterWindowMs: number,
+) {
+  if (
+    observation.event.detectedAtHostEpochMs -
+      cluster[0].event.detectedAtHostEpochMs <=
+    clusterWindowMs
+  ) {
+    return true;
+  }
+
+  return cluster.some((candidate) =>
+    canFingerprintBridgeCluster(candidate.event, observation.event, clusterWindowMs),
+  );
+}
+
+function canFingerprintBridgeCluster(
+  reference: VoiceActivityEvent,
+  candidate: VoiceActivityEvent,
+  clusterWindowMs: number,
+) {
+  const offset = estimateFingerprintOffset(
+    reference.audioFingerprint,
+    candidate.audioFingerprint,
+    {
+      maxLagBins: 16,
+      maxAlignmentLagBins: 32,
+    },
+  );
+  if (!offset || offset.correlation < MIN_FINGERPRINT_CLUSTER_CORRELATION) {
+    return false;
+  }
+
+  const rawDeltaMs = Math.abs(
+    candidate.detectedAtHostEpochMs - reference.detectedAtHostEpochMs,
+  );
+  const plausibleWindowMs =
+    clusterWindowMs +
+    Math.min(
+      MAX_FINGERPRINT_CLUSTER_EXTENSION_MS,
+      clockErrorWindowMs(reference) + clockErrorWindowMs(candidate),
+    );
+
+  return rawDeltaMs <= plausibleWindowMs && Math.abs(offset.offsetMs) <= clusterWindowMs;
+}
+
+function clockErrorWindowMs(event: VoiceActivityEvent) {
+  return Math.max(
+    0,
+    event.clockUncertaintyMs,
+    event.clockMaxErrorMs ?? 0,
+  );
 }
 
 function reconcileCluster(
