@@ -5,6 +5,8 @@ export type AcousticRange = {
   to: string;
   pulseId: string;
   meters: number;
+  timingUncertaintyMs: number;
+  distanceUncertaintyMeters: number;
   confidence: number;
   observedAtHostEpochMs: number;
 };
@@ -48,11 +50,20 @@ export function deriveAcousticRanges(devices: RoomDevice[]): AcousticRange[] {
     }
 
     const meters = (propagationMs / 1_000) * SPEED_OF_SOUND_METERS_PER_SECOND;
+    const timingUncertaintyMs = Math.max(
+      0,
+      observation.clockUncertaintyMs ?? 0,
+    );
     ranges.push({
       from: emitter.device.deviceId,
       to: observer.deviceId,
       pulseId: emitter.pulse.id,
       meters: round(meters, 2),
+      timingUncertaintyMs: round(timingUncertaintyMs, 3),
+      distanceUncertaintyMeters: round(
+        (timingUncertaintyMs / 1_000) * SPEED_OF_SOUND_METERS_PER_SECOND,
+        2,
+      ),
       confidence: rangeConfidence(
         observation.confidence,
         observation.amplitude,

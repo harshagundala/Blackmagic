@@ -7,7 +7,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Next.js 16 App Router, React 19, TypeScript, Tailwind CSS.
 - Near-wordless Apple-like mobile UI: the deployment URL is the room, the first phone is host, later phones join nearby.
 - Browser sensor acquisition hook for mic level, sample rate, motion/orientation, and geolocation accuracy.
-- Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, and uncertainty.
+- Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, offset, jitter, best RTT, max error, and uncertainty.
 - URL-based room claim: first device is host, later devices are nearby phones.
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
 - Active acoustic pulse metadata: hosts publish scheduled ultrasonic-ish pulses, peers can report host-aligned observations, and room state derives pairwise meter ranges.
@@ -23,7 +23,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 
 The core V1 assumption is active acoustic calibration, not passive GPS/gyro inference. Each phone should eventually play and record short chirps in pairwise slots, estimate sample offsets on-device, exchange derived ranges, reject outliers, and solve a 2D layout. See `docs/research/blackmagic-v1-technical-brief.md`.
 
-Audio timing is treated as sample-domain truth. Browser/network clocks are synchronized continuously as a coarse host-time prior with explicit uncertainty. Every active mic heartbeat can now carry an audio-frame stamp; acoustic pulse observations turn those stamps into same-room range hints. Localization should ultimately realign recordings by sample indices and audio cross-correlation.
+Audio timing is treated as sample-domain truth. Browser/network clocks are synchronized continuously as a coarse host-time prior with explicit uncertainty, then audio events are mapped through a Web Audio context-time/performance-time anchor so historical samples are not collapsed to heartbeat delivery time. Every active mic heartbeat can now carry an audio-frame stamp; acoustic pulse observations turn those stamps into same-room range hints with meter-level uncertainty. Localization should ultimately realign recordings by sample indices and audio cross-correlation.
 
 ## Commands
 

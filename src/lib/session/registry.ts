@@ -33,7 +33,12 @@ export type DeviceHeartbeat = {
   micLevel?: number | null;
   sampleRate?: number | null;
   clockQuality?: number | null;
+  clockOffsetMs?: number | null;
   clockUncertaintyMs?: number | null;
+  clockMaxErrorMs?: number | null;
+  clockBestRoundTripMs?: number | null;
+  clockJitterMs?: number | null;
+  clockSamplesUsed?: number | null;
   audioFrame?: AudioFrameTimestamp | null;
   acousticPulse?: AcousticPulse | null;
   acousticObservation?: AcousticObservation | null;
@@ -216,7 +221,12 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     micLevel: clampNumber(heartbeat.micLevel, 0, 1),
     sampleRate: heartbeat.sampleRate ?? null,
     clockQuality: clampNumber(heartbeat.clockQuality, 0, 1),
+    clockOffsetMs: finiteNumber(heartbeat.clockOffsetMs),
     clockUncertaintyMs: heartbeat.clockUncertaintyMs ?? null,
+    clockMaxErrorMs: nonNegativeNumber(heartbeat.clockMaxErrorMs),
+    clockBestRoundTripMs: nonNegativeNumber(heartbeat.clockBestRoundTripMs),
+    clockJitterMs: nonNegativeNumber(heartbeat.clockJitterMs),
+    clockSamplesUsed: integerAtLeast(heartbeat.clockSamplesUsed, 0),
     audioFrame: sanitizeAudioFrame(heartbeat.audioFrame),
     acousticPulse: sanitizeAcousticPulse(heartbeat.acousticPulse),
     acousticObservation: sanitizeAcousticObservation(
@@ -349,6 +359,16 @@ function finiteNumber(value: number | null | undefined) {
   }
 
   return value;
+}
+
+function nonNegativeNumber(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  return finite === null ? null : Math.max(0, finite);
+}
+
+function integerAtLeast(value: number | null | undefined, min: number) {
+  const finite = finiteNumber(value);
+  return finite === null ? null : Math.max(min, Math.round(finite));
 }
 
 function compareDevices(a: RoomDevice, b: RoomDevice) {

@@ -22,6 +22,9 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 - MDN `getUserMedia()` privacy and secure-context requirements: https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia
 - MDN media constraint best-effort behavior: https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints/echoCancellation
 - MDN DeviceOrientation permission model: https://developer.mozilla.org/en-US/docs/Web/API/DeviceOrientationEvent/requestPermission_static
+- W3C High Resolution Time monotonic clock and `performance.timeOrigin`: https://w3c.github.io/hr-time/
+- Web Audio API `AudioContext.getOutputTimestamp()` context/performance-time bridge: https://webaudio.github.io/web-audio-api/#dom-audiocontext-getoutputtimestamp
+- NTPv4 offset, delay, jitter, and clock-filter framing: https://datatracker.ietf.org/doc/html/rfc5905
 - Vercel realtime guidance and WebSocket limitation: https://vercel.com/docs/solutions/realtime and https://vercel.com/docs/limits#websockets
 
 ## Realtime Architecture Decision
@@ -56,6 +59,10 @@ Localization cannot depend on `Date.now()`, WebSocket delivery time, or server r
 
 The clock model should run continuously using low-RTT echo exchanges, but the sample index remains the strongest timestamp inside a device recording. Network clock sync is a real-time alignment prior; offline or near-real-time reconciliation should refine alignment by cross-correlating the actual audio history.
 
+The deployed V1 now keeps a bounded, low-latency exchange history instead of trusting the latest echo. It exposes offset, best round trip, jitter, max error, sample count, and quality in the heartbeat. On start, the browser performs an immediate sync, a short warm-up burst, and then a 1s maintenance loop. This is still not enough for centimeter-grade acoustic localization by itself, but it makes the uncertainty explicit and keeps bad network samples from masquerading as precise audio timestamps.
+
+For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential even before the final matched-filter detector lands.
+
 ## Active Pulse Ranging
 
 The current V1 range path is intentionally conservative:
@@ -63,6 +70,6 @@ The current V1 range path is intentionally conservative:
 1. The host schedules a short 18.5 kHz pulse slightly in the future using its current host-clock model.
 2. The host publishes the pulse id, intended host epoch, frequency, and duration through the normal heartbeat.
 3. A peer that sees a mic peak in the same-room propagation window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
-4. The room state derives `meters = propagationMs / 1000 * 343` and rejects negative or implausibly late observations.
+4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
 
 This is not yet the final detector. The next detector should replace the simple mic-level peak with matched filtering or GCC-PHAT against the known pulse/chirp and keep a short rolling audio history so observations are not missed by polling latency.

@@ -41,6 +41,8 @@ describe("acoustic room ranging", () => {
         pulseId: "pulse-1",
         meters: 2.06,
         confidence: expect.closeTo(0.795, 3),
+        timingUncertaintyMs: 1.2,
+        distanceUncertaintyMeters: 0.41,
       }),
     ]);
   });

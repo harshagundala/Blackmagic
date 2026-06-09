@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   audioFrameTimestamp,
+  audioSampleTimestamp,
   estimateClockOffset,
+  retainClockExchanges,
   robustClockModel,
   type ClockExchange,
 } from "./clock-sync";
@@ -34,6 +36,9 @@ describe("clock sync metadata", () => {
     const model = robustClockModel(exchanges);
 
     expect(model.offsetMs).toBeCloseTo(101, 1);
+    expect(model.bestRoundTripMs).toBe(28);
+    expect(model.jitterMs).toBeCloseTo(0.816, 3);
+    expect(model.maxErrorMs).toBeCloseTo(14.816, 3);
     expect(model.uncertaintyMs).toBeLessThan(20);
     expect(model.quality).toBeGreaterThan(0.8);
     expect(model.samplesUsed).toBe(3);
@@ -53,6 +58,48 @@ describe("clock sync metadata", () => {
     expect(stamp.audioElapsedMs).toBeCloseTo(10_010, 3);
     expect(stamp.hostEstimatedEpochMs).toBeCloseTo(1_700_000_002_101.4, 3);
     expect(stamp.clockUncertaintyMs).toBe(8);
+  });
+
+  test("maps historical audio samples through an audio/performance anchor", () => {
+    const stamp = audioSampleTimestamp({
+      anchorAudioContextTimeSeconds: 10.01,
+      anchorPerformanceNowMs: 2_000,
+      sampleIndex: 480_240,
+      sampleRate: 48_000,
+      clientPerfOriginEpochMs: 1_700_000_000_000,
+      clockOffsetMs: 101.4,
+      clockUncertaintyMs: 8,
+    });
+
+    expect(stamp.audioContextTimeSeconds).toBeCloseTo(10.005, 6);
+    expect(stamp.performanceNowMs).toBeCloseTo(1_995, 3);
+    expect(stamp.audioElapsedMs).toBeCloseTo(10_005, 3);
+    expect(stamp.hostEstimatedEpochMs).toBeCloseTo(1_700_000_002_096.4, 3);
+  });
+
+  test("keeps a bounded low-latency exchange history for realtime sync", () => {
+    const retained = retainClockExchanges(
+      [makeExchange(100, 22), makeExchange(101, 24), makeExchange(99, 26)],
+      makeExchange(130, 400),
+      { maxRoundTripMs: 80, maxSamples: 3 },
+    );
+
+    expect(retained.map((exchange) => estimateClockOffset(exchange).offsetMs)).toEqual([
+      100,
+      101,
+      99,
+    ]);
+
+    const next = retainClockExchanges(retained, makeExchange(102, 20), {
+      maxRoundTripMs: 80,
+      maxSamples: 3,
+    });
+
+    expect(next.map((exchange) => estimateClockOffset(exchange).offsetMs)).toEqual([
+      101,
+      99,
+      102,
+    ]);
   });
 });
 

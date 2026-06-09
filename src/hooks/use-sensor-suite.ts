@@ -10,8 +10,9 @@ import {
   type SetStateAction,
 } from "react";
 import {
-  audioFrameTimestamp,
+  audioSampleTimestamp,
   estimateClockOffset,
+  retainClockExchanges,
   robustClockModel,
   type AudioFrameTimestamp,
   type ClockExchange,
@@ -46,6 +47,10 @@ const idleSnapshot: SensorSnapshot = {
   clock: null,
 };
 
+const CLOCK_SYNC_INTERVAL_MS = 1_000;
+const CLOCK_SYNC_WARMUP_COUNT = 4;
+const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
+
 type PermissionEventConstructor = {
   requestPermission?: () => Promise<"granted" | "denied" | "default">;
 };
@@ -56,6 +61,7 @@ export function useSensorSuite() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
+  const clockSyncRunRef = useRef(0);
   const motionActiveRef = useRef(false);
   const headingActiveRef = useRef(false);
   const clockExchangesRef = useRef<ClockExchange[]>([]);
@@ -69,6 +75,7 @@ export function useSensorSuite() {
       window.clearInterval(clockTimerRef.current);
       clockTimerRef.current = null;
     }
+    clockSyncRunRef.current += 1;
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -83,11 +90,18 @@ export function useSensorSuite() {
   }, []);
 
   const start = useCallback(async () => {
+    const syncRun = clockSyncRunRef.current + 1;
+    clockSyncRunRef.current = syncRun;
     await requestMotionPermission();
     await syncClock(setSnapshot, clockExchangesRef);
+    void warmClockSync(
+      setSnapshot,
+      clockExchangesRef,
+      () => clockSyncRunRef.current === syncRun,
+    );
     clockTimerRef.current = window.setInterval(
       () => void syncClock(setSnapshot, clockExchangesRef),
-      2_000,
+      CLOCK_SYNC_INTERVAL_MS,
     );
     window.addEventListener("deviceorientation", handleOrientation);
     window.addEventListener("devicemotion", handleMotion);
@@ -219,9 +233,7 @@ async function syncClock(
       clientReceivePerfMs,
     };
     const estimate = estimateClockOffset(exchange);
-    exchangesRef.current = [...exchangesRef.current, exchange]
-      .slice(-12)
-      .filter((item) => estimateClockOffset(item).roundTripMs < 750);
+    exchangesRef.current = retainClockExchanges(exchangesRef.current, exchange);
     const clock = robustClockModel(exchangesRef.current);
 
     setSnapshot((current) => ({
@@ -235,27 +247,56 @@ async function syncClock(
   }
 }
 
+async function warmClockSync(
+  setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
+  exchangesRef: MutableRefObject<ClockExchange[]>,
+  isCurrentRun: () => boolean,
+) {
+  for (let index = 0; index < CLOCK_SYNC_WARMUP_COUNT; index += 1) {
+    await wait(CLOCK_SYNC_WARMUP_SPACING_MS);
+    if (!isCurrentRun()) {
+      return;
+    }
+    await syncClock(setSnapshot, exchangesRef);
+  }
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function timestampAudioFrame(
   audioContext: AudioContext,
   clock: ClockModel,
 ): AudioFrameTimestamp {
   const outputTimestamp = audioContext.getOutputTimestamp?.();
-  const audioContextTimeSeconds =
-    outputTimestamp?.contextTime ?? audioContext.currentTime;
-  const performanceNowMs = outputTimestamp?.performanceTime ?? performance.now();
+  const audioContextTimeSeconds = validTimestamp(
+    outputTimestamp?.contextTime,
+    audioContext.currentTime,
+  );
+  const performanceNowMs = validTimestamp(
+    outputTimestamp?.performanceTime,
+    performance.now(),
+  );
   const sampleIndex = Math.round(
     audioContextTimeSeconds * audioContext.sampleRate,
   );
 
-  return audioFrameTimestamp({
-    audioContextTimeSeconds,
+  return audioSampleTimestamp({
+    anchorAudioContextTimeSeconds: audioContextTimeSeconds,
+    anchorPerformanceNowMs: performanceNowMs,
     sampleIndex,
     sampleRate: audioContext.sampleRate,
     clientPerfOriginEpochMs: performance.timeOrigin || Date.now() - performance.now(),
-    performanceNowMs,
     clockOffsetMs: clock.offsetMs,
     clockUncertaintyMs: clock.uncertaintyMs,
   });
+}
+
+function validTimestamp(value: number | undefined, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
 }
 
 declare global {
