@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { estimateRoomConstellation } from "./room-state-layout";
+import {
+  estimateRoomConstellation,
+  rangeLayoutWeight,
+} from "./room-state-layout";
+import type { AcousticRange } from "@/lib/session/ranging";
 import type { RoomState } from "@/lib/session/registry";
 
 describe("room state constellation", () => {
@@ -50,8 +54,44 @@ describe("room state constellation", () => {
         deviceId: "phone-a",
         role: "phone",
         distanceMeters: 2.4,
-        confidence: 0.82,
+        confidence: 0.467,
       }),
     ]);
   });
+
+  test("weights repeated low-uncertainty ranges above one-shot uncertain ranges", () => {
+    const stable = acousticRange({
+      confidence: 0.7,
+      distanceUncertaintyMeters: 0.2,
+      samplesUsed: 5,
+    });
+    const oneShot = acousticRange({
+      confidence: 0.82,
+      distanceUncertaintyMeters: 1.8,
+      samplesUsed: 1,
+    });
+
+    expect(rangeLayoutWeight(stable)).toBeGreaterThan(
+      rangeLayoutWeight(oneShot),
+    );
+    expect(rangeLayoutWeight(oneShot)).toBeLessThan(0.45);
+  });
 });
+
+function acousticRange(
+  overrides: Partial<AcousticRange> = {},
+): AcousticRange {
+  return {
+    from: "host",
+    to: "phone-a",
+    pulseId: "pulse-1",
+    pulseIds: ["pulse-1"],
+    samplesUsed: 1,
+    meters: 2.4,
+    timingUncertaintyMs: 1.2,
+    distanceUncertaintyMeters: 0.41,
+    confidence: 0.82,
+    observedAtHostEpochMs: 10_006,
+    ...overrides,
+  };
+}

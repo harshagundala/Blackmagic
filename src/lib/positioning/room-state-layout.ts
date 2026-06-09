@@ -4,6 +4,7 @@ import {
   type PairwiseDistance,
 } from "./layout";
 import type { RoomState, SessionRole } from "@/lib/session/registry";
+import type { AcousticRange } from "@/lib/session/ranging";
 
 export type RoomConstellationDevice = {
   deviceId: string;
@@ -25,7 +26,7 @@ export function estimateRoomConstellation(room: RoomState): RoomConstellation {
     from: range.from,
     to: range.to,
     meters: range.meters,
-    weight: range.confidence,
+    weight: rangeLayoutWeight(range),
   }));
   const layout = estimateConstellation(participantIds, distances, {
     anchorId: room.hostDeviceId,
@@ -43,14 +44,33 @@ export function estimateRoomConstellation(room: RoomState): RoomConstellation {
         x: point.x,
         y: point.y,
         distanceMeters: range?.meters ?? null,
-        confidence: range?.confidence ?? layout.quality,
+        confidence: range ? rangeLayoutWeight(range) : layout.quality,
       };
     }),
   };
 }
 
+export function rangeLayoutWeight(range: AcousticRange) {
+  const sampleScore = Math.min(
+    1.25,
+    0.7 + Math.log2(range.samplesUsed + 1) * 0.18,
+  );
+  const uncertaintyScore =
+    1 / (1 + Math.max(0, range.distanceUncertaintyMeters) / 0.75);
+  return round(
+    Math.max(
+      0.03,
+      Math.min(1, range.confidence * sampleScore * uncertaintyScore),
+    ),
+  );
+}
+
 function strongestRangeForDevice(room: RoomState, deviceId: string) {
   return room.ranges
     .filter((range) => range.from === deviceId || range.to === deviceId)
-    .sort((a, b) => b.confidence - a.confidence)[0];
+    .sort((a, b) => rangeLayoutWeight(b) - rangeLayoutWeight(a))[0];
+}
+
+function round(value: number) {
+  return Number(value.toFixed(3));
 }
