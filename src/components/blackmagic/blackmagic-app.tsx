@@ -11,6 +11,10 @@ import {
 import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
 import {
+  calibrationEventKey,
+  shouldFlushCalibrationEvent,
+} from "@/lib/calibration/cadence";
+import {
   createMatchedToneObservation,
   createScheduledAcousticPulse,
   createToneObservation,
@@ -41,6 +45,7 @@ export function BlackmagicApp() {
   const publishedPulseIdRef = useRef("");
   const observablePulseRef = useRef<AcousticPulse | null>(null);
   const observedPulseIdRef = useRef("");
+  const flushedCalibrationEventRef = useRef("");
   const pulseTimeoutRef = useRef<number | null>(null);
   const peerCount =
     roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
@@ -61,6 +66,23 @@ export function BlackmagicApp() {
     setPhase("listening");
     await sensors.start();
   }, [phase, sensors]);
+
+  const flushCalibrationEvent = useCallback(
+    (eventKey: string) => {
+      if (
+        !shouldFlushCalibrationEvent(
+          flushedCalibrationEventRef.current,
+          eventKey,
+        )
+      ) {
+        return;
+      }
+
+      flushedCalibrationEventRef.current = eventKey;
+      void heartbeat(snapshotRef.current, calibrationRef.current);
+    },
+    [heartbeat],
+  );
 
   useEffect(() => {
     if (phase !== "listening") {
@@ -111,6 +133,7 @@ export function BlackmagicApp() {
         acousticObservation: calibrationRef.current.acousticObservation ?? null,
       };
       scheduleOutputPulse(pulse, snapshotRef.current, pulseTimeoutRef);
+      flushCalibrationEvent(calibrationEventKey("pulse", pulse.id));
     };
 
     publishPulse();
@@ -122,7 +145,7 @@ export function BlackmagicApp() {
         pulseTimeoutRef.current = null;
       }
     };
-  }, [deviceId, phase, roomState]);
+  }, [deviceId, flushCalibrationEvent, phase, roomState]);
 
   useEffect(() => {
     if (phase !== "listening" || !roomState) {
@@ -166,7 +189,10 @@ export function BlackmagicApp() {
       acousticPulse: calibrationRef.current.acousticPulse ?? null,
       acousticObservation: observation,
     };
-  }, [phase, sensors.snapshot]);
+    flushCalibrationEvent(
+      calibrationEventKey("observation", observation.pulseId),
+    );
+  }, [flushCalibrationEvent, phase, sensors.snapshot]);
 
   const visualPhase: Phase = phase === "arriving" && claimReady ? "waiting" : phase;
   const label = visualPhase === "arriving" ? "" : role === "host" ? "host" : "nearby";
