@@ -83,10 +83,12 @@ export function useRoomSession(): RoomSession {
           deviceId,
           url: urlRef.current,
           heartbeat: {
+            mic: snapshot.mic,
             micLevel: snapshot.micLevel,
             sampleRate: snapshot.sampleRate,
             clockQuality: snapshot.clock?.quality ?? null,
             clockUncertaintyMs: snapshot.clock?.uncertaintyMs ?? null,
+            audioFrame: snapshot.audioFrame,
             motion: snapshot.motion,
             heading: snapshot.heading,
             location: snapshot.location,

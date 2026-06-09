@@ -20,10 +20,10 @@ export type ClockModel = {
 };
 
 export type AudioFrameTimestampInput = {
-  deviceId: string;
   audioContextTimeSeconds: number;
   sampleIndex: number;
   sampleRate: number;
+  clientPerfOriginEpochMs: number;
   performanceNowMs: number;
   clockOffsetMs: number;
   clockUncertaintyMs: number;
@@ -92,11 +92,13 @@ export function audioFrameTimestamp(
   input: AudioFrameTimestampInput,
 ): AudioFrameTimestamp {
   const audioElapsedMs = (input.sampleIndex / input.sampleRate) * 1_000;
+  const clientEstimatedEpochMs =
+    input.clientPerfOriginEpochMs + input.performanceNowMs;
 
   return {
     ...input,
     audioElapsedMs: round(audioElapsedMs),
-    hostEstimatedEpochMs: round(input.performanceNowMs + input.clockOffsetMs),
+    hostEstimatedEpochMs: round(clientEstimatedEpochMs + input.clockOffsetMs),
   };
 }
 

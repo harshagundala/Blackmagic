@@ -41,17 +41,17 @@ describe("clock sync metadata", () => {
 
   test("timestamps audio by sample index and preserves host-aligned estimate", () => {
     const stamp = audioFrameTimestamp({
-      deviceId: "phone-a",
       audioContextTimeSeconds: 10,
       sampleIndex: 480_480,
       sampleRate: 48_000,
+      clientPerfOriginEpochMs: 1_700_000_000_000,
       performanceNowMs: 2_000,
       clockOffsetMs: 101.4,
       clockUncertaintyMs: 8,
     });
 
     expect(stamp.audioElapsedMs).toBeCloseTo(10_010, 3);
-    expect(stamp.hostEstimatedEpochMs).toBeCloseTo(2_101.4, 3);
+    expect(stamp.hostEstimatedEpochMs).toBeCloseTo(1_700_000_002_101.4, 3);
     expect(stamp.clockUncertaintyMs).toBe(8);
   });
 });

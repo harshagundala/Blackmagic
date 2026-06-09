@@ -10,8 +10,10 @@ import {
   type SetStateAction,
 } from "react";
 import {
+  audioFrameTimestamp,
   estimateClockOffset,
   robustClockModel,
+  type AudioFrameTimestamp,
   type ClockExchange,
   type ClockModel,
 } from "@/lib/timing/clock-sync";
@@ -25,6 +27,7 @@ export type SensorSnapshot = {
   location: SensorState;
   micLevel: number;
   sampleRate: number | null;
+  audioFrame: AudioFrameTimestamp | null;
   headingDegrees: number | null;
   locationAccuracyMeters: number | null;
   clock: ClockModel | null;
@@ -37,6 +40,7 @@ const idleSnapshot: SensorSnapshot = {
   location: "idle",
   micLevel: 0,
   sampleRate: null,
+  audioFrame: null,
   headingDegrees: null,
   locationAccuracyMeters: null,
   clock: null,
@@ -125,6 +129,9 @@ export function useSensorSuite() {
           mic: "active",
           micLevel,
           sampleRate: audioContext.sampleRate,
+          audioFrame: current.clock
+            ? timestampAudioFrame(audioContext, current.clock)
+            : null,
           motion: motionActiveRef.current ? "active" : current.motion,
           heading: headingActiveRef.current ? "active" : current.heading,
         }));
@@ -226,6 +233,29 @@ async function syncClock(
   } catch {
     return null;
   }
+}
+
+function timestampAudioFrame(
+  audioContext: AudioContext,
+  clock: ClockModel,
+): AudioFrameTimestamp {
+  const outputTimestamp = audioContext.getOutputTimestamp?.();
+  const audioContextTimeSeconds =
+    outputTimestamp?.contextTime ?? audioContext.currentTime;
+  const performanceNowMs = outputTimestamp?.performanceTime ?? performance.now();
+  const sampleIndex = Math.round(
+    audioContextTimeSeconds * audioContext.sampleRate,
+  );
+
+  return audioFrameTimestamp({
+    audioContextTimeSeconds,
+    sampleIndex,
+    sampleRate: audioContext.sampleRate,
+    clientPerfOriginEpochMs: performance.timeOrigin || Date.now() - performance.now(),
+    performanceNowMs,
+    clockOffsetMs: clock.offsetMs,
+    clockUncertaintyMs: clock.uncertaintyMs,
+  });
 }
 
 declare global {

@@ -1,3 +1,5 @@
+import type { AudioFrameTimestamp } from "@/lib/timing/clock-sync";
+
 export type SessionRole = "host" | "phone";
 
 export type SessionClaim = {
@@ -11,10 +13,12 @@ export type SessionClaim = {
 export type SensorState = "idle" | "active" | "blocked";
 
 export type DeviceHeartbeat = {
+  mic?: SensorState;
   micLevel?: number | null;
   sampleRate?: number | null;
   clockQuality?: number | null;
   clockUncertaintyMs?: number | null;
+  audioFrame?: AudioFrameTimestamp | null;
   motion?: SensorState;
   heading?: SensorState;
   location?: SensorState;
@@ -151,22 +155,77 @@ export function normalizeSessionKey(url: string) {
 
 function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
   return {
+    mic: heartbeat.mic,
     micLevel: clampNumber(heartbeat.micLevel, 0, 1),
     sampleRate: heartbeat.sampleRate ?? null,
     clockQuality: clampNumber(heartbeat.clockQuality, 0, 1),
     clockUncertaintyMs: heartbeat.clockUncertaintyMs ?? null,
+    audioFrame: sanitizeAudioFrame(heartbeat.audioFrame),
     motion: heartbeat.motion,
     heading: heartbeat.heading,
     location: heartbeat.location,
   };
 }
 
+function sanitizeAudioFrame(
+  frame: AudioFrameTimestamp | null | undefined,
+): AudioFrameTimestamp | null {
+  if (!frame) {
+    return null;
+  }
+
+  const sampleRate = finiteNumber(frame.sampleRate);
+  const sampleIndex = finiteNumber(frame.sampleIndex);
+  const audioContextTimeSeconds = finiteNumber(frame.audioContextTimeSeconds);
+  const clientPerfOriginEpochMs = finiteNumber(frame.clientPerfOriginEpochMs);
+  const performanceNowMs = finiteNumber(frame.performanceNowMs);
+  const clockOffsetMs = finiteNumber(frame.clockOffsetMs);
+  const clockUncertaintyMs = finiteNumber(frame.clockUncertaintyMs);
+  const audioElapsedMs = finiteNumber(frame.audioElapsedMs);
+  const hostEstimatedEpochMs = finiteNumber(frame.hostEstimatedEpochMs);
+
+  if (
+    sampleRate === null ||
+    sampleRate <= 0 ||
+    sampleIndex === null ||
+    audioContextTimeSeconds === null ||
+    clientPerfOriginEpochMs === null ||
+    performanceNowMs === null ||
+    clockOffsetMs === null ||
+    clockUncertaintyMs === null ||
+    audioElapsedMs === null ||
+    hostEstimatedEpochMs === null
+  ) {
+    return null;
+  }
+
+  return {
+    audioContextTimeSeconds,
+    sampleIndex: Math.max(0, Math.round(sampleIndex)),
+    sampleRate,
+    clientPerfOriginEpochMs,
+    performanceNowMs,
+    clockOffsetMs,
+    clockUncertaintyMs,
+    audioElapsedMs,
+    hostEstimatedEpochMs,
+  };
+}
+
 function clampNumber(value: number | null | undefined, min: number, max: number) {
-  if (typeof value !== "number" || Number.isNaN(value)) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     return value ?? null;
   }
 
   return Math.max(min, Math.min(max, value));
+}
+
+function finiteNumber(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
 }
 
 function compareDevices(a: RoomDevice, b: RoomDevice) {

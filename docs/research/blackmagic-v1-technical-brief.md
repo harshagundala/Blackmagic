@@ -25,14 +25,14 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 
 ## Realtime Architecture Decision
 
-Vercel hosts the Next.js app, HTTPS sensor permission surface, QR/session routes, and short-lived provider token endpoints. It should not be the persistent WebSocket server. Production realtime should use Ably by default, with WebRTC data/audio channels for peer media and TURN for reliable NAT traversal.
+Vercel hosts the Next.js app, HTTPS sensor permission surface, URL session routes, and short-lived provider token endpoints. It should not be the persistent WebSocket server. Production realtime should use Ably by default, with WebRTC data/audio channels for peer media and TURN for reliable NAT traversal.
 
 The current repository keeps that provider seam explicit through `src/lib/realtime/contracts.ts` and `/api/realtime/config`. Without provider credentials the app runs in demo mode and exercises the same calibration/positioning code paths.
 
 The deployed V1 now also exposes providerless polling endpoints:
 
 - `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
-- `/api/session/heartbeat`: publishes low-rate sensor and clock quality summaries.
+- `/api/session/heartbeat`: publishes low-rate sensor, clock quality, and audio-frame timestamp summaries.
 - `/api/session/state`: reads active room devices and prunes stale phones.
 
 This is intentionally a stepping stone. The API contract is useful, but production rooms should move to durable realtime transport so room state is not tied to a single serverless runtime.
@@ -45,7 +45,9 @@ Localization cannot depend on `Date.now()`, WebSocket delivery time, or server r
 - audio sample index;
 - sample rate;
 - `AudioContext.currentTime`;
+- client performance-time origin;
 - local `performance.now()`;
+- host-estimated epoch time for the audio frame;
 - current host-clock offset estimate;
 - clock uncertainty / round-trip confidence.
 
