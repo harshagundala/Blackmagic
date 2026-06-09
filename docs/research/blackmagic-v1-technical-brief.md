@@ -29,6 +29,14 @@ Vercel hosts the Next.js app, HTTPS sensor permission surface, QR/session routes
 
 The current repository keeps that provider seam explicit through `src/lib/realtime/contracts.ts` and `/api/realtime/config`. Without provider credentials the app runs in demo mode and exercises the same calibration/positioning code paths.
 
+The deployed V1 now also exposes providerless polling endpoints:
+
+- `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
+- `/api/session/heartbeat`: publishes low-rate sensor and clock quality summaries.
+- `/api/session/state`: reads active room devices and prunes stale phones.
+
+This is intentionally a stepping stone. The API contract is useful, but production rooms should move to durable realtime transport so room state is not tied to a single serverless runtime.
+
 ## Timestamp Reconciliation
 
 Localization cannot depend on `Date.now()`, WebSocket delivery time, or server receive time. Audio metadata must carry:

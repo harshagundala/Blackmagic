@@ -8,6 +8,8 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Near-wordless Apple-like instrument UI with QR invite rail, icon controls, and a live relative-position canvas.
 - Browser sensor acquisition hook for mic level, sample rate, motion/orientation, and geolocation accuracy.
 - Host-clock sync model and sample-domain audio timestamp metadata for future real-time/offline reconciliation.
+- URL-based room claim: first device is host, later devices are nearby phones.
+- Polling room heartbeat for active device presence, sensor status, and clock quality metadata.
 - Tested acoustic delay primitives and distance conversion.
 - Tested pairwise calibration planner with robust median/outlier handling.
 - Tested 2D weighted stress minimization for relative phone layout.
@@ -38,3 +40,5 @@ npm run start
 ## Realtime
 
 Vercel should host the app, HTTPS permission surface, QR/session pages, and token APIs. Persistent realtime should live in a provider such as Ably, with WebRTC/TURN added for reliable media/data channels. Without `ABLY_API_KEY`, `/api/realtime/config` reports demo mode.
+
+Current room state uses server-side polling APIs as a providerless stepping stone. Production-grade multi-device rooms still need durable realtime storage/transport so host claims and sensor presence survive serverless instance movement.

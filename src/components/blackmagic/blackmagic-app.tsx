@@ -1,46 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite } from "@/hooks/use-sensor-suite";
-import type { SessionRole } from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
 
-type SessionClaimResponse = {
-  role: SessionRole;
-  sessionKey: string;
-};
-
 export function BlackmagicApp() {
   const sensors = useSensorSuite();
+  const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession();
   const [phase, setPhase] = useState<Phase>("arriving");
-  const [role, setRole] = useState<SessionRole | null>(null);
-  const deviceId = useMemo(() => getOrCreateDeviceId(), []);
+  const snapshotRef = useRef(sensors.snapshot);
+  const peerCount =
+    roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function claim() {
-      const response = await fetch("/api/session/claim", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          deviceId,
-          url: window.location.href,
-        }),
-      });
-      const data = (await response.json()) as SessionClaimResponse;
-      if (!cancelled) {
-        setRole(data.role);
-        setPhase("waiting");
-      }
-    }
-
-    void claim();
-    return () => {
-      cancelled = true;
-    };
-  }, [deviceId]);
+    snapshotRef.current = sensors.snapshot;
+  }, [sensors.snapshot]);
 
   const begin = useCallback(async () => {
     if (phase === "listening") {
@@ -51,7 +27,18 @@ export function BlackmagicApp() {
     await sensors.start();
   }, [phase, sensors]);
 
-  const label = phase === "arriving" ? "" : role === "host" ? "host" : "nearby";
+  useEffect(() => {
+    if (phase !== "listening") {
+      return;
+    }
+
+    void heartbeat(snapshotRef.current);
+    const timer = window.setInterval(() => void heartbeat(snapshotRef.current), 1_500);
+    return () => window.clearInterval(timer);
+  }, [heartbeat, phase]);
+
+  const visualPhase: Phase = phase === "arriving" && claimReady ? "waiting" : phase;
+  const label = visualPhase === "arriving" ? "" : role === "host" ? "host" : "nearby";
   const pulse = phase === "listening" ? Math.min(1, Math.max(0.18, sensors.snapshot.micLevel * 24)) : 0.28;
 
   return (
@@ -87,6 +74,17 @@ export function BlackmagicApp() {
             transform: `translate(-50%, -50%) scale(${0.96 + pulse * 0.06})`,
           }}
         />
+        {Array.from({ length: Math.min(peerCount, 5) }).map((_, index) => (
+          <span
+            aria-hidden
+            className="absolute left-1/2 top-1/2 h-3 w-3 rounded-full bg-[#05060a]/55 shadow-[0_0_28px_rgba(0,122,255,0.26)]"
+            key={index}
+            style={{
+              transform: `translate(calc(-50% + ${Math.cos(index * 1.78 - 1.1) * 132}px), calc(-50% + ${Math.sin(index * 1.78 - 1.1) * 132}px))`,
+              opacity: 0.35 + index * 0.08,
+            }}
+          />
+        ))}
       </div>
 
       <section className="relative z-10 flex min-h-dvh flex-col items-center justify-between px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(34px,env(safe-area-inset-top))] text-center">
@@ -134,20 +132,4 @@ export function BlackmagicApp() {
       </section>
     </main>
   );
-}
-
-function getOrCreateDeviceId() {
-  if (typeof window === "undefined") {
-    return "server";
-  }
-
-  const key = "blackmagic.device";
-  const existing = window.localStorage.getItem(key);
-  if (existing) {
-    return existing;
-  }
-
-  const next = crypto.randomUUID();
-  window.localStorage.setItem(key, next);
-  return next;
 }
