@@ -6,6 +6,7 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 
 - Web Audio microphone capture with `getUserMedia()` and raw-ish constraints where the browser honors them.
 - Pairwise chirp calibration inspired by BeepBeep / elapsed time of arrival ranging: measure sample offsets on the same device clock and avoid JavaScript clock sync.
+- Scheduled active pulse metadata: emitters publish future host-aligned pulse times; observers report detected pulse times with amplitude, confidence, and clock uncertainty.
 - Matched filtering / GCC-PHAT-style delay detection as the detector layer.
 - Robust repeated measurements: median range selection, confidence weighting, and outlier rejection.
 - Weighted 2D stress minimization for the relative phone constellation.
@@ -32,8 +33,8 @@ The current repository keeps that provider seam explicit through `src/lib/realti
 The deployed V1 now also exposes polling endpoints:
 
 - `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
-- `/api/session/heartbeat`: publishes low-rate sensor, clock quality, and audio-frame timestamp summaries.
-- `/api/session/state`: reads active room devices and prunes stale phones.
+- `/api/session/heartbeat`: publishes low-rate sensor, clock quality, audio-frame timestamp, acoustic pulse, and acoustic observation summaries.
+- `/api/session/state`: reads active room devices, prunes stale phones, and derives acoustic range hints from matched pulse/observation metadata.
 
 The room API is backed by a `SessionStore` abstraction. With `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, it stores host claims and device heartbeats in Upstash Redis over REST, which matches Vercel Marketplace's current Redis path. Without those variables, it falls back to an in-memory store for local development and demos.
 
@@ -54,3 +55,14 @@ Localization cannot depend on `Date.now()`, WebSocket delivery time, or server r
 - clock uncertainty / round-trip confidence.
 
 The clock model should run continuously using low-RTT echo exchanges, but the sample index remains the strongest timestamp inside a device recording. Network clock sync is a real-time alignment prior; offline or near-real-time reconciliation should refine alignment by cross-correlating the actual audio history.
+
+## Active Pulse Ranging
+
+The current V1 range path is intentionally conservative:
+
+1. The host schedules a short 18.5 kHz pulse slightly in the future using its current host-clock model.
+2. The host publishes the pulse id, intended host epoch, frequency, and duration through the normal heartbeat.
+3. A peer that sees a mic peak in the same-room propagation window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
+4. The room state derives `meters = propagationMs / 1000 * 343` and rejects negative or implausibly late observations.
+
+This is not yet the final detector. The next detector should replace the simple mic-level peak with matched filtering or GCC-PHAT against the known pulse/chirp and keep a short rolling audio history so observations are not missed by polling latency.

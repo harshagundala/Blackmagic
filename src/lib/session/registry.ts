@@ -1,4 +1,5 @@
 import type { AudioFrameTimestamp } from "@/lib/timing/clock-sync";
+import { deriveAcousticRanges, type AcousticRange } from "./ranging";
 
 export type SessionRole = "host" | "phone";
 
@@ -12,6 +13,21 @@ export type SessionClaim = {
 
 export type SensorState = "idle" | "active" | "blocked";
 
+export type AcousticPulse = {
+  id: string;
+  emittedAtHostEpochMs: number;
+  durationMs: number;
+  frequencyHz: number;
+};
+
+export type AcousticObservation = {
+  pulseId: string;
+  detectedAtHostEpochMs: number;
+  amplitude: number;
+  confidence: number;
+  clockUncertaintyMs?: number | null;
+};
+
 export type DeviceHeartbeat = {
   mic?: SensorState;
   micLevel?: number | null;
@@ -19,6 +35,8 @@ export type DeviceHeartbeat = {
   clockQuality?: number | null;
   clockUncertaintyMs?: number | null;
   audioFrame?: AudioFrameTimestamp | null;
+  acousticPulse?: AcousticPulse | null;
+  acousticObservation?: AcousticObservation | null;
   motion?: SensorState;
   heading?: SensorState;
   location?: SensorState;
@@ -30,6 +48,7 @@ export type RoomState = {
   sessionKey: string;
   hostDeviceId: string;
   devices: RoomDevice[];
+  ranges: AcousticRange[];
   updatedAt: number;
 };
 
@@ -138,16 +157,19 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
           sessionKey,
           hostDeviceId: "",
           devices: [],
+          ranges: [],
           updatedAt: timestamp,
         };
       }
 
       pruneStaleClaims(record, timestamp, staleAfterMs);
+      const devices = [...record.claims.values()].sort(compareDevices);
 
       return {
         sessionKey,
         hostDeviceId: record.hostDeviceId,
-        devices: [...record.claims.values()].sort(compareDevices),
+        devices,
+        ranges: deriveAcousticRanges(devices),
         updatedAt: timestamp,
       };
     },
@@ -196,6 +218,10 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     clockQuality: clampNumber(heartbeat.clockQuality, 0, 1),
     clockUncertaintyMs: heartbeat.clockUncertaintyMs ?? null,
     audioFrame: sanitizeAudioFrame(heartbeat.audioFrame),
+    acousticPulse: sanitizeAcousticPulse(heartbeat.acousticPulse),
+    acousticObservation: sanitizeAcousticObservation(
+      heartbeat.acousticObservation,
+    ),
     motion: heartbeat.motion,
     heading: heartbeat.heading,
     location: heartbeat.location,
@@ -244,6 +270,68 @@ function sanitizeAudioFrame(
     clockUncertaintyMs,
     audioElapsedMs,
     hostEstimatedEpochMs,
+  };
+}
+
+function sanitizeAcousticPulse(
+  pulse: AcousticPulse | null | undefined,
+): AcousticPulse | null {
+  if (!pulse) {
+    return null;
+  }
+
+  const emittedAtHostEpochMs = finiteNumber(pulse.emittedAtHostEpochMs);
+  const durationMs = finiteNumber(pulse.durationMs);
+  const frequencyHz = finiteNumber(pulse.frequencyHz);
+
+  if (
+    typeof pulse.id !== "string" ||
+    pulse.id.length === 0 ||
+    emittedAtHostEpochMs === null ||
+    durationMs === null ||
+    durationMs <= 0 ||
+    frequencyHz === null ||
+    frequencyHz <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    id: pulse.id.slice(0, 80),
+    emittedAtHostEpochMs,
+    durationMs,
+    frequencyHz,
+  };
+}
+
+function sanitizeAcousticObservation(
+  observation: AcousticObservation | null | undefined,
+): AcousticObservation | null {
+  if (!observation) {
+    return null;
+  }
+
+  const detectedAtHostEpochMs = finiteNumber(observation.detectedAtHostEpochMs);
+  const amplitude = clampNumber(observation.amplitude, 0, 1);
+  const confidence = clampNumber(observation.confidence, 0, 1);
+
+  if (
+    typeof observation.pulseId !== "string" ||
+    observation.pulseId.length === 0 ||
+    detectedAtHostEpochMs === null ||
+    amplitude === null ||
+    confidence === null ||
+    confidence <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    pulseId: observation.pulseId.slice(0, 80),
+    detectedAtHostEpochMs,
+    amplitude,
+    confidence,
+    clockUncertaintyMs: observation.clockUncertaintyMs ?? null,
   };
 }
 

@@ -1,18 +1,47 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import { useRoomSession } from "@/hooks/use-room-session";
-import { useSensorSuite } from "@/hooks/use-sensor-suite";
+import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
+import {
+  createScheduledAcousticPulse,
+  createToneObservation,
+} from "@/lib/calibration/pulse";
+import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
+import type {
+  AcousticObservation,
+  AcousticPulse,
+  DeviceHeartbeat,
+} from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
+type CalibrationHeartbeat = Pick<
+  DeviceHeartbeat,
+  "acousticPulse" | "acousticObservation"
+>;
 
 export function BlackmagicApp() {
   const sensors = useSensorSuite();
   const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession();
   const [phase, setPhase] = useState<Phase>("arriving");
   const snapshotRef = useRef(sensors.snapshot);
+  const calibrationRef = useRef<CalibrationHeartbeat>({});
+  const pulseSequenceRef = useRef(0);
+  const observedPulseIdRef = useRef("");
+  const pulseTimeoutRef = useRef<number | null>(null);
   const peerCount =
     roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
+  const constellation = useMemo(
+    () => (roomState ? estimateRoomConstellation(roomState) : null),
+    [roomState],
+  );
 
   useEffect(() => {
     snapshotRef.current = sensors.snapshot;
@@ -32,14 +61,81 @@ export function BlackmagicApp() {
       return;
     }
 
-    void heartbeat(snapshotRef.current);
-    const timer = window.setInterval(() => void heartbeat(snapshotRef.current), 1_500);
+    void heartbeat(snapshotRef.current, calibrationRef.current);
+    const timer = window.setInterval(
+      () => void heartbeat(snapshotRef.current, calibrationRef.current),
+      1_500,
+    );
     return () => window.clearInterval(timer);
   }, [heartbeat, phase]);
+
+  useEffect(() => {
+    if (phase !== "listening" || role !== "host") {
+      return;
+    }
+
+    const publishPulse = () => {
+      const hostEpochNowMs = hostEpochNow(snapshotRef.current);
+      if (hostEpochNowMs === null) {
+        return;
+      }
+
+      const pulse = createScheduledAcousticPulse({
+        deviceId,
+        sequence: pulseSequenceRef.current,
+        hostEpochNowMs,
+      });
+      pulseSequenceRef.current += 1;
+      calibrationRef.current = {
+        acousticPulse: pulse,
+        acousticObservation: null,
+      };
+      scheduleOutputPulse(pulse, snapshotRef.current, pulseTimeoutRef);
+    };
+
+    publishPulse();
+    const timer = window.setInterval(publishPulse, 3_600);
+    return () => {
+      window.clearInterval(timer);
+      if (pulseTimeoutRef.current !== null) {
+        window.clearTimeout(pulseTimeoutRef.current);
+        pulseTimeoutRef.current = null;
+      }
+    };
+  }, [deviceId, phase, role]);
+
+  useEffect(() => {
+    if (phase !== "listening" || role !== "phone" || !roomState) {
+      return;
+    }
+
+    const hostPulse = roomState.devices.find(
+      (device) => device.deviceId === roomState.hostDeviceId,
+    )?.acousticPulse;
+    const observation = maybeCreateObservation(
+      hostPulse ?? null,
+      sensors.snapshot,
+      observedPulseIdRef.current,
+    );
+
+    if (!observation) {
+      return;
+    }
+
+    observedPulseIdRef.current = observation.pulseId;
+    calibrationRef.current = {
+      acousticPulse: null,
+      acousticObservation: observation,
+    };
+  }, [phase, role, roomState, sensors.snapshot]);
 
   const visualPhase: Phase = phase === "arriving" && claimReady ? "waiting" : phase;
   const label = visualPhase === "arriving" ? "" : role === "host" ? "host" : "nearby";
   const pulse = phase === "listening" ? Math.min(1, Math.max(0.18, sensors.snapshot.micLevel * 24)) : 0.28;
+  const constellationDots =
+    constellation?.devices.filter(
+      (device) => device.deviceId !== roomState?.hostDeviceId,
+    ) ?? [];
 
   return (
     <main
@@ -74,17 +170,32 @@ export function BlackmagicApp() {
             transform: `translate(-50%, -50%) scale(${0.96 + pulse * 0.06})`,
           }}
         />
-        {Array.from({ length: Math.min(peerCount, 5) }).map((_, index) => (
-          <span
-            aria-hidden
-            className="absolute left-1/2 top-1/2 h-3 w-3 rounded-full bg-[#05060a]/55 shadow-[0_0_28px_rgba(0,122,255,0.26)]"
-            key={index}
-            style={{
-              transform: `translate(calc(-50% + ${Math.cos(index * 1.78 - 1.1) * 132}px), calc(-50% + ${Math.sin(index * 1.78 - 1.1) * 132}px))`,
-              opacity: 0.35 + index * 0.08,
-            }}
-          />
-        ))}
+        {(constellationDots.length > 0
+          ? constellationDots.slice(0, 7)
+          : Array.from({ length: Math.min(peerCount, 5) }).map((_, index) => ({
+              confidence: 0.28 + index * 0.08,
+              deviceId: `fallback-${index}`,
+              x: Math.cos(index * 1.78 - 1.1) * 1.65,
+              y: Math.sin(index * 1.78 - 1.1) * 1.65,
+            }))
+        ).map((device, index) => {
+          const x = clamp(device.x * 84, -190, 190);
+          const y = clamp(device.y * 84, -190, 190);
+          const confidence = clamp(device.confidence, 0.2, 1);
+
+          return (
+            <span
+              aria-hidden
+              className="absolute left-1/2 top-1/2 h-3 w-3 rounded-full bg-[#05060a]/55 shadow-[0_0_28px_rgba(0,122,255,0.26)]"
+              key={device.deviceId}
+              style={{
+                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.82 + confidence * 0.36})`,
+                opacity: 0.28 + confidence * 0.42 + index * 0.025,
+                transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 300ms ease",
+              }}
+            />
+          );
+        })}
       </div>
 
       <section className="relative z-10 flex min-h-dvh flex-col items-center justify-between px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(34px,env(safe-area-inset-top))] text-center">
@@ -132,4 +243,80 @@ export function BlackmagicApp() {
       </section>
     </main>
   );
+}
+
+function hostEpochNow(snapshot: SensorSnapshot) {
+  if (snapshot.audioFrame) {
+    return snapshot.audioFrame.hostEstimatedEpochMs;
+  }
+
+  if (!snapshot.clock || typeof performance === "undefined") {
+    return null;
+  }
+
+  return performance.timeOrigin + performance.now() + snapshot.clock.offsetMs;
+}
+
+function maybeCreateObservation(
+  pulse: AcousticPulse | null,
+  snapshot: SensorSnapshot,
+  observedPulseId: string,
+): AcousticObservation | null {
+  if (!pulse || pulse.id === observedPulseId || !snapshot.audioFrame) {
+    return null;
+  }
+
+  return createToneObservation({
+    pulse,
+    detectedAtHostEpochMs: snapshot.audioFrame.hostEstimatedEpochMs,
+    micLevel: snapshot.micLevel,
+    clockUncertaintyMs:
+      snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs,
+  });
+}
+
+function scheduleOutputPulse(
+  pulse: AcousticPulse,
+  snapshot: SensorSnapshot,
+  timeoutRef: MutableRefObject<number | null>,
+) {
+  const now = hostEpochNow(snapshot);
+  if (now === null) {
+    return;
+  }
+
+  if (timeoutRef.current !== null) {
+    window.clearTimeout(timeoutRef.current);
+  }
+
+  timeoutRef.current = window.setTimeout(
+    () => void playPulseTone(pulse),
+    Math.max(0, pulse.emittedAtHostEpochMs - now),
+  );
+}
+
+async function playPulseTone(pulse: AcousticPulse) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const context = new AudioContextClass();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  const durationSeconds = pulse.durationMs / 1_000;
+
+  oscillator.type = "sine";
+  oscillator.frequency.value = pulse.frequencyHz;
+  gain.gain.setValueAtTime(0.0001, context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.045, context.currentTime + 0.008);
+  gain.gain.exponentialRampToValueAtTime(
+    0.0001,
+    context.currentTime + durationSeconds,
+  );
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start();
+  oscillator.stop(context.currentTime + durationSeconds);
+  window.setTimeout(() => void context.close(), pulse.durationMs + 120);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }

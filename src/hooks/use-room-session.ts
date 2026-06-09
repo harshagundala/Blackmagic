@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SensorSnapshot } from "@/hooks/use-sensor-suite";
-import type { RoomState, SessionRole } from "@/lib/session/registry";
+import type {
+  DeviceHeartbeat,
+  RoomState,
+  SessionRole,
+} from "@/lib/session/registry";
 
 type SessionClaimResponse = {
   role: SessionRole;
@@ -14,7 +18,13 @@ type RoomSession = {
   role: SessionRole | null;
   roomState: RoomState | null;
   claimReady: boolean;
-  heartbeat: (snapshot: SensorSnapshot) => Promise<void>;
+  heartbeat: (
+    snapshot: SensorSnapshot,
+    calibration?: Pick<
+      DeviceHeartbeat,
+      "acousticPulse" | "acousticObservation"
+    >,
+  ) => Promise<void>;
 };
 
 export function useRoomSession(): RoomSession {
@@ -71,7 +81,13 @@ export function useRoomSession(): RoomSession {
   }, [pollState, sessionKey]);
 
   const heartbeat = useCallback(
-    async (snapshot: SensorSnapshot) => {
+    async (
+      snapshot: SensorSnapshot,
+      calibration: Pick<
+        DeviceHeartbeat,
+        "acousticPulse" | "acousticObservation"
+      > = {},
+    ) => {
       if (!urlRef.current) {
         return;
       }
@@ -89,6 +105,8 @@ export function useRoomSession(): RoomSession {
             clockQuality: snapshot.clock?.quality ?? null,
             clockUncertaintyMs: snapshot.clock?.uncertaintyMs ?? null,
             audioFrame: snapshot.audioFrame,
+            acousticPulse: calibration.acousticPulse ?? null,
+            acousticObservation: calibration.acousticObservation ?? null,
             motion: snapshot.motion,
             heading: snapshot.heading,
             location: snapshot.location,

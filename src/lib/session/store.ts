@@ -9,6 +9,7 @@ import {
   type RoomState,
   type SessionClaim,
 } from "./registry";
+import { deriveAcousticRanges } from "./ranging";
 
 export type SessionStore = {
   kind: "memory" | "redis";
@@ -144,6 +145,7 @@ export function createRedisSessionStore(
         sessionKey,
         hostDeviceId: devices.length === 0 ? "" : hostDeviceId,
         devices: devices.sort(compareDevicesForOutput),
+        ranges: deriveAcousticRanges(devices),
         updatedAt: timestamp,
       };
     },
