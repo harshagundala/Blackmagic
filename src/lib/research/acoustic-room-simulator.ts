@@ -7,12 +7,23 @@ export type SimulatedPhone = {
   y: number;
 };
 
+export type SimulatedSpeechEvent = {
+  id: string;
+  x: number;
+  y: number;
+  emittedAtHostEpochMs?: number;
+  audioLevel?: number;
+  confidence?: number;
+};
+
 export type AcousticRoomSimulationOptions = {
   roomUrl: string;
   devices: SimulatedPhone[];
   sampleRate?: number;
   exchangesPerPair?: number;
   sampleNoiseStdDev?: number;
+  speechEvents?: SimulatedSpeechEvent[];
+  voiceNoiseMs?: number;
 };
 
 export type AcousticRoomSimulationResult = {
@@ -20,6 +31,7 @@ export type AcousticRoomSimulationResult = {
   constellation: ReturnType<typeof estimateRoomConstellation>;
   maxRangeErrorMeters: number;
   maxLayoutPairErrorMeters: number;
+  maxSourceDistanceErrorMeters: number;
 };
 
 const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
@@ -37,6 +49,8 @@ export function simulateAcousticRoom(
   const exchangesPerPair =
     options.exchangesPerPair ?? DEFAULT_EXCHANGES_PER_PAIR;
   const sampleNoiseStdDev = options.sampleNoiseStdDev ?? 0;
+  const speechEvents = options.speechEvents ?? [];
+  const voiceNoiseMs = options.voiceNoiseMs ?? 0;
   let hostEpochNowMs = BASE_HOST_EPOCH_MS;
   const registry = createSessionRegistry({ now: () => hostEpochNowMs });
 
@@ -64,6 +78,23 @@ export function simulateAcousticRoom(
     }
   }
 
+  speechEvents.forEach((speechEvent, eventIndex) => {
+    publishSpeechEvent({
+      registry,
+      roomUrl: options.roomUrl,
+      devices: options.devices,
+      speechEvent,
+      sampleRate,
+      baseHostEpochMs:
+        BASE_HOST_EPOCH_MS + (sequence + eventIndex + 1) * SLOT_SPACING_MS,
+      eventIndex,
+      voiceNoiseMs,
+      setNow: (value) => {
+        hostEpochNowMs = value;
+      },
+    });
+  });
+
   const roomState = registry.state(options.roomUrl);
   const constellation = estimateRoomConstellation(roomState);
 
@@ -74,6 +105,11 @@ export function simulateAcousticRoom(
     maxLayoutPairErrorMeters: maxLayoutPairErrorMeters(
       options.devices,
       constellation.layout.points,
+    ),
+    maxSourceDistanceErrorMeters: maxSourceDistanceErrorMeters(
+      options.devices,
+      speechEvents,
+      constellation,
     ),
   };
 }
@@ -184,6 +220,72 @@ function publishReciprocalExchange({
   );
 }
 
+function publishSpeechEvent({
+  registry,
+  roomUrl,
+  devices,
+  speechEvent,
+  sampleRate,
+  baseHostEpochMs,
+  eventIndex,
+  voiceNoiseMs,
+  setNow,
+}: {
+  registry: ReturnType<typeof createSessionRegistry>;
+  roomUrl: string;
+  devices: SimulatedPhone[];
+  speechEvent: SimulatedSpeechEvent;
+  sampleRate: number;
+  baseHostEpochMs: number;
+  eventIndex: number;
+  voiceNoiseMs: number;
+  setNow: (value: number) => void;
+}) {
+  const emittedAtHostEpochMs =
+    speechEvent.emittedAtHostEpochMs ?? baseHostEpochMs;
+  const baseSampleIndex =
+    BASE_SAMPLE_INDEX + 2_000_000 + eventIndex * 320_000;
+
+  devices.forEach((device, deviceIndex) => {
+    const travelMs =
+      (distanceMetersBetween(speechEvent, device) /
+        SPEED_OF_SOUND_METERS_PER_SECOND) *
+      1_000;
+    const detectedAtHostEpochMs = round(
+      emittedAtHostEpochMs +
+        travelMs +
+        sampleNoise(eventIndex + 10_000, deviceIndex, voiceNoiseMs),
+    );
+
+    heartbeatAt(registry, roomUrl, device.deviceId, detectedAtHostEpochMs, setNow, {
+      sampleRate,
+      voiceEvent: {
+        id: `${speechEvent.id}:${device.deviceId}`,
+        detectedAtHostEpochMs,
+        audioContextTimeSeconds: detectedAtHostEpochMs / 1_000,
+        sampleIndex:
+          baseSampleIndex +
+          sampleOriginOffset(device.deviceId) +
+          Math.round((travelMs / 1_000) * sampleRate),
+        sampleRate,
+        audioLevel: speechEvent.audioLevel ?? 0.11,
+        confidence: speechEvent.confidence ?? 0.92,
+        clockOffsetMs: 0,
+        clockUncertaintyMs: 0.8,
+        clockQuality: 0.98,
+        clockMaxErrorMs: 1.1,
+        clockBestRoundTripMs: 3.2,
+        clockJitterMs: 0.18,
+        clockSamplesUsed: 12,
+        clockOutliersRejected: 0,
+        clockOffsetStabilityMs: 0.2,
+        timingConfidence: 0.94,
+        motionStability: 0.96,
+      },
+    });
+  });
+}
+
 function heartbeatAt(
   registry: ReturnType<typeof createSessionRegistry>,
   roomUrl: string,
@@ -274,7 +376,49 @@ function maxLayoutPairErrorMeters(
   return round(Math.max(...errors));
 }
 
-function distanceMetersBetween(left: SimulatedPhone, right: SimulatedPhone) {
+function maxSourceDistanceErrorMeters(
+  devices: SimulatedPhone[],
+  speechEvents: SimulatedSpeechEvent[],
+  constellation: ReturnType<typeof estimateRoomConstellation>,
+) {
+  if (speechEvents.length === 0) {
+    return 0;
+  }
+
+  const layoutDevicesById = new Map(
+    constellation.devices.map((device) => [device.deviceId, device]),
+  );
+  const errors = speechEvents.map((speechEvent, index) => {
+    const source =
+      constellation.audioSources.find((candidate) =>
+        candidate.eventId.includes(speechEvent.id),
+      ) ?? constellation.audioSources[index];
+    if (!source) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    return Math.max(
+      ...devices.map((device) => {
+        const layoutDevice = layoutDevicesById.get(device.deviceId);
+        if (!layoutDevice) {
+          return Number.POSITIVE_INFINITY;
+        }
+
+        return Math.abs(
+          distanceMetersBetween(source, layoutDevice) -
+            distanceMetersBetween(speechEvent, device),
+        );
+      }),
+    );
+  });
+
+  return round(Math.max(...errors));
+}
+
+function distanceMetersBetween(
+  left: { x: number; y: number },
+  right: { x: number; y: number },
+) {
   return Math.hypot(right.x - left.x, right.y - left.y);
 }
 
