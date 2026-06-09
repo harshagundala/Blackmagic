@@ -6,6 +6,7 @@ import {
 } from "./room-state-layout";
 import type { AcousticRange } from "@/lib/session/ranging";
 import type { RoomState } from "@/lib/session/registry";
+import type { RoomTimeSyncState } from "@/lib/session/timing-health";
 
 describe("room state constellation", () => {
   test("uses acoustic ranges before falling back to radial placement", () => {
@@ -226,6 +227,74 @@ describe("room state constellation", () => {
     expect(rangeLayoutWeight(oneShot)).toBeLessThan(0.45);
   });
 
+  test("ignores acoustic ranges from devices that are not localization-ready", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 30_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 30_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 30_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-b",
+          joinedAt: 1_600,
+          lastSeenAt: 30_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      timeSync: roomTimeSync({
+        localizationDeviceIds: ["host", "phone-a"],
+      }),
+      ranges: [
+        acousticRange({
+          from: "host",
+          to: "phone-a",
+          meters: 2,
+          confidence: 0.82,
+          distanceUncertaintyMeters: 0.2,
+        }),
+        acousticRange({
+          from: "host",
+          to: "phone-b",
+          meters: 5.8,
+          confidence: 0.98,
+          distanceUncertaintyMeters: 0.1,
+        }),
+      ],
+    };
+
+    const layout = estimateRoomConstellation(room);
+    const phoneA = layout.devices.find((device) => device.deviceId === "phone-a");
+    const phoneB = layout.devices.find((device) => device.deviceId === "phone-b");
+
+    expect(phoneA).toEqual(
+      expect.objectContaining({
+        distanceMeters: 2,
+      }),
+    );
+    expect(phoneB).toEqual(
+      expect.objectContaining({
+        distanceMeters: null,
+      }),
+    );
+    expect(distance(layout.layout.points.host, layout.layout.points["phone-b"])).toBeLessThan(
+      2.2,
+    );
+  });
+
   test("projects reconciled audio events toward the arrival leader side", () => {
     const room: RoomState = {
       sessionKey: "room",
@@ -322,6 +391,72 @@ describe("room state constellation", () => {
     expect(phone).toBeDefined();
     expect(distance(source, host)).toBeLessThan(distance(source, phone));
     expect(distance(source, phone)).toBeGreaterThan(distance(host, phone));
+  });
+
+  test("filters source hints to localization-ready device observations", () => {
+    const devices = [
+      constellationDevice({ deviceId: "host", role: "host", x: 0, y: 0 }),
+      constellationDevice({ deviceId: "phone-a", x: 2, y: 0 }),
+      constellationDevice({ deviceId: "phone-b", x: -2, y: 0 }),
+    ];
+    const event = voiceEventFromSource({
+      devices,
+      source: { x: -2.3, y: 0 },
+      eventId: "voice:bad-clock-leader",
+      emittedAtHostEpochMs: 80_000,
+    });
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 80_500,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 80_500,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 80_500,
+          role: "phone",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-b",
+          joinedAt: 1_600,
+          lastSeenAt: 80_500,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      timeSync: roomTimeSync({
+        localizationDeviceIds: ["host", "phone-a"],
+      }),
+      ranges: [
+        acousticRange({
+          from: "host",
+          to: "phone-a",
+          meters: 2,
+          samplesUsed: 5,
+          distanceUncertaintyMeters: 0.2,
+          confidence: 0.86,
+        }),
+      ],
+      audioEvents: [event],
+    };
+
+    const source = estimateRoomConstellation(room).audioSources[0];
+
+    expect(source).toEqual(
+      expect.objectContaining({
+        method: "arrival-leader",
+        arrivalLeaderDeviceId: "host",
+        observedDeviceIds: ["host", "phone-a"],
+      }),
+    );
   });
 
   test("fits a source point from three-device time differences", () => {
@@ -553,5 +688,60 @@ function voiceEventFromSource({
     timestampUncertaintyMs: 1,
     timingConfidence: 0.91,
     confidence: 0.86,
+  };
+}
+
+function roomTimeSync(
+  overrides: Partial<RoomTimeSyncState> = {},
+): RoomTimeSyncState {
+  return {
+    status: "ready",
+    synchronizedDeviceIds: ["host", "phone-a"],
+    localizationDeviceIds: ["host", "phone-a"],
+    roomConfidence: 0.8,
+    medianMaxErrorMs: 4,
+    worstLocalizationErrorMs: 5,
+    devices: [
+      {
+        deviceId: "host",
+        quality: 0.96,
+        maxErrorMs: 4,
+        uncertaintyMs: 3,
+        bestRoundTripMs: 14,
+        jitterMs: 0.8,
+        offsetStabilityMs: 0.7,
+        samplesUsed: 8,
+        timingConfidence: 0.82,
+        synchronized: true,
+        localizationReady: true,
+      },
+      {
+        deviceId: "phone-a",
+        quality: 0.91,
+        maxErrorMs: 5,
+        uncertaintyMs: 4,
+        bestRoundTripMs: 18,
+        jitterMs: 1.2,
+        offsetStabilityMs: 1,
+        samplesUsed: 7,
+        timingConfidence: 0.72,
+        synchronized: true,
+        localizationReady: true,
+      },
+      {
+        deviceId: "phone-b",
+        quality: 0.28,
+        maxErrorMs: 80,
+        uncertaintyMs: 55,
+        bestRoundTripMs: 260,
+        jitterMs: 18,
+        offsetStabilityMs: 20,
+        samplesUsed: 2,
+        timingConfidence: 0.08,
+        synchronized: false,
+        localizationReady: false,
+      },
+    ],
+    ...overrides,
   };
 }

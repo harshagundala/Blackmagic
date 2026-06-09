@@ -45,7 +45,11 @@ export function estimateRoomConstellation(
   options: RoomConstellationOptions = {},
 ): RoomConstellation {
   const participantIds = room.devices.map((device) => device.deviceId);
-  const distances: PairwiseDistance[] = room.ranges.map((range) => ({
+  const localizationDeviceIds = localizationDeviceIdsFor(room);
+  const ranges = room.ranges.filter((range) =>
+    isLocalizationReadyRange(range, localizationDeviceIds),
+  );
+  const distances: PairwiseDistance[] = ranges.map((range) => ({
     from: range.from,
     to: range.to,
     meters: range.meters,
@@ -58,7 +62,7 @@ export function estimateRoomConstellation(
 
   const devices = room.devices.map((device) => {
     const point = layout.points[device.deviceId] ?? { x: 0, y: 0 };
-    const range = strongestRangeForDevice(room, device.deviceId);
+    const range = strongestRangeForDevice(ranges, device.deviceId);
     return {
       deviceId: device.deviceId,
       role: device.role,
@@ -77,6 +81,7 @@ export function estimateRoomConstellation(
         room.audioEvents ?? [],
         devices,
         room.updatedAt,
+        localizationDeviceIds,
       ),
     },
     room,
@@ -163,8 +168,25 @@ export function rangeLayoutWeight(range: AcousticRange) {
   );
 }
 
-function strongestRangeForDevice(room: RoomState, deviceId: string) {
-  return room.ranges
+function localizationDeviceIdsFor(room: RoomState) {
+  const ids = room.timeSync?.localizationDeviceIds;
+  return Array.isArray(ids) ? new Set(ids) : null;
+}
+
+function isLocalizationReadyRange(
+  range: AcousticRange,
+  localizationDeviceIds: Set<string> | null,
+) {
+  if (!localizationDeviceIds) {
+    return true;
+  }
+  return (
+    localizationDeviceIds.has(range.from) && localizationDeviceIds.has(range.to)
+  );
+}
+
+function strongestRangeForDevice(ranges: AcousticRange[], deviceId: string) {
+  return ranges
     .filter((range) => range.from === deviceId || range.to === deviceId)
     .sort((a, b) => rangeLayoutWeight(b) - rangeLayoutWeight(a))[0];
 }
@@ -173,17 +195,76 @@ function deriveAudioSourceHints(
   events: ReconciledAudioEvent[],
   devices: RoomConstellationDevice[],
   roomUpdatedAtMs: number,
+  localizationDeviceIds: Set<string> | null,
 ): RoomAudioSourceHint[] {
   const byId = new Map(devices.map((device) => [device.deviceId, device]));
 
   return events
     .map((event) => {
+      const localizableEvent = audioEventForLocalization(
+        event,
+        localizationDeviceIds,
+      );
+      if (!localizableEvent) {
+        return null;
+      }
+
       return (
-        fitAudioSourceByTdoa(event, devices, roomUpdatedAtMs) ??
-        projectLeaderSideSource(event, byId, devices, roomUpdatedAtMs)
+        fitAudioSourceByTdoa(localizableEvent, devices, roomUpdatedAtMs) ??
+        projectLeaderSideSource(localizableEvent, byId, devices, roomUpdatedAtMs)
       );
     })
     .filter((source): source is RoomAudioSourceHint => source !== null);
+}
+
+function audioEventForLocalization(
+  event: ReconciledAudioEvent,
+  localizationDeviceIds: Set<string> | null,
+): ReconciledAudioEvent | null {
+  if (!localizationDeviceIds) {
+    return event;
+  }
+
+  const observations = event.observations
+    .filter((observation) => localizationDeviceIds.has(observation.deviceId))
+    .sort(
+      (a, b) =>
+        observationHostTime(a) - observationHostTime(b) ||
+        a.deviceId.localeCompare(b.deviceId),
+    );
+  if (observations.length < 2) {
+    return null;
+  }
+
+  const startedAtHostEpochMs = observationHostTime(observations[0]);
+  const endedAtHostEpochMs = observationHostTime(observations.at(-1) ?? observations[0]);
+  const centerHostEpochMs =
+    observations.reduce(
+      (sum, observation) => sum + observationHostTime(observation),
+      0,
+    ) / observations.length;
+  const timingConfidence =
+    observations.reduce(
+      (sum, observation) => sum + observationTimingConfidence(observation),
+      0,
+    ) / observations.length;
+  const keptFraction = observations.length / Math.max(1, event.observations.length);
+
+  return {
+    ...event,
+    startedAtHostEpochMs,
+    endedAtHostEpochMs,
+    centerHostEpochMs: round(centerHostEpochMs),
+    timeSpreadMs: round(endedAtHostEpochMs - startedAtHostEpochMs),
+    arrivalLeaderDeviceId: observations[0].deviceId,
+    observedDeviceIds: observations.map((observation) => observation.deviceId),
+    observations,
+    timestampUncertaintyMs: round(
+      Math.max(...observations.map((observation) => observation.clockUncertaintyMs)),
+    ),
+    timingConfidence: round(timingConfidence),
+    confidence: round(event.confidence * keptFraction),
+  };
 }
 
 export function fitAudioSourceByTdoa(
