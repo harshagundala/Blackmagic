@@ -12,7 +12,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
 - Storage readiness endpoint at `/api/session/readiness` so production can prove whether room state is durable Redis or degraded in-memory.
 - Active acoustic pulse history: devices take deterministic host-clock turns publishing scheduled ultrasonic-ish pulses, phones match self and peer chirps in rolling sample windows, and room state derives pairwise ranges from reciprocal same-device sample intervals rather than subtracting two device clocks.
-- Minimal constellation dots are now layout-driven from acoustic ranges when present, with radial fallback before measurements arrive.
+- Minimal constellation dots are now layout-driven from acoustic ranges when present, centered on the current phone, heading-rotated when orientation is available, and backed by a radial fallback before measurements arrive.
 - Stale hosts are released so the next active device can become host instead of leaving the room pinned forever.
 - Session APIs use a `SessionStore` abstraction: Upstash Redis via Vercel Marketplace env when configured, in-memory fallback when not.
 - Tested acoustic delay primitives and distance conversion.

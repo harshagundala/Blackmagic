@@ -43,7 +43,7 @@ type CalibrationHeartbeat = Pick<
 
 export function BlackmagicApp() {
   const [phase, setPhase] = useState<Phase>("arriving");
-  const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession({
+  const { deviceId, heartbeat, roomState } = useRoomSession({
     pollIntervalMs: roomStatePollingIntervalMs({
       listening: phase === "listening",
     }),
@@ -59,8 +59,14 @@ export function BlackmagicApp() {
   const peerCount =
     roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
   const constellation = useMemo(
-    () => (roomState ? estimateRoomConstellation(roomState) : null),
-    [roomState],
+    () =>
+      roomState
+        ? estimateRoomConstellation(roomState, {
+            perspectiveDeviceId: deviceId,
+            headingDegrees: sensors.snapshot.headingDegrees,
+          })
+        : null,
+    [deviceId, roomState, sensors.snapshot.headingDegrees],
   );
 
   useEffect(() => {
@@ -208,12 +214,10 @@ export function BlackmagicApp() {
     );
   }, [flushCalibrationEvent, phase, sensors.snapshot]);
 
-  const visualPhase: Phase = phase === "arriving" && claimReady ? "waiting" : phase;
-  const label = visualPhase === "arriving" ? "" : role === "host" ? "host" : "nearby";
   const pulse = phase === "listening" ? Math.min(1, Math.max(0.18, sensors.snapshot.micLevel * 24)) : 0.28;
   const constellationDots =
     constellation?.devices.filter(
-      (device) => device.deviceId !== roomState?.hostDeviceId,
+      (device) => device.deviceId !== deviceId,
     ) ?? [];
   const sourceHints =
     constellation?.audioSources
@@ -331,7 +335,6 @@ export function BlackmagicApp() {
           </div>
 
           <p className="mt-8 min-h-5 font-mono text-[11px] uppercase tracking-[0.42em] text-black/40">
-            {label}
           </p>
         </div>
 

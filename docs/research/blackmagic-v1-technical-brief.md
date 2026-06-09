@@ -100,7 +100,7 @@ The live calibration loop now rotates emitters across all active room devices us
 
 Calibration events now bypass the slow periodic heartbeat path. When a device schedules a chirp or detects a peer chirp, it immediately flushes the latest calibration payload to the room store, then the normal heartbeat continues carrying sensor state and deduped event history. Devices also poll room state faster while listening and relax back before sensors start. This keeps Redis-backed polling simple while shaving event propagation latency.
 
-The visual constellation weights range edges by confidence, repeated sample count, and distance uncertainty. One noisy chirp can still produce a hint, but repeated low-uncertainty reciprocal observations pull the layout more strongly and show as higher-confidence motion.
+The visual constellation weights range edges by confidence, repeated sample count, and distance uncertainty. One noisy chirp can still produce a hint, but repeated low-uncertainty reciprocal observations pull the layout more strongly and show as higher-confidence motion. The rendered field is then transformed into the current phone's perspective: the local device is always the origin, source hints move through the same transform as phones, and available heading rotates the room so the display is relative to the direction the phone is pointing rather than pinned to the host.
 
 ## Active Pulse Ranging
 

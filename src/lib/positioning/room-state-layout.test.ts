@@ -60,6 +60,154 @@ describe("room state constellation", () => {
     ]);
   });
 
+  test("recenters device and source coordinates on the current phone", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 20_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 20_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 20_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      ranges: [
+        {
+          from: "host",
+          to: "phone-a",
+          pulseId: "pulse-1",
+          pulseIds: ["pulse-1"],
+          samplesUsed: 5,
+          meters: 2,
+          timingUncertaintyMs: 1,
+          distanceUncertaintyMeters: 0.2,
+          confidence: 0.86,
+          observedAtHostEpochMs: 20_000,
+        },
+      ],
+      audioEvents: [
+        {
+          id: "voice:18000:host",
+          startedAtHostEpochMs: 18_000,
+          endedAtHostEpochMs: 18_008,
+          centerHostEpochMs: 18_004,
+          timeSpreadMs: 8,
+          arrivalLeaderDeviceId: "host",
+          observedDeviceIds: ["host", "phone-a"],
+          observations: [
+            {
+              deviceId: "host",
+              eventId: "voice-host",
+              detectedAtHostEpochMs: 18_000,
+              sampleIndex: 960_000,
+              sampleRate: 48_000,
+              audioLevel: 0.09,
+              confidence: 0.86,
+              clockUncertaintyMs: 3,
+              timingConfidence: 0.82,
+            },
+            {
+              deviceId: "phone-a",
+              eventId: "voice-phone-a",
+              detectedAtHostEpochMs: 18_008,
+              sampleIndex: 960_384,
+              sampleRate: 48_000,
+              audioLevel: 0.07,
+              confidence: 0.78,
+              clockUncertaintyMs: 4,
+              timingConfidence: 0.78,
+            },
+          ],
+          timestampUncertaintyMs: 4,
+          timingConfidence: 0.8,
+          confidence: 0.76,
+        },
+      ],
+    };
+
+    const hostAnchored = estimateRoomConstellation(room);
+    const selfAnchored = estimateRoomConstellation(room, {
+      perspectiveDeviceId: "phone-a",
+    });
+    const self = selfAnchored.devices.find(
+      (device) => device.deviceId === "phone-a",
+    );
+    const transformedHost = selfAnchored.devices.find(
+      (device) => device.deviceId === "host",
+    );
+    const originalPhone = hostAnchored.devices.find(
+      (device) => device.deviceId === "phone-a",
+    );
+
+    expect(self).toEqual(expect.objectContaining({ x: 0, y: 0 }));
+    expect(transformedHost).toEqual(
+      expect.objectContaining({
+        x: expect.closeTo(-(originalPhone?.x ?? 0), 3),
+        y: expect.closeTo(-(originalPhone?.y ?? 0), 3),
+      }),
+    );
+    expect(selfAnchored.layout.points["phone-a"]).toEqual({ x: 0, y: 0 });
+    expect(
+      distance(selfAnchored.audioSources[0], hostAnchored.audioSources[0]),
+    ).toBeGreaterThan(0.25);
+    expect(distance(selfAnchored.audioSources[0], transformedHost)).toBeLessThan(
+      distance(selfAnchored.audioSources[0], self),
+    );
+  });
+
+  test("rotates self-centered coordinates by the current phone heading", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 10_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 10_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 10_000,
+          role: "phone",
+          sessionKey: "room",
+          headingDegrees: 90,
+        },
+        {
+          deviceId: "phone-b",
+          joinedAt: 1_600,
+          lastSeenAt: 10_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      ranges: [],
+    };
+
+    const selfAnchored = estimateRoomConstellation(room, {
+      perspectiveDeviceId: "phone-a",
+    });
+
+    expect(selfAnchored.devices).toEqual([
+      expect.objectContaining({ deviceId: "host", x: 1.4, y: 0 }),
+      expect.objectContaining({ deviceId: "phone-a", x: 0, y: 0 }),
+      expect.objectContaining({ deviceId: "phone-b", x: 2.8, y: 0 }),
+    ]);
+  });
+
   test("weights repeated low-uncertainty ranges above one-shot uncertain ranges", () => {
     const stable = acousticRange({
       confidence: 0.7,

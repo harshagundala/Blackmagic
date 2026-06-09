@@ -22,6 +22,11 @@ export type RoomConstellation = {
   audioSources: RoomAudioSourceHint[];
 };
 
+export type RoomConstellationOptions = {
+  perspectiveDeviceId?: string | null;
+  headingDegrees?: number | null;
+};
+
 export type RoomAudioSourceHint = {
   eventId: string;
   x: number;
@@ -35,7 +40,10 @@ export type RoomAudioSourceHint = {
   observedDeviceIds: string[];
 };
 
-export function estimateRoomConstellation(room: RoomState): RoomConstellation {
+export function estimateRoomConstellation(
+  room: RoomState,
+  options: RoomConstellationOptions = {},
+): RoomConstellation {
   const participantIds = room.devices.map((device) => device.deviceId);
   const distances: PairwiseDistance[] = room.ranges.map((range) => ({
     from: range.from,
@@ -61,14 +69,82 @@ export function estimateRoomConstellation(room: RoomState): RoomConstellation {
     };
   });
 
-  return {
-    layout,
-    devices,
-    audioSources: deriveAudioSourceHints(
-      room.audioEvents ?? [],
+  return applyPerspective(
+    {
+      layout,
       devices,
-      room.updatedAt,
-    ),
+      audioSources: deriveAudioSourceHints(
+        room.audioEvents ?? [],
+        devices,
+        room.updatedAt,
+      ),
+    },
+    room,
+    options,
+  );
+}
+
+function applyPerspective(
+  constellation: RoomConstellation,
+  room: RoomState,
+  options: RoomConstellationOptions,
+): RoomConstellation {
+  const perspectiveDeviceId = options.perspectiveDeviceId;
+  if (!perspectiveDeviceId) {
+    return constellation;
+  }
+
+  const origin = constellation.layout.points[perspectiveDeviceId];
+  if (!origin) {
+    return constellation;
+  }
+
+  const headingDegrees =
+    finiteNumber(options.headingDegrees) ??
+    finiteNumber(
+      room.devices.find((device) => device.deviceId === perspectiveDeviceId)
+        ?.headingDegrees,
+    ) ??
+    0;
+  const transformPoint = (point: { x: number; y: number }) =>
+    rotatePoint(
+      {
+        x: point.x - origin.x,
+        y: point.y - origin.y,
+      },
+      headingDegrees,
+    );
+  const transformedPoints = Object.fromEntries(
+    Object.entries(constellation.layout.points).map(([deviceId, point]) => [
+      deviceId,
+      transformPoint(point),
+    ]),
+  );
+
+  return {
+    layout: {
+      ...constellation.layout,
+      points: transformedPoints,
+    },
+    devices: constellation.devices.map((device) => ({
+      ...device,
+      ...transformPoint(device),
+    })),
+    audioSources: constellation.audioSources.map((source) => ({
+      ...source,
+      ...transformPoint(source),
+    })),
+  };
+}
+
+function rotatePoint(point: { x: number; y: number }, headingDegrees: number) {
+  const radians = (-headingDegrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+
+  return {
+    x: round(point.x * cos - point.y * sin),
+    y: round(point.x * sin + point.y * cos),
   };
 }
 
@@ -419,4 +495,8 @@ function round(value: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function finiteNumber(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
