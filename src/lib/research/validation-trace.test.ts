@@ -96,6 +96,135 @@ describe("validation trace", () => {
       "no_tdoa_source",
     ]);
   });
+
+  test("summarizes per-device blockers across the trace", () => {
+    const summary = summarizePhysicalRoomValidationTrace([
+      snapshot(
+        1_000,
+        "warming",
+        ["insufficient_audio_capture"],
+        {
+          deviceCount: 2,
+          audioCaptureReadyDeviceCount: 1,
+        },
+        [
+          device("host", {
+            role: "host",
+            blockers: [],
+          }),
+          device("phone-a", {
+            captureStatus: "missing",
+            audioCaptureReady: false,
+            audioTimestampPresent: false,
+            audioTimestampReady: false,
+            audioTimestampErrorMs: null,
+            audioTimingConfidence: null,
+            blockers: ["audio_capture_missing", "audio_timestamp_missing"],
+          }),
+        ],
+      ),
+      snapshot(
+        4_000,
+        "degraded",
+        ["audio_timestamp_error_high"],
+        {
+          deviceCount: 3,
+          audioCaptureReadyDeviceCount: 2,
+          worstAudioTimestampErrorMs: 42,
+          lowestAudioTimingConfidence: 0.12,
+        },
+        [
+          device("host", {
+            role: "host",
+            blockers: [],
+          }),
+          device("phone-a", {
+            audioTimestampReady: false,
+            audioTimestampErrorMs: 42,
+            audioTimingConfidence: 0.12,
+            motionStability: 0.62,
+            blockers: [
+              "audio_timestamp_error_high",
+              "audio_timestamp_confidence_low",
+            ],
+          }),
+          device("phone-b", {
+            blockers: ["not_localized"],
+          }),
+        ],
+      ),
+      snapshot(
+        7_000,
+        "warming",
+        ["no_tdoa_source"],
+        {
+          deviceCount: 3,
+          audioCaptureReadyDeviceCount: 3,
+          audioTimestampReadyDeviceCount: 3,
+        },
+        [
+          device("host", {
+            role: "host",
+            localized: true,
+            blockers: [],
+          }),
+          device("phone-a", {
+            localized: true,
+            distanceMeters: 2.18,
+            blockers: [],
+          }),
+          device("phone-b", {
+            blockers: ["not_localized"],
+          }),
+        ],
+      ),
+    ]);
+
+    expect(summary.devices).toEqual([
+      expect.objectContaining({
+        deviceId: "host",
+        role: "host",
+        sampleCount: 3,
+        firstSeenAtMs: 1_000,
+        lastSeenAtMs: 7_000,
+        finalBlockers: [],
+        observedBlockers: [],
+        finalLocalized: true,
+        finalCaptureStatus: "verified",
+      }),
+      expect.objectContaining({
+        deviceId: "phone-a",
+        role: "phone",
+        sampleCount: 3,
+        firstSeenAtMs: 1_000,
+        lastSeenAtMs: 7_000,
+        finalBlockers: [],
+        observedBlockers: [
+          "audio_capture_missing",
+          "audio_timestamp_missing",
+          "audio_timestamp_error_high",
+          "audio_timestamp_confidence_low",
+        ],
+        finalLocalized: true,
+        finalDistanceMeters: 2.18,
+        finalCaptureStatus: "verified",
+        finalAudioCaptureReady: true,
+        finalAudioTimestampReady: true,
+        worstAudioTimestampErrorMs: 42,
+        lowestAudioTimingConfidence: 0.12,
+        lowestMotionStability: 0.62,
+      }),
+      expect.objectContaining({
+        deviceId: "phone-b",
+        role: "phone",
+        sampleCount: 2,
+        firstSeenAtMs: 4_000,
+        lastSeenAtMs: 7_000,
+        finalBlockers: ["not_localized"],
+        observedBlockers: ["not_localized"],
+      }),
+    ]);
+  });
 });
 
 function snapshot(
@@ -105,6 +234,7 @@ function snapshot(
   metrics: Partial<
     PhysicalRoomValidationSnapshot["validation"]["metrics"]
   > = {},
+  devices: PhysicalRoomValidationSnapshot["validation"]["devices"] = [],
 ): PhysicalRoomValidationSnapshot {
   return {
     capturedAtMs,
@@ -129,6 +259,7 @@ function snapshot(
         blockers,
       },
       blockers,
+      devices,
       metrics: {
         deviceCount: 0,
         localizedDeviceCount: 0,
@@ -153,5 +284,34 @@ function snapshot(
         ...metrics,
       },
     },
+  };
+}
+
+function device(
+  deviceId: string,
+  overrides: Partial<
+    PhysicalRoomValidationSnapshot["validation"]["devices"][number]
+  > = {},
+): PhysicalRoomValidationSnapshot["validation"]["devices"][number] {
+  return {
+    deviceId,
+    role: "phone",
+    mic: "active",
+    localized: false,
+    distanceMeters: null,
+    layoutConfidence: 0.12,
+    captureStatus: "verified",
+    audioCaptureReady: true,
+    audioContextState: "running",
+    sampleRate: 48_000,
+    audioTimestampPresent: true,
+    audioTimestampReady: true,
+    audioTimestampErrorMs: 0.7,
+    audioTimingConfidence: 0.96,
+    clockMaxErrorMs: 0.7,
+    clockQuality: 0.98,
+    motionStability: 0.94,
+    blockers: [],
+    ...overrides,
   };
 }

@@ -164,6 +164,7 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
       lowestAudioTimingConfidence: null,
       peakTdoaSourceCount: 0,
       bestSourceResidualMs: null,
+      devices: [],
     };
   }
 
@@ -213,7 +214,83 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
     lowestAudioTimingConfidence: lowestAudioTimingConfidence(ordered),
     peakTdoaSourceCount: peakMetric(ordered, "tdoaSourceCount"),
     bestSourceResidualMs: bestSourceResidualMs(ordered),
+    devices: summarizeDevices(ordered),
   };
+}
+
+function summarizeDevices(snapshots) {
+  const devices = new Map();
+
+  for (const snapshot of snapshots) {
+    for (const device of snapshot.validation.devices ?? []) {
+      let entry = devices.get(device.deviceId);
+      if (!entry) {
+        entry = {
+          firstSeenAtMs: snapshot.capturedAtMs,
+          lastSeenAtMs: snapshot.capturedAtMs,
+          sampleCount: 0,
+          finalDevice: device,
+          observedBlockers: [],
+          seenBlockers: new Set(),
+          audioTimestampErrors: [],
+          audioTimingConfidences: [],
+          motionStabilities: [],
+        };
+        devices.set(device.deviceId, entry);
+      }
+
+      entry.lastSeenAtMs = snapshot.capturedAtMs;
+      entry.sampleCount += 1;
+      entry.finalDevice = device;
+
+      for (const blocker of device.blockers) {
+        if (!entry.seenBlockers.has(blocker)) {
+          entry.seenBlockers.add(blocker);
+          entry.observedBlockers.push(blocker);
+        }
+      }
+
+      if (typeof device.audioTimestampErrorMs === "number") {
+        entry.audioTimestampErrors.push(device.audioTimestampErrorMs);
+      }
+      if (typeof device.audioTimingConfidence === "number") {
+        entry.audioTimingConfidences.push(device.audioTimingConfidence);
+      }
+      if (typeof device.motionStability === "number") {
+        entry.motionStabilities.push(device.motionStability);
+      }
+    }
+  }
+
+  return [...devices.entries()].map(([deviceId, entry]) => {
+    const finalDevice = entry.finalDevice;
+    return {
+      deviceId,
+      role: finalDevice.role,
+      sampleCount: entry.sampleCount,
+      firstSeenAtMs: entry.firstSeenAtMs,
+      lastSeenAtMs: entry.lastSeenAtMs,
+      finalBlockers: [...finalDevice.blockers],
+      observedBlockers: entry.observedBlockers,
+      finalLocalized: finalDevice.localized,
+      finalDistanceMeters: finalDevice.distanceMeters,
+      finalCaptureStatus: finalDevice.captureStatus,
+      finalAudioCaptureReady: finalDevice.audioCaptureReady,
+      finalAudioTimestampReady: finalDevice.audioTimestampReady,
+      worstAudioTimestampErrorMs:
+        entry.audioTimestampErrors.length === 0
+          ? null
+          : Math.max(...entry.audioTimestampErrors),
+      lowestAudioTimingConfidence:
+        entry.audioTimingConfidences.length === 0
+          ? null
+          : Math.min(...entry.audioTimingConfidences),
+      lowestMotionStability:
+        entry.motionStabilities.length === 0
+          ? null
+          : Math.min(...entry.motionStabilities),
+    };
+  });
 }
 
 function trailingReadyStreakMs(snapshots) {

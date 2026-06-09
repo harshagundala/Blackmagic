@@ -1,4 +1,5 @@
 import type {
+  PhysicalRoomValidationDeviceDiagnostic,
   PhysicalRoomValidationReport,
   PhysicalRoomValidationStatus,
 } from "./physical-room-validation";
@@ -34,6 +35,25 @@ export type PhysicalRoomValidationTraceSummary = {
   lowestAudioTimingConfidence: number | null;
   peakTdoaSourceCount: number;
   bestSourceResidualMs: number | null;
+  devices: PhysicalRoomValidationDeviceTraceSummary[];
+};
+
+export type PhysicalRoomValidationDeviceTraceSummary = {
+  deviceId: string;
+  role: PhysicalRoomValidationDeviceDiagnostic["role"];
+  sampleCount: number;
+  firstSeenAtMs: number;
+  lastSeenAtMs: number;
+  finalBlockers: string[];
+  observedBlockers: string[];
+  finalLocalized: boolean;
+  finalDistanceMeters: number | null;
+  finalCaptureStatus: PhysicalRoomValidationDeviceDiagnostic["captureStatus"];
+  finalAudioCaptureReady: boolean;
+  finalAudioTimestampReady: boolean;
+  worstAudioTimestampErrorMs: number | null;
+  lowestAudioTimingConfidence: number | null;
+  lowestMotionStability: number | null;
 };
 
 export function summarizePhysicalRoomValidationTrace(
@@ -94,6 +114,7 @@ export function summarizePhysicalRoomValidationTrace(
     lowestAudioTimingConfidence: lowestAudioTimingConfidence(ordered),
     peakTdoaSourceCount: peakMetric(ordered, "tdoaSourceCount"),
     bestSourceResidualMs: bestSourceResidualMs(ordered),
+    devices: summarizeDevices(ordered),
   };
 }
 
@@ -118,7 +139,97 @@ function emptySummary(): PhysicalRoomValidationTraceSummary {
     lowestAudioTimingConfidence: null,
     peakTdoaSourceCount: 0,
     bestSourceResidualMs: null,
+    devices: [],
   };
+}
+
+function summarizeDevices(
+  snapshots: PhysicalRoomValidationSnapshot[],
+): PhysicalRoomValidationDeviceTraceSummary[] {
+  type DeviceAccumulator = {
+    firstSeenAtMs: number;
+    lastSeenAtMs: number;
+    sampleCount: number;
+    finalDevice: PhysicalRoomValidationDeviceDiagnostic;
+    observedBlockers: string[];
+    seenBlockers: Set<string>;
+    audioTimestampErrors: number[];
+    audioTimingConfidences: number[];
+    motionStabilities: number[];
+  };
+
+  const devices = new Map<string, DeviceAccumulator>();
+
+  for (const snapshot of snapshots) {
+    for (const device of snapshot.validation.devices ?? []) {
+      let entry = devices.get(device.deviceId);
+      if (!entry) {
+        entry = {
+          firstSeenAtMs: snapshot.capturedAtMs,
+          lastSeenAtMs: snapshot.capturedAtMs,
+          sampleCount: 0,
+          finalDevice: device,
+          observedBlockers: [],
+          seenBlockers: new Set<string>(),
+          audioTimestampErrors: [],
+          audioTimingConfidences: [],
+          motionStabilities: [],
+        };
+        devices.set(device.deviceId, entry);
+      }
+
+      entry.lastSeenAtMs = snapshot.capturedAtMs;
+      entry.sampleCount += 1;
+      entry.finalDevice = device;
+
+      for (const blocker of device.blockers) {
+        if (!entry.seenBlockers.has(blocker)) {
+          entry.seenBlockers.add(blocker);
+          entry.observedBlockers.push(blocker);
+        }
+      }
+
+      if (device.audioTimestampErrorMs !== null) {
+        entry.audioTimestampErrors.push(device.audioTimestampErrorMs);
+      }
+      if (device.audioTimingConfidence !== null) {
+        entry.audioTimingConfidences.push(device.audioTimingConfidence);
+      }
+      if (device.motionStability !== null) {
+        entry.motionStabilities.push(device.motionStability);
+      }
+    }
+  }
+
+  return [...devices.entries()].map(([deviceId, entry]) => {
+    const finalDevice = entry.finalDevice;
+    return {
+      deviceId,
+      role: finalDevice.role,
+      sampleCount: entry.sampleCount,
+      firstSeenAtMs: entry.firstSeenAtMs,
+      lastSeenAtMs: entry.lastSeenAtMs,
+      finalBlockers: [...finalDevice.blockers],
+      observedBlockers: entry.observedBlockers,
+      finalLocalized: finalDevice.localized,
+      finalDistanceMeters: finalDevice.distanceMeters,
+      finalCaptureStatus: finalDevice.captureStatus,
+      finalAudioCaptureReady: finalDevice.audioCaptureReady,
+      finalAudioTimestampReady: finalDevice.audioTimestampReady,
+      worstAudioTimestampErrorMs:
+        entry.audioTimestampErrors.length === 0
+          ? null
+          : Math.max(...entry.audioTimestampErrors),
+      lowestAudioTimingConfidence:
+        entry.audioTimingConfidences.length === 0
+          ? null
+          : Math.min(...entry.audioTimingConfidences),
+      lowestMotionStability:
+        entry.motionStabilities.length === 0
+          ? null
+          : Math.min(...entry.motionStabilities),
+    };
+  });
 }
 
 function trailingReadyStreakMs(snapshots: PhysicalRoomValidationSnapshot[]) {
