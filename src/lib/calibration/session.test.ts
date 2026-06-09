@@ -77,7 +77,7 @@ describe("pairwise calibration session", () => {
     expect(selectUpcomingCalibrationTurn(["host"], 100, options)).toBeNull();
   });
 
-  test("chooses the peer pulse that should be observed now", () => {
+  test("chooses the closest pulse that should be observed, including self chirps", () => {
     const devices: RoomDevice[] = [
       deviceWithPulse("host", "host:old", 8_800),
       deviceWithPulse("phone-a", "phone-a:self", 10_200),
@@ -92,8 +92,8 @@ describe("pairwise calibration session", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        id: "phone-b:near",
-        emittedAtHostEpochMs: 10_900,
+        id: "phone-a:self",
+        emittedAtHostEpochMs: 10_200,
       }),
     );
   });

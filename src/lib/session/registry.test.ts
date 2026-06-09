@@ -57,6 +57,8 @@ describe("session registry", () => {
       acousticPulse: {
         id: "chirp-1",
         emittedAtHostEpochMs: 10_500,
+        emittedSampleIndex: 504_000,
+        sampleRate: 48_000,
         durationMs: 48,
         frequencyHz: 17_200,
         endFrequencyHz: 19_200,
@@ -100,6 +102,8 @@ describe("session registry", () => {
           id: "chirp-1",
           frequencyHz: 17_200,
           endFrequencyHz: 19_200,
+          emittedSampleIndex: 504_000,
+          sampleRate: 48_000,
         }),
         audioFrame: expect.objectContaining({
           sampleIndex: 480_000,
@@ -278,6 +282,8 @@ describe("session registry", () => {
         acousticPulse: {
           id: `pulse-${index}`,
           emittedAtHostEpochMs: 10_000 + index * 1_000,
+          emittedSampleIndex: 480_000 + index * 48_000,
+          sampleRate: 48_000,
           durationMs: 48,
           frequencyHz: 17_200,
           endFrequencyHz: 19_200,
@@ -287,6 +293,8 @@ describe("session registry", () => {
         acousticObservation: {
           pulseId: `pulse-${index}`,
           detectedAtHostEpochMs: 10_006 + index * 1_000,
+          detectedSampleIndex: 960_000 + index * 48_000,
+          sampleRate: 48_000,
           amplitude: 0.3,
           confidence: 0.8,
           clockUncertaintyMs: 2,
@@ -308,6 +316,12 @@ describe("session registry", () => {
       "pulse-8",
       "pulse-9",
     ]);
+    expect(host?.acousticPulses?.at(-1)).toEqual(
+      expect.objectContaining({
+        emittedSampleIndex: 912_000,
+        sampleRate: 48_000,
+      }),
+    );
     expect(phone?.acousticObservations?.map((observation) => observation.pulseId)).toEqual([
       "pulse-2",
       "pulse-3",
@@ -318,14 +332,13 @@ describe("session registry", () => {
       "pulse-8",
       "pulse-9",
     ]);
-    expect(state.ranges).toEqual([
+    expect(phone?.acousticObservations?.at(-1)).toEqual(
       expect.objectContaining({
-        from: "host",
-        to: "phone-a",
-        samplesUsed: 8,
-        meters: 2.06,
+        detectedSampleIndex: 1_392_000,
+        sampleRate: 48_000,
       }),
-    ]);
+    );
+    expect(state.ranges).toEqual([]);
   });
 
   test("prunes stale non-host phones while keeping an active host", () => {

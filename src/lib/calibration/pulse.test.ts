@@ -14,6 +14,11 @@ describe("active acoustic pulse metadata", () => {
         sequence: 7,
         hostEpochNowMs: 20_000,
         leadMs: 2_200,
+        audioFrame: {
+          sampleIndex: 480_000,
+          sampleRate: 48_000,
+          hostEstimatedEpochMs: 20_000,
+        },
       }),
     ).toEqual({
       id: "host-a:7:22200",
@@ -21,6 +26,8 @@ describe("active acoustic pulse metadata", () => {
       durationMs: 48,
       frequencyHz: 17_200,
       endFrequencyHz: 19_200,
+      emittedSampleIndex: 585_600,
+      sampleRate: 48_000,
     });
   });
 
@@ -64,11 +71,11 @@ describe("active acoustic pulse metadata", () => {
     ).toBeNull();
   });
 
-  test("creates a host-aligned observation from a matched historical audio sample", () => {
+  test("creates a sample-anchored observation from a matched historical audio sample", () => {
     const pulse = createScheduledAcousticPulse({
       deviceId: "host-a",
       sequence: 2,
-      hostEpochNowMs: 10_000,
+      hostEpochNowMs: 20_000,
       leadMs: 0,
       durationMs: 12,
       frequencyHz: 2_000,
@@ -108,8 +115,10 @@ describe("active acoustic pulse metadata", () => {
 
     expect(observation).toEqual(
       expect.objectContaining({
-        pulseId: "host-a:2:10000",
+        pulseId: "host-a:2:20000",
         detectedAtHostEpochMs: 10_006,
+        detectedSampleIndex: 480_288,
+        sampleRate,
         confidence: expect.any(Number),
       }),
     );

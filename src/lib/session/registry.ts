@@ -24,6 +24,8 @@ export type SensorState = "idle" | "active" | "blocked";
 export type AcousticPulse = {
   id: string;
   emittedAtHostEpochMs: number;
+  emittedSampleIndex?: number | null;
+  sampleRate?: number | null;
   durationMs: number;
   frequencyHz: number;
   endFrequencyHz?: number | null;
@@ -32,6 +34,8 @@ export type AcousticPulse = {
 export type AcousticObservation = {
   pulseId: string;
   detectedAtHostEpochMs: number;
+  detectedSampleIndex?: number | null;
+  sampleRate?: number | null;
   amplitude: number;
   confidence: number;
   clockUncertaintyMs?: number | null;
@@ -493,6 +497,8 @@ function sanitizeAcousticPulse(
   }
 
   const emittedAtHostEpochMs = finiteNumber(pulse.emittedAtHostEpochMs);
+  const emittedSampleIndex = finiteNumber(pulse.emittedSampleIndex);
+  const sampleRate = finiteNumber(pulse.sampleRate);
   const durationMs = finiteNumber(pulse.durationMs);
   const frequencyHz = finiteNumber(pulse.frequencyHz);
   const endFrequencyHz = finiteNumber(pulse.endFrequencyHz);
@@ -512,6 +518,11 @@ function sanitizeAcousticPulse(
   return {
     id: pulse.id.slice(0, 80),
     emittedAtHostEpochMs,
+    emittedSampleIndex:
+      emittedSampleIndex === null
+        ? null
+        : Math.max(0, Math.round(emittedSampleIndex)),
+    sampleRate: sampleRate && sampleRate > 0 ? sampleRate : null,
     durationMs,
     frequencyHz,
     endFrequencyHz: endFrequencyHz && endFrequencyHz > 0 ? endFrequencyHz : null,
@@ -526,6 +537,8 @@ function sanitizeAcousticObservation(
   }
 
   const detectedAtHostEpochMs = finiteNumber(observation.detectedAtHostEpochMs);
+  const detectedSampleIndex = finiteNumber(observation.detectedSampleIndex);
+  const sampleRate = finiteNumber(observation.sampleRate);
   const amplitude = clampNumber(observation.amplitude, 0, 1);
   const confidence = clampNumber(observation.confidence, 0, 1);
 
@@ -543,6 +556,11 @@ function sanitizeAcousticObservation(
   return {
     pulseId: observation.pulseId.slice(0, 80),
     detectedAtHostEpochMs,
+    detectedSampleIndex:
+      detectedSampleIndex === null
+        ? null
+        : Math.max(0, Math.round(detectedSampleIndex)),
+    sampleRate: sampleRate && sampleRate > 0 ? sampleRate : null,
     amplitude,
     confidence,
     clockUncertaintyMs: observation.clockUncertaintyMs ?? null,

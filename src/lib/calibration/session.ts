@@ -131,7 +131,7 @@ export function selectUpcomingCalibrationTurn(
 
 export function selectObservablePulse(
   devices: RoomDevice[],
-  observerDeviceId: string,
+  _observerDeviceId: string,
   hostEpochNowMs: number,
   options: ObservablePulseOptions = {},
 ): AcousticPulse | null {
@@ -142,7 +142,6 @@ export function selectObservablePulse(
   const maxFutureMs = options.maxFutureMs ?? 5_500;
   const maxLateMs = options.maxLateMs ?? 180;
   const candidates = devices
-    .filter((device) => device.deviceId !== observerDeviceId)
     .flatMap((device) => (device.acousticPulse ? [device.acousticPulse] : []))
     .filter((pulse) => {
       const deltaMs = pulse.emittedAtHostEpochMs - hostEpochNowMs;

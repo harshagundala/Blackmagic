@@ -18,7 +18,6 @@ import {
 import {
   createMatchedToneObservation,
   createScheduledAcousticPulse,
-  createToneObservation,
 } from "@/lib/calibration/pulse";
 import {
   selectObservablePulse,
@@ -126,6 +125,7 @@ export function BlackmagicApp() {
         deviceId,
         sequence: turn.sequence,
         hostEpochNowMs,
+        audioFrame: snapshotRef.current.audioFrame,
         leadMs: turn.pulseEmittedAtHostEpochMs - hostEpochNowMs,
         durationMs: turn.pulseDurationMs,
       });
@@ -374,22 +374,51 @@ function maybeCreateObservation(
     return null;
   }
 
-  if (snapshot.audioWindow) {
-    return createMatchedToneObservation({
-      pulse,
-      audioWindow: snapshot.audioWindow,
-      minScore: 0.5,
-      minPeakRatio: 2.2,
-    });
+  if (!snapshot.audioWindow) {
+    return null;
   }
 
-  return createToneObservation({
+  return createMatchedToneObservation({
     pulse,
-    detectedAtHostEpochMs: snapshot.audioFrame.hostEstimatedEpochMs,
-    micLevel: snapshot.micLevel,
-    clockUncertaintyMs:
-      snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs,
+    audioWindow: snapshot.audioWindow,
+    ...pulseSearchBounds(pulse, snapshot),
+    minScore: 0.5,
+    minPeakRatio: 2.2,
   });
+}
+
+function pulseSearchBounds(pulse: AcousticPulse, snapshot: SensorSnapshot) {
+  if (!snapshot.audioFrame || !snapshot.audioWindow) {
+    return {};
+  }
+
+  const sampleRate = snapshot.audioWindow.sampleRate;
+  const clockUncertaintyMs =
+    snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs;
+  const earlyMs = Math.max(80, clockUncertaintyMs * 2);
+  const lateMs = Math.max(180, clockUncertaintyMs * 3);
+  const expectedStartSampleIndex =
+    snapshot.audioFrame.sampleIndex +
+    ((pulse.emittedAtHostEpochMs -
+      snapshot.audioFrame.hostEstimatedEpochMs) /
+      1_000) *
+      snapshot.audioFrame.sampleRate;
+
+  return {
+    searchStartSample: Math.max(
+      0,
+      Math.floor(
+        expectedStartSampleIndex -
+          snapshot.audioWindow.startSampleIndex -
+          (earlyMs / 1_000) * sampleRate,
+      ),
+    ),
+    searchEndSample: Math.ceil(
+      expectedStartSampleIndex -
+        snapshot.audioWindow.startSampleIndex +
+        (lateMs / 1_000) * sampleRate,
+    ),
+  };
 }
 
 function scheduleOutputPulse(

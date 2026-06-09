@@ -7,7 +7,10 @@ import {
   synthesizePulseTemplate,
   type PulseDetectionOptions,
 } from "../acoustics/pulse-detector";
-import { audioSampleTimestamp } from "../timing/clock-sync";
+import {
+  audioSampleTimestamp,
+  type AudioFrameTimestamp,
+} from "../timing/clock-sync";
 
 const DEFAULT_LEAD_MS = 2_200;
 const DEFAULT_DURATION_MS = 48;
@@ -20,6 +23,10 @@ export type ScheduledPulseInput = {
   deviceId: string;
   sequence: number;
   hostEpochNowMs: number;
+  audioFrame?: Pick<
+    AudioFrameTimestamp,
+    "sampleIndex" | "sampleRate" | "hostEstimatedEpochMs"
+  > | null;
   leadMs?: number;
   durationMs?: number;
   frequencyHz?: number;
@@ -54,20 +61,35 @@ export function createScheduledAcousticPulse({
   deviceId,
   sequence,
   hostEpochNowMs,
+  audioFrame,
   leadMs = DEFAULT_LEAD_MS,
   durationMs = DEFAULT_DURATION_MS,
   frequencyHz = DEFAULT_FREQUENCY_HZ,
   endFrequencyHz = DEFAULT_END_FREQUENCY_HZ,
 }: ScheduledPulseInput): AcousticPulse {
   const emittedAtHostEpochMs = Math.round(hostEpochNowMs + leadMs);
+  const emittedSampleIndex = estimatedSampleIndexForHostEpoch(
+    emittedAtHostEpochMs,
+    audioFrame,
+  );
 
-  return {
+  const pulse: AcousticPulse = {
     id: `${deviceId}:${sequence}:${emittedAtHostEpochMs}`,
     emittedAtHostEpochMs,
     durationMs,
     frequencyHz,
     endFrequencyHz,
   };
+
+  if (emittedSampleIndex !== null && audioFrame) {
+    return {
+      ...pulse,
+      emittedSampleIndex,
+      sampleRate: audioFrame.sampleRate,
+    };
+  }
+
+  return pulse;
 }
 
 export function createToneObservation({
@@ -127,13 +149,50 @@ export function createMatchedToneObservation({
     clockUncertaintyMs: audioWindow.clockUncertaintyMs,
   });
 
-  return createToneObservation({
-    pulse,
+  return {
+    pulseId: pulse.id,
     detectedAtHostEpochMs: timestamp.hostEstimatedEpochMs,
-    micLevel: detection.amplitude,
+    detectedSampleIndex,
+    sampleRate: audioWindow.sampleRate,
+    amplitude: round(Math.min(1, Math.max(0, detection.amplitude)), 3),
+    confidence: round(
+      observationConfidence(detection.amplitude, audioWindow.clockUncertaintyMs) *
+        Math.max(0, Math.min(1, detection.confidence)),
+      3,
+    ),
     clockUncertaintyMs: audioWindow.clockUncertaintyMs,
-    confidenceScale: detection.confidence,
-  });
+  };
+}
+
+function estimatedSampleIndexForHostEpoch(
+  hostEpochMs: number,
+  audioFrame:
+    | Pick<
+        AudioFrameTimestamp,
+        "sampleIndex" | "sampleRate" | "hostEstimatedEpochMs"
+      >
+    | null
+    | undefined,
+) {
+  if (
+    !audioFrame ||
+    !Number.isFinite(hostEpochMs) ||
+    !Number.isFinite(audioFrame.sampleIndex) ||
+    !Number.isFinite(audioFrame.sampleRate) ||
+    audioFrame.sampleRate <= 0 ||
+    !Number.isFinite(audioFrame.hostEstimatedEpochMs)
+  ) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    Math.round(
+      audioFrame.sampleIndex +
+        ((hostEpochMs - audioFrame.hostEstimatedEpochMs) / 1_000) *
+          audioFrame.sampleRate,
+    ),
+  );
 }
 
 function observationConfidence(micLevel: number, clockUncertaintyMs: number) {
