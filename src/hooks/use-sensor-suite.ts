@@ -19,6 +19,7 @@ import {
   type ClockModel,
 } from "@/lib/timing/clock-sync";
 import type { AudioPulseWindow } from "@/lib/calibration/pulse";
+import { RollingSampleBuffer } from "@/lib/acoustics/rolling-buffer";
 
 type SensorState = "idle" | "active" | "blocked";
 
@@ -53,6 +54,8 @@ const idleSnapshot: SensorSnapshot = {
 const CLOCK_SYNC_INTERVAL_MS = 1_000;
 const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
+const ANALYSER_WINDOW_SAMPLES = 4096;
+const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
 
 type PermissionEventConstructor = {
   requestPermission?: () => Promise<"granted" | "denied" | "default">;
@@ -62,6 +65,8 @@ export function useSensorSuite() {
   const [snapshot, setSnapshot] = useState<SensorSnapshot>(idleSnapshot);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const audioWorkletRef = useRef<AudioWorkletNode | null>(null);
+  const rollingAudioRef = useRef<RollingSampleBuffer | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
   const clockSyncRunRef = useRef(0);
@@ -82,6 +87,9 @@ export function useSensorSuite() {
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
+    audioWorkletRef.current?.disconnect();
+    audioWorkletRef.current = null;
+    rollingAudioRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
     window.removeEventListener("deviceorientation", handleOrientation);
@@ -127,11 +135,21 @@ export function useSensorSuite() {
 
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       const audioContext = new AudioContextClass();
+      if (audioContext.state === "suspended") {
+        await audioContext.resume().catch(() => undefined);
+      }
       audioContextRef.current = audioContext;
+      const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
+      rollingAudioRef.current = rollingAudio;
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 4096;
+      analyser.fftSize = ANALYSER_WINDOW_SAMPLES;
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
+      audioWorkletRef.current = await startAudioWorkletCapture(
+        audioContext,
+        source,
+        rollingAudio,
+      );
       const samples = new Float32Array(analyser.fftSize);
 
       const read = () => {
@@ -146,7 +164,12 @@ export function useSensorSuite() {
           mic: "active",
           micLevel,
           sampleRate: audioContext.sampleRate,
-          ...timestampCurrentAudioWindow(audioContext, samples, current.clock),
+          ...timestampCurrentAudioWindow(
+            audioContext,
+            samples,
+            rollingAudioRef.current,
+            current.clock,
+          ),
           motion: motionActiveRef.current ? "active" : current.motion,
           heading: headingActiveRef.current ? "active" : current.heading,
         }));
@@ -268,7 +291,8 @@ function wait(ms: number) {
 
 function timestampCurrentAudioWindow(
   audioContext: AudioContext,
-  samples: Float32Array,
+  analyserSamples: Float32Array,
+  rollingAudio: RollingSampleBuffer | null,
   clock: ClockModel | null,
 ): Pick<SensorSnapshot, "audioFrame" | "audioWindow"> {
   if (!clock) {
@@ -279,14 +303,19 @@ function timestampCurrentAudioWindow(
   }
 
   const audioFrame = timestampAudioFrame(audioContext, clock);
-  const windowSamples = new Float32Array(samples);
+  const latestRollingWindow = rollingAudio?.latest(ROLLING_AUDIO_HISTORY_SAMPLES);
+  const fallbackSamples = new Float32Array(analyserSamples);
+  const windowSamples = latestRollingWindow?.samples ?? fallbackSamples;
+  const startSampleIndex =
+    latestRollingWindow?.startSampleIndex ??
+    Math.max(0, audioFrame.sampleIndex - fallbackSamples.length);
 
   return {
     audioFrame,
     audioWindow: {
       samples: windowSamples,
       sampleRate: audioFrame.sampleRate,
-      startSampleIndex: Math.max(0, audioFrame.sampleIndex - windowSamples.length),
+      startSampleIndex,
       anchorAudioContextTimeSeconds: audioFrame.audioContextTimeSeconds,
       anchorPerformanceNowMs: audioFrame.performanceNowMs,
       clientPerfOriginEpochMs: audioFrame.clientPerfOriginEpochMs,
@@ -294,6 +323,47 @@ function timestampCurrentAudioWindow(
       clockUncertaintyMs: audioFrame.clockUncertaintyMs,
     },
   };
+}
+
+async function startAudioWorkletCapture(
+  audioContext: AudioContext,
+  source: MediaStreamAudioSourceNode,
+  rollingAudio: RollingSampleBuffer,
+) {
+  if (!audioContext.audioWorklet) {
+    return null;
+  }
+
+  try {
+    await audioContext.audioWorklet.addModule(
+      "/audio/blackmagic-capture-worklet.js",
+    );
+    const node = new AudioWorkletNode(audioContext, "blackmagic-capture", {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+      channelCountMode: "explicit",
+      channelInterpretation: "speakers",
+    });
+
+    node.port.onmessage = (event: MessageEvent<CaptureWorkletMessage>) => {
+      if (
+        event.data?.type !== "samples" ||
+        !(event.data.samples instanceof ArrayBuffer)
+      ) {
+        return;
+      }
+
+      rollingAudio.append(
+        new Float32Array(event.data.samples),
+        event.data.startSampleIndex,
+      );
+    };
+    source.connect(node);
+    return node;
+  } catch {
+    return null;
+  }
 }
 
 function timestampAudioFrame(
@@ -335,3 +405,10 @@ declare global {
     webkitAudioContext?: typeof AudioContext;
   }
 }
+
+type CaptureWorkletMessage = {
+  type: "samples";
+  samples: ArrayBuffer;
+  startSampleIndex: number;
+  sampleRate: number;
+};

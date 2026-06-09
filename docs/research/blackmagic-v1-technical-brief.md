@@ -65,6 +65,8 @@ For historical audio events, the app maps `sampleIndex / sampleRate` into the ho
 
 The first detector is now a normalized matched filter over a short local audio window. The observer synthesizes the expected pulse template from the advertised frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full chirp/GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 
+The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. If worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
+
 ## Active Pulse Ranging
 
 The current V1 range path is intentionally conservative:
@@ -74,4 +76,4 @@ The current V1 range path is intentionally conservative:
 3. A peer that matches the pulse template inside its recent audio sample window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
 4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
 
-This is not yet the final detector. The next detector should move the sample window into an `AudioWorklet`, use a more robust chirp template, and add GCC-PHAT-style cross-correlation over longer rolling history so observations are not missed by animation-frame polling latency.
+This is not yet the final detector. The next detector should use a more robust chirp template, run matching inside or closer to the worklet, and add GCC-PHAT-style cross-correlation over longer rolling history.
