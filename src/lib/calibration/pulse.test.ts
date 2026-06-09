@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  createMatchedToneObservation,
   createScheduledAcousticPulse,
   createToneObservation,
 } from "./pulse";
+import { synthesizeTonePulse } from "../acoustics/pulse-detector";
 
 describe("active acoustic pulse metadata", () => {
   test("schedules a future host-aligned pulse with a stable id", () => {
@@ -59,5 +61,55 @@ describe("active acoustic pulse metadata", () => {
         clockUncertaintyMs: 2,
       }),
     ).toBeNull();
+  });
+
+  test("creates a host-aligned observation from a matched historical audio sample", () => {
+    const pulse = createScheduledAcousticPulse({
+      deviceId: "host-a",
+      sequence: 2,
+      hostEpochNowMs: 10_000,
+      leadMs: 0,
+      durationMs: 12,
+      frequencyHz: 2_000,
+    });
+    const sampleRate = 48_000;
+    const template = synthesizeTonePulse({
+      frequencyHz: pulse.frequencyHz,
+      durationMs: pulse.durationMs,
+      sampleRate,
+    });
+    const samples = new Float32Array(2_048);
+    const startSampleIndex = 480_000;
+    const detectedOffsetSamples = 288;
+    for (let index = 0; index < template.length; index += 1) {
+      samples[detectedOffsetSamples + index] = template[index] * 0.7;
+    }
+
+    const observation = createMatchedToneObservation({
+      pulse,
+      audioWindow: {
+        samples,
+        sampleRate,
+        startSampleIndex,
+        anchorAudioContextTimeSeconds:
+          (startSampleIndex + samples.length) / sampleRate,
+        anchorPerformanceNowMs:
+          ((startSampleIndex + samples.length) / sampleRate) * 1_000,
+        clientPerfOriginEpochMs: 0,
+        clockOffsetMs: 0,
+        clockUncertaintyMs: 2,
+      },
+      minScore: 0.42,
+      minPeakRatio: 3,
+    });
+
+    expect(observation).toEqual(
+      expect.objectContaining({
+        pulseId: "host-a:2:10000",
+        detectedAtHostEpochMs: 10_006,
+        confidence: expect.any(Number),
+      }),
+    );
+    expect(observation?.confidence).toBeGreaterThan(0.5);
   });
 });

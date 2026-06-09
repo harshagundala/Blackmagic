@@ -2,6 +2,12 @@ import type {
   AcousticObservation,
   AcousticPulse,
 } from "@/lib/session/registry";
+import {
+  detectPulse,
+  synthesizeTonePulse,
+  type PulseDetectionOptions,
+} from "../acoustics/pulse-detector";
+import { audioSampleTimestamp } from "../timing/clock-sync";
 
 const DEFAULT_LEAD_MS = 2_200;
 const DEFAULT_DURATION_MS = 48;
@@ -23,7 +29,24 @@ export type ToneObservationInput = {
   detectedAtHostEpochMs: number;
   micLevel: number;
   clockUncertaintyMs: number;
+  confidenceScale?: number;
 };
+
+export type AudioPulseWindow = {
+  samples: Float32Array;
+  sampleRate: number;
+  startSampleIndex: number;
+  anchorAudioContextTimeSeconds: number;
+  anchorPerformanceNowMs: number;
+  clientPerfOriginEpochMs: number;
+  clockOffsetMs: number;
+  clockUncertaintyMs: number;
+};
+
+export type MatchedToneObservationInput = {
+  pulse: AcousticPulse;
+  audioWindow: AudioPulseWindow;
+} & PulseDetectionOptions;
 
 export function createScheduledAcousticPulse({
   deviceId,
@@ -48,6 +71,7 @@ export function createToneObservation({
   detectedAtHostEpochMs,
   micLevel,
   clockUncertaintyMs,
+  confidenceScale = 1,
 }: ToneObservationInput): AcousticObservation | null {
   const propagationMs = detectedAtHostEpochMs - pulse.emittedAtHostEpochMs;
   if (
@@ -62,9 +86,49 @@ export function createToneObservation({
     pulseId: pulse.id,
     detectedAtHostEpochMs,
     amplitude: round(Math.min(1, Math.max(0, micLevel)), 3),
-    confidence: observationConfidence(micLevel, clockUncertaintyMs),
+    confidence: round(
+      observationConfidence(micLevel, clockUncertaintyMs) *
+        Math.max(0, Math.min(1, confidenceScale)),
+      3,
+    ),
     clockUncertaintyMs,
   };
+}
+
+export function createMatchedToneObservation({
+  pulse,
+  audioWindow,
+  ...detectionOptions
+}: MatchedToneObservationInput): AcousticObservation | null {
+  const template = synthesizeTonePulse({
+    frequencyHz: pulse.frequencyHz,
+    durationMs: pulse.durationMs,
+    sampleRate: audioWindow.sampleRate,
+  });
+  const detection = detectPulse(audioWindow.samples, template, detectionOptions);
+  if (!detection) {
+    return null;
+  }
+
+  const detectedSampleIndex =
+    audioWindow.startSampleIndex + detection.startSample;
+  const timestamp = audioSampleTimestamp({
+    sampleIndex: detectedSampleIndex,
+    sampleRate: audioWindow.sampleRate,
+    anchorAudioContextTimeSeconds: audioWindow.anchorAudioContextTimeSeconds,
+    anchorPerformanceNowMs: audioWindow.anchorPerformanceNowMs,
+    clientPerfOriginEpochMs: audioWindow.clientPerfOriginEpochMs,
+    clockOffsetMs: audioWindow.clockOffsetMs,
+    clockUncertaintyMs: audioWindow.clockUncertaintyMs,
+  });
+
+  return createToneObservation({
+    pulse,
+    detectedAtHostEpochMs: timestamp.hostEstimatedEpochMs,
+    micLevel: detection.amplitude,
+    clockUncertaintyMs: audioWindow.clockUncertaintyMs,
+    confidenceScale: detection.confidence,
+  });
 }
 
 function observationConfidence(micLevel: number, clockUncertaintyMs: number) {

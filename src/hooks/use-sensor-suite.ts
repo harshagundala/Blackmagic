@@ -18,6 +18,7 @@ import {
   type ClockExchange,
   type ClockModel,
 } from "@/lib/timing/clock-sync";
+import type { AudioPulseWindow } from "@/lib/calibration/pulse";
 
 type SensorState = "idle" | "active" | "blocked";
 
@@ -29,6 +30,7 @@ export type SensorSnapshot = {
   micLevel: number;
   sampleRate: number | null;
   audioFrame: AudioFrameTimestamp | null;
+  audioWindow: AudioPulseWindow | null;
   headingDegrees: number | null;
   locationAccuracyMeters: number | null;
   clock: ClockModel | null;
@@ -42,6 +44,7 @@ const idleSnapshot: SensorSnapshot = {
   micLevel: 0,
   sampleRate: null,
   audioFrame: null,
+  audioWindow: null,
   headingDegrees: null,
   locationAccuracyMeters: null,
   clock: null,
@@ -126,7 +129,7 @@ export function useSensorSuite() {
       const audioContext = new AudioContextClass();
       audioContextRef.current = audioContext;
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 1024;
+      analyser.fftSize = 4096;
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
       const samples = new Float32Array(analyser.fftSize);
@@ -143,9 +146,7 @@ export function useSensorSuite() {
           mic: "active",
           micLevel,
           sampleRate: audioContext.sampleRate,
-          audioFrame: current.clock
-            ? timestampAudioFrame(audioContext, current.clock)
-            : null,
+          ...timestampCurrentAudioWindow(audioContext, samples, current.clock),
           motion: motionActiveRef.current ? "active" : current.motion,
           heading: headingActiveRef.current ? "active" : current.heading,
         }));
@@ -263,6 +264,36 @@ async function warmClockSync(
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function timestampCurrentAudioWindow(
+  audioContext: AudioContext,
+  samples: Float32Array,
+  clock: ClockModel | null,
+): Pick<SensorSnapshot, "audioFrame" | "audioWindow"> {
+  if (!clock) {
+    return {
+      audioFrame: null,
+      audioWindow: null,
+    };
+  }
+
+  const audioFrame = timestampAudioFrame(audioContext, clock);
+  const windowSamples = new Float32Array(samples);
+
+  return {
+    audioFrame,
+    audioWindow: {
+      samples: windowSamples,
+      sampleRate: audioFrame.sampleRate,
+      startSampleIndex: Math.max(0, audioFrame.sampleIndex - windowSamples.length),
+      anchorAudioContextTimeSeconds: audioFrame.audioContextTimeSeconds,
+      anchorPerformanceNowMs: audioFrame.performanceNowMs,
+      clientPerfOriginEpochMs: audioFrame.clientPerfOriginEpochMs,
+      clockOffsetMs: audioFrame.clockOffsetMs,
+      clockUncertaintyMs: audioFrame.clockUncertaintyMs,
+    },
+  };
 }
 
 function timestampAudioFrame(

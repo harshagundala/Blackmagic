@@ -61,7 +61,9 @@ The clock model should run continuously using low-RTT echo exchanges, but the sa
 
 The deployed V1 now keeps a bounded, low-latency exchange history instead of trusting the latest echo. It exposes offset, best round trip, jitter, max error, sample count, and quality in the heartbeat. On start, the browser performs an immediate sync, a short warm-up burst, and then a 1s maintenance loop. This is still not enough for centimeter-grade acoustic localization by itself, but it makes the uncertainty explicit and keeps bad network samples from masquerading as precise audio timestamps.
 
-For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential even before the final matched-filter detector lands.
+For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential.
+
+The first detector is now a normalized matched filter over a short local audio window. The observer synthesizes the expected pulse template from the advertised frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full chirp/GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 
 ## Active Pulse Ranging
 
@@ -69,7 +71,7 @@ The current V1 range path is intentionally conservative:
 
 1. The host schedules a short 18.5 kHz pulse slightly in the future using its current host-clock model.
 2. The host publishes the pulse id, intended host epoch, frequency, and duration through the normal heartbeat.
-3. A peer that sees a mic peak in the same-room propagation window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
+3. A peer that matches the pulse template inside its recent audio sample window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
 4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
 
-This is not yet the final detector. The next detector should replace the simple mic-level peak with matched filtering or GCC-PHAT against the known pulse/chirp and keep a short rolling audio history so observations are not missed by polling latency.
+This is not yet the final detector. The next detector should move the sample window into an `AudioWorklet`, use a more robust chirp template, and add GCC-PHAT-style cross-correlation over longer rolling history so observations are not missed by animation-frame polling latency.

@@ -11,6 +11,7 @@ import {
 import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
 import {
+  createMatchedToneObservation,
   createScheduledAcousticPulse,
   createToneObservation,
 } from "@/lib/calibration/pulse";
@@ -264,6 +265,15 @@ function maybeCreateObservation(
 ): AcousticObservation | null {
   if (!pulse || pulse.id === observedPulseId || !snapshot.audioFrame) {
     return null;
+  }
+
+  if (snapshot.audioWindow) {
+    return createMatchedToneObservation({
+      pulse,
+      audioWindow: snapshot.audioWindow,
+      minScore: 0.5,
+      minPeakRatio: 2.2,
+    });
   }
 
   return createToneObservation({
