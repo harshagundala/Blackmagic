@@ -1,3 +1,8 @@
+import {
+  estimateFingerprintOffset,
+  type SpeechFingerprint,
+} from "../acoustics/speech-fingerprint";
+
 export type VoiceActivityEvent = {
   id: string;
   detectedAtHostEpochMs: number;
@@ -17,6 +22,7 @@ export type VoiceActivityEvent = {
   clockOffsetStabilityMs?: number | null;
   timingConfidence?: number | null;
   motionStability?: number | null;
+  audioFingerprint?: SpeechFingerprint | null;
 };
 
 export type AudioEventDevice = {
@@ -43,6 +49,10 @@ export type ReconciledAudioEventObservation = {
   clockOffsetStabilityMs?: number | null;
   timingConfidence?: number | null;
   motionStability?: number | null;
+  audioFingerprint?: SpeechFingerprint | null;
+  fingerprintOffsetMs?: number | null;
+  fingerprintCorrelation?: number | null;
+  refinedDetectedAtHostEpochMs?: number | null;
 };
 
 export type ReconciledAudioEvent = {
@@ -56,6 +66,7 @@ export type ReconciledAudioEvent = {
   observations: ReconciledAudioEventObservation[];
   timestampUncertaintyMs: number;
   timingConfidence: number;
+  fingerprintAlignmentConfidence?: number | null;
   confidence: number;
 };
 
@@ -106,7 +117,7 @@ export function deriveReconciledAudioEvents(
 function reconcileCluster(
   cluster: Array<{ deviceId: string; event: VoiceActivityEvent }>,
 ): ReconciledAudioEvent {
-  const observations = cluster
+  const rawObservations = cluster
     .map(({ deviceId, event }) => ({
       deviceId,
       eventId: event.id,
@@ -125,19 +136,29 @@ function reconcileCluster(
       clockOffsetStabilityMs: event.clockOffsetStabilityMs ?? null,
       timingConfidence: event.timingConfidence ?? null,
       motionStability: event.motionStability ?? null,
+      audioFingerprint: event.audioFingerprint ?? null,
+      fingerprintOffsetMs: null,
+      fingerprintCorrelation: null,
+      refinedDetectedAtHostEpochMs: null,
     }))
     .sort(
       (a, b) =>
         a.detectedAtHostEpochMs - b.detectedAtHostEpochMs ||
         a.deviceId.localeCompare(b.deviceId),
     );
-  const startedAtHostEpochMs = observations[0].detectedAtHostEpochMs;
-  const endedAtHostEpochMs =
-    observations[observations.length - 1].detectedAtHostEpochMs;
+  const observations = alignObservationsWithFingerprints(rawObservations).sort(
+    (a, b) =>
+      observationHostTime(a) - observationHostTime(b) ||
+      a.deviceId.localeCompare(b.deviceId),
+  );
+  const startedAtHostEpochMs = observationHostTime(observations[0]);
+  const endedAtHostEpochMs = observationHostTime(
+    observations[observations.length - 1],
+  );
   const timeSpreadMs = round(endedAtHostEpochMs - startedAtHostEpochMs);
   const meanTimeMs = round(
     observations.reduce(
-      (total, observation) => total + observation.detectedAtHostEpochMs,
+      (total, observation) => total + observationHostTime(observation),
       0,
     ) / observations.length,
   );
@@ -160,6 +181,7 @@ function reconcileCluster(
     ) / observations.length;
   const timingScore = 1 / (1 + (timeSpreadMs + meanUncertaintyMs) / 160);
   const timingQualityScore = 0.65 + meanTimingConfidence * 0.35;
+  const fingerprintAlignmentConfidence = meanFingerprintCorrelation(observations);
 
   return {
     id: `voice:${Math.round(startedAtHostEpochMs)}:${observations[0].eventId}`,
@@ -172,10 +194,79 @@ function reconcileCluster(
     observations,
     timestampUncertaintyMs: round(timestampUncertaintyMs),
     timingConfidence: round(meanTimingConfidence * timingScore),
+    fingerprintAlignmentConfidence,
     confidence: round(
       Math.max(0, Math.min(1, meanConfidence * timingScore * timingQualityScore)),
     ),
   };
+}
+
+function alignObservationsWithFingerprints(
+  observations: ReconciledAudioEventObservation[],
+): ReconciledAudioEventObservation[] {
+  const reference = observations.find(
+    (observation) => observation.audioFingerprint,
+  );
+  if (!reference?.audioFingerprint) {
+    return observations;
+  }
+
+  return observations.map((observation) => {
+    if (!observation.audioFingerprint) {
+      return observation;
+    }
+    if (observation === reference) {
+      return {
+        ...observation,
+        fingerprintOffsetMs: 0,
+        fingerprintCorrelation: 1,
+        refinedDetectedAtHostEpochMs: observation.detectedAtHostEpochMs,
+      };
+    }
+
+    const offset = estimateFingerprintOffset(
+      reference.audioFingerprint,
+      observation.audioFingerprint,
+    );
+    if (!offset || offset.correlation < 0.45) {
+      return observation;
+    }
+
+    return {
+      ...observation,
+      fingerprintOffsetMs: offset.offsetMs,
+      fingerprintCorrelation: offset.correlation,
+      refinedDetectedAtHostEpochMs: round(
+        reference.detectedAtHostEpochMs + offset.offsetMs,
+      ),
+    };
+  });
+}
+
+function observationHostTime(observation: ReconciledAudioEventObservation) {
+  return (
+    observation.refinedDetectedAtHostEpochMs ??
+    observation.detectedAtHostEpochMs
+  );
+}
+
+function meanFingerprintCorrelation(
+  observations: ReconciledAudioEventObservation[],
+) {
+  const correlations = observations
+    .map((observation) => observation.fingerprintCorrelation)
+    .filter(
+      (correlation): correlation is number =>
+        typeof correlation === "number" && Number.isFinite(correlation),
+    );
+  if (correlations.length <= 1) {
+    return null;
+  }
+
+  return round(
+    correlations.reduce((total, correlation) => total + correlation, 0) /
+      correlations.length,
+  );
 }
 
 function observationTimingConfidence(

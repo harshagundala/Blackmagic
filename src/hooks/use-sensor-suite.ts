@@ -30,6 +30,7 @@ import {
   detectVoiceActivityEvent,
   type VoiceActivityGate,
 } from "@/lib/acoustics/voice-activity";
+import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
 import type { AcousticPulse } from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import {
@@ -292,13 +293,16 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
           motionStability: motionMetadataRef.current.motionStability,
         });
         voiceGateRef.current = voiceActivity.gate;
+        const voiceEvent = voiceActivity.event
+          ? attachSpeechFingerprint(voiceActivity.event, timing.audioWindow)
+          : null;
         setSnapshot((current) => ({
           ...current,
           mic: "active",
           micLevel,
           sampleRate: audioContext.sampleRate,
           ...timing,
-          voiceEvent: voiceActivity.event ?? current.voiceEvent,
+          voiceEvent: voiceEvent ?? current.voiceEvent,
           motion: motionActiveRef.current ? "active" : current.motion,
           heading: headingActiveRef.current ? "active" : current.heading,
         }));
@@ -485,6 +489,29 @@ function timestampCurrentAudioWindow(
       clockOffsetMs: audioFrame.clockOffsetMs,
       clockUncertaintyMs: audioFrame.clockUncertaintyMs,
     },
+  };
+}
+
+function attachSpeechFingerprint(
+  event: VoiceActivityEvent,
+  audioWindow: AudioPulseWindow | null,
+): VoiceActivityEvent {
+  if (!audioWindow) {
+    return event;
+  }
+
+  const audioFingerprint = createSpeechFingerprint({
+    samples: audioWindow.samples,
+    sampleRate: audioWindow.sampleRate,
+    startSampleIndex: audioWindow.startSampleIndex,
+    centerSampleIndex: event.sampleIndex,
+    windowMs: 240,
+    bins: 32,
+  });
+
+  return {
+    ...event,
+    audioFingerprint,
   };
 }
 

@@ -161,6 +161,61 @@ describe("audio event reconciliation", () => {
       }),
     ]);
   });
+
+  test("refines observation timing from matching audio fingerprints", () => {
+    const events = deriveReconciledAudioEvents([
+      {
+        deviceId: "host",
+        voiceEvents: [
+          voiceEvent({
+            id: "host-fingerprint",
+            detectedAtHostEpochMs: 50_000,
+            audioFingerprint: {
+              sampleRate: 1_000,
+              startSampleIndex: 0,
+              centerSampleIndex: 200,
+              hopMs: 5,
+              windowMs: 80,
+              values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+            },
+          }),
+        ],
+      },
+      {
+        deviceId: "phone-a",
+        voiceEvents: [
+          voiceEvent({
+            id: "phone-fingerprint",
+            detectedAtHostEpochMs: 50_020,
+            audioFingerprint: {
+              sampleRate: 1_000,
+              startSampleIndex: 0,
+              centerSampleIndex: 200,
+              hopMs: 5,
+              windowMs: 80,
+              values: [0, 0, 0, 0.1, 0.35, 1, 0.7, 0.28],
+            },
+          }),
+        ],
+      },
+    ]);
+
+    expect(events[0]).toEqual(
+      expect.objectContaining({
+        timeSpreadMs: 10,
+        fingerprintAlignmentConfidence: expect.any(Number),
+      }),
+    );
+    expect(events[0].fingerprintAlignmentConfidence).toBeGreaterThan(0.8);
+    expect(events[0].observations[1]).toEqual(
+      expect.objectContaining({
+        deviceId: "phone-a",
+        fingerprintOffsetMs: 10,
+        refinedDetectedAtHostEpochMs: 50_010,
+        fingerprintCorrelation: expect.any(Number),
+      }),
+    );
+  });
 });
 
 function voiceEvent(

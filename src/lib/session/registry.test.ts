@@ -221,6 +221,44 @@ describe("session registry", () => {
     );
   });
 
+  test("preserves compact voice fingerprints through heartbeat sanitization", () => {
+    const registry = createSessionRegistry({ now: () => 41_000 });
+
+    const state = registry.heartbeat("https://blackmagic.app/", "host", {
+      voiceEvent: {
+        id: "voice-with-fingerprint",
+        detectedAtHostEpochMs: 40_000,
+        audioContextTimeSeconds: 12,
+        sampleIndex: 576_000,
+        sampleRate: 48_000,
+        audioLevel: 0.08,
+        confidence: 0.84,
+        clockOffsetMs: 1,
+        clockUncertaintyMs: 3,
+        clockQuality: 0.96,
+        audioFingerprint: {
+          sampleRate: 1_000,
+          startSampleIndex: 120,
+          centerSampleIndex: 200,
+          hopMs: 5,
+          windowMs: 80,
+          values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+        },
+      },
+    });
+
+    expect(state.devices[0].voiceEvent).toEqual(
+      expect.objectContaining({
+        id: "voice-with-fingerprint",
+        audioFingerprint: expect.objectContaining({
+          hopMs: 5,
+          windowMs: 80,
+          values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+        }),
+      }),
+    );
+  });
+
   test("keeps bounded acoustic pulse and observation histories across heartbeats", () => {
     let now = 1_000;
     const registry = createSessionRegistry({ now: () => now });

@@ -620,6 +620,50 @@ function sanitizeVoiceActivityEvent(
         clockOffsetStabilityMs,
       }),
     motionStability,
+    audioFingerprint: sanitizeSpeechFingerprint(event.audioFingerprint),
+  };
+}
+
+function sanitizeSpeechFingerprint(
+  fingerprint: VoiceActivityEvent["audioFingerprint"],
+) {
+  if (!fingerprint) {
+    return null;
+  }
+
+  const sampleRate = finiteNumber(fingerprint.sampleRate);
+  const startSampleIndex = finiteNumber(fingerprint.startSampleIndex);
+  const centerSampleIndex = finiteNumber(fingerprint.centerSampleIndex);
+  const hopMs = nonNegativeNumber(fingerprint.hopMs);
+  const windowMs = nonNegativeNumber(fingerprint.windowMs);
+  const values = Array.isArray(fingerprint.values)
+    ? fingerprint.values
+        .slice(0, 64)
+        .map((value) => clampNumber(value, 0, 1))
+        .filter((value): value is number => typeof value === "number")
+    : [];
+
+  if (
+    sampleRate === null ||
+    sampleRate <= 0 ||
+    startSampleIndex === null ||
+    centerSampleIndex === null ||
+    hopMs === null ||
+    hopMs <= 0 ||
+    windowMs === null ||
+    windowMs <= 0 ||
+    values.length < 4
+  ) {
+    return null;
+  }
+
+  return {
+    sampleRate,
+    startSampleIndex: Math.max(0, Math.round(startSampleIndex)),
+    centerSampleIndex: Math.max(0, Math.round(centerSampleIndex)),
+    hopMs,
+    windowMs,
+    values,
   };
 }
 

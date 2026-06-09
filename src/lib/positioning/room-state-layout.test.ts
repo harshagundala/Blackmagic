@@ -268,6 +268,43 @@ describe("room state constellation", () => {
       (stableFit?.confidence ?? 0) - 0.12,
     );
   });
+
+  test("uses fingerprint-refined observation times for TDOA fitting", () => {
+    const devices = [
+      constellationDevice({ deviceId: "host", role: "host", x: 0, y: 0 }),
+      constellationDevice({ deviceId: "phone-a", x: 2, y: 0 }),
+      constellationDevice({ deviceId: "phone-b", x: 0, y: 2 }),
+    ];
+    const actualSource = { x: -0.8, y: -0.55 };
+    const event = voiceEventFromSource({
+      devices,
+      source: actualSource,
+      eventId: "voice:fingerprint-refined",
+      emittedAtHostEpochMs: 70_000,
+    });
+    const rawCorrupted = {
+      ...event,
+      observations: event.observations.map((observation) =>
+        observation.deviceId === "phone-a"
+          ? {
+              ...observation,
+              detectedAtHostEpochMs: observation.detectedAtHostEpochMs + 18,
+              refinedDetectedAtHostEpochMs: observation.detectedAtHostEpochMs,
+              fingerprintCorrelation: 0.93,
+              fingerprintOffsetMs:
+                observation.detectedAtHostEpochMs -
+                event.observations[0].detectedAtHostEpochMs,
+            }
+          : observation,
+      ),
+    };
+
+    const fit = fitAudioSourceByTdoa(rawCorrupted, devices, 70_500);
+
+    expect(fit?.x).toBeCloseTo(actualSource.x, 1);
+    expect(fit?.y).toBeCloseTo(actualSource.y, 1);
+    expect(fit?.residualMs).toBeLessThan(2);
+  });
 });
 
 function acousticRange(

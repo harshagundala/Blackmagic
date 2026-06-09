@@ -128,7 +128,7 @@ export function fitAudioSourceByTdoa(
     )
     .sort(
       (a, b) =>
-        a.detectedAtHostEpochMs - b.detectedAtHostEpochMs ||
+        observationHostTime(a) - observationHostTime(b) ||
         a.deviceId.localeCompare(b.deviceId),
     );
 
@@ -272,7 +272,7 @@ function tdoaResidualMs(
         speedOfSoundMetersPerSecond) *
       1_000;
     const observedMs =
-      observation.detectedAtHostEpochMs - leader.detectedAtHostEpochMs;
+      observationHostTime(observation) - observationHostTime(leader);
     const uncertaintyMs = Math.max(
       0.5,
       observation.clockUncertaintyMs + leader.clockUncertaintyMs,
@@ -402,6 +402,15 @@ function observationMotionStability(
   }
 
   return 1;
+}
+
+function observationHostTime(
+  observation: ReconciledAudioEvent["observations"][number],
+) {
+  return (
+    observation.refinedDetectedAtHostEpochMs ??
+    observation.detectedAtHostEpochMs
+  );
 }
 
 function round(value: number) {
