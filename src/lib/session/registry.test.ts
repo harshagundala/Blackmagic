@@ -156,6 +156,13 @@ describe("session registry", () => {
       clockBestRoundTripMs: 12,
       clockJitterMs: 1.2,
       clockSamplesUsed: 5,
+      captureProcessing: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        rawCaptureVerified: true,
+      },
+      audioContextState: "running",
       audioFrame: {
         audioContextTimeSeconds: 10,
         sampleIndex: 480_000,
@@ -222,6 +229,13 @@ describe("session registry", () => {
         clockBestRoundTripMs: 12,
         clockJitterMs: 1.2,
         clockSamplesUsed: 5,
+        captureProcessing: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          rawCaptureVerified: true,
+        },
+        audioContextState: "running",
         acousticPulse: expect.objectContaining({
           id: "chirp-1",
           frequencyHz: 17_200,

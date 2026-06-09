@@ -25,6 +25,8 @@ export function createDeviceHeartbeatPayload({
     mic: snapshot.mic,
     micLevel: snapshot.micLevel,
     sampleRate: snapshot.sampleRate,
+    captureProcessing: snapshot.captureProcessing,
+    audioContextState: snapshot.audioContextState,
     clockQuality: snapshot.clock?.quality ?? null,
     clockOffsetMs: snapshot.clock?.offsetMs ?? null,
     clockUncertaintyMs: snapshot.clock?.uncertaintyMs ?? null,

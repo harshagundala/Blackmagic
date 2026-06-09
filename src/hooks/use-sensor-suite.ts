@@ -35,7 +35,11 @@ import {
 } from "@/lib/acoustics/voice-activity";
 import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
 import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
-import type { AcousticObservation, AcousticPulse } from "@/lib/session/registry";
+import type {
+  AcousticObservation,
+  AcousticPulse,
+  CaptureProcessingReport,
+} from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import {
   idleMotionMetadata,
@@ -45,15 +49,7 @@ import {
 
 type SensorState = "idle" | "active" | "blocked";
 
-export type CaptureProcessingReport = {
-  echoCancellation: boolean | null;
-  noiseSuppression: boolean | null;
-  autoGainControl: boolean | null;
-  // True only when the browser confirmed all voice processing is off. iOS
-  // Safari can silently ignore the constraints; detection quality drops when
-  // it does, so the UI and confidence scoring need to know.
-  rawCaptureVerified: boolean;
-};
+export type { CaptureProcessingReport } from "@/lib/session/registry";
 
 export type SensorSnapshot = MotionSensorMetadata & {
   mic: SensorState;

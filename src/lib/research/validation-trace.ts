@@ -26,6 +26,7 @@ export type PhysicalRoomValidationTraceSummary = {
   peakDeviceCount: number;
   peakLocalizedDeviceCount: number;
   peakRangeCount: number;
+  peakAudioCaptureReadyDeviceCount: number;
   peakAudioTimestampReadyDeviceCount: number;
   worstAudioTimestampErrorMs: number | null;
   lowestAudioTimingConfidence: number | null;
@@ -71,6 +72,10 @@ export function summarizePhysicalRoomValidationTrace(
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
+    peakAudioCaptureReadyDeviceCount: peakMetric(
+      ordered,
+      "audioCaptureReadyDeviceCount",
+    ),
     peakAudioTimestampReadyDeviceCount: peakMetric(
       ordered,
       "audioTimestampReadyDeviceCount",
@@ -95,6 +100,7 @@ function emptySummary(): PhysicalRoomValidationTraceSummary {
     peakDeviceCount: 0,
     peakLocalizedDeviceCount: 0,
     peakRangeCount: 0,
+    peakAudioCaptureReadyDeviceCount: 0,
     peakAudioTimestampReadyDeviceCount: 0,
     worstAudioTimestampErrorMs: null,
     lowestAudioTimingConfidence: null,
@@ -141,6 +147,7 @@ function peakMetric(
     | "deviceCount"
     | "localizedDeviceCount"
     | "rangeCount"
+    | "audioCaptureReadyDeviceCount"
     | "audioTimestampReadyDeviceCount"
     | "tdoaSourceCount"
   >,

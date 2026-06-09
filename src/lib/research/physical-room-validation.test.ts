@@ -37,6 +37,10 @@ describe("physical room validation", () => {
     expect(report.metrics.deviceCount).toBe(3);
     expect(report.metrics.localizedDeviceCount).toBe(3);
     expect(report.metrics.rangeCount).toBe(3);
+    expect(report.audioCapture.status).toBe("ready");
+    expect(report.metrics.audioCaptureReadyDeviceCount).toBe(3);
+    expect(report.metrics.rawCaptureVerifiedDeviceCount).toBe(3);
+    expect(report.metrics.runningAudioContextDeviceCount).toBe(3);
     expect(report.audioTimestamps.status).toBe("ready");
     expect(report.metrics.audioTimestampReadyDeviceCount).toBe(3);
     expect(report.metrics.worstAudioTimestampErrorMs).toBeLessThanOrEqual(2);
@@ -142,5 +146,51 @@ describe("physical room validation", () => {
     expect(report.metrics.worstAudioTimestampErrorMs).toBe(42);
     expect(report.blockers).toContain("audio_timestamp_error_high");
     expect(report.blockers).toContain("audio_timestamp_confidence_low");
+  });
+
+  test("marks confirmed filtered audio capture degraded", () => {
+    const simulation = simulateAcousticRoom({
+      roomUrl: "https://blackmagic.app/lab-filtered-capture",
+      devices: [
+        { deviceId: "host", x: 0, y: 0 },
+        { deviceId: "phone-a", x: 2.2, y: 0.25 },
+        { deviceId: "phone-b", x: 0.65, y: 2.15 },
+      ],
+      exchangesPerPair: 3,
+      speechEvents: [
+        {
+          id: "speaker-1",
+          x: -0.5,
+          y: -0.35,
+        },
+      ],
+    });
+    const filteredRoom = {
+      ...simulation.roomState,
+      devices: simulation.roomState.devices.map((device, index) =>
+        index === 1
+          ? {
+              ...device,
+              captureProcessing: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: null,
+                rawCaptureVerified: false,
+              },
+            }
+          : device,
+      ),
+    };
+
+    const report = validatePhysicalRoomLocalization(
+      filteredRoom,
+      simulation.constellation,
+    );
+
+    expect(report.audioCapture.status).toBe("degraded");
+    expect(report.status).toBe("degraded");
+    expect(report.metrics.audioCaptureReadyDeviceCount).toBe(2);
+    expect(report.metrics.rawCaptureVerifiedDeviceCount).toBe(2);
+    expect(report.blockers).toContain("filtered_audio_capture");
   });
 });

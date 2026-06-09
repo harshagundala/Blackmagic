@@ -19,6 +19,11 @@ export type PhysicalRoomValidationMetrics = {
   clockStatus: RoomState["timeSync"]["status"];
   worstClockErrorMs: number | null;
   roomClockConfidence: number;
+  audioCaptureReadyDeviceCount: number;
+  rawCaptureVerifiedDeviceCount: number;
+  runningAudioContextDeviceCount: number;
+  filteredCaptureDeviceCount: number;
+  suspendedAudioContextDeviceCount: number;
   audioTimestampDeviceCount: number;
   audioTimestampReadyDeviceCount: number;
   worstAudioTimestampErrorMs: number | null;
@@ -31,6 +36,7 @@ export type PhysicalRoomValidationMetrics = {
 export type PhysicalRoomValidationReport = {
   status: PhysicalRoomValidationStatus;
   phoneLayout: PhysicalRoomValidationSection;
+  audioCapture: PhysicalRoomValidationSection;
   audioTimestamps: PhysicalRoomValidationSection;
   spokenSource: PhysicalRoomValidationSection;
   metrics: PhysicalRoomValidationMetrics;
@@ -49,11 +55,13 @@ export function validatePhysicalRoomLocalization(
 ): PhysicalRoomValidationReport {
   const metrics = validationMetrics(roomState, constellation);
   const phoneLayout = phoneLayoutSection(metrics);
+  const audioCapture = audioCaptureSection(metrics);
   const audioTimestamps = audioTimestampsSection(metrics);
   const spokenSource = spokenSourceSection(metrics);
-  const sections = [phoneLayout, audioTimestamps, spokenSource];
+  const sections = [phoneLayout, audioCapture, audioTimestamps, spokenSource];
   const blockers = unique([
     ...phoneLayout.blockers,
+    ...audioCapture.blockers,
     ...audioTimestamps.blockers,
     ...spokenSource.blockers,
   ]);
@@ -61,6 +69,7 @@ export function validatePhysicalRoomLocalization(
   return {
     status: aggregateStatus(sections),
     phoneLayout,
+    audioCapture,
     audioTimestamps,
     spokenSource,
     metrics,
@@ -86,6 +95,7 @@ function validationMetrics(
   const timestampConfidences = timestampStates
     .map((state) => state.timingConfidence)
     .filter((confidence): confidence is number => confidence !== null);
+  const captureStates = roomState.devices.map(audioCaptureState);
 
   return {
     deviceCount: roomState.devices.length,
@@ -96,6 +106,19 @@ function validationMetrics(
     clockStatus: roomState.timeSync.status,
     worstClockErrorMs: roomState.timeSync.worstLocalizationErrorMs,
     roomClockConfidence: roomState.timeSync.roomConfidence,
+    audioCaptureReadyDeviceCount: captureStates.filter((state) => state.ready)
+      .length,
+    rawCaptureVerifiedDeviceCount: captureStates.filter(
+      (state) => state.rawVerified,
+    ).length,
+    runningAudioContextDeviceCount: captureStates.filter(
+      (state) => state.contextRunning,
+    ).length,
+    filteredCaptureDeviceCount: captureStates.filter((state) => state.filtered)
+      .length,
+    suspendedAudioContextDeviceCount: captureStates.filter(
+      (state) => state.contextBlocked,
+    ).length,
     audioTimestampDeviceCount: timestampStates.filter((state) => state.present)
       .length,
     audioTimestampReadyDeviceCount: timestampStates.filter((state) => state.ready)
@@ -113,6 +136,28 @@ function validationMetrics(
       sourceConfidences.length === 0
         ? null
         : round(Math.max(...sourceConfidences)),
+  };
+}
+
+function audioCaptureState(device: RoomDevice) {
+  const rawVerified = device.captureProcessing?.rawCaptureVerified === true;
+  const filtered =
+    device.captureProcessing !== null &&
+    device.captureProcessing !== undefined &&
+    !rawVerified;
+  const contextRunning = device.audioContextState === "running";
+  const contextBlocked =
+    device.audioContextState !== null &&
+    device.audioContextState !== undefined &&
+    device.audioContextState !== "running";
+  const micActive = device.mic === "active";
+
+  return {
+    ready: micActive && rawVerified && contextRunning,
+    rawVerified,
+    contextRunning,
+    filtered,
+    contextBlocked,
   };
 }
 
@@ -169,6 +214,37 @@ function phoneLayoutSection(
     status: degraded ? "degraded" : blockers.length === 0 ? "ready" : "warming",
     blockers,
   };
+}
+
+function audioCaptureSection(
+  metrics: PhysicalRoomValidationMetrics,
+): PhysicalRoomValidationSection {
+  const blockers: string[] = [];
+  const required = requiredAudioCaptureDevices(metrics.deviceCount);
+  let degraded = false;
+  if (metrics.deviceCount < 2) {
+    blockers.push("insufficient_devices");
+  }
+  if (metrics.audioCaptureReadyDeviceCount < required) {
+    blockers.push("insufficient_audio_capture");
+  }
+  if (metrics.filteredCaptureDeviceCount > 0) {
+    blockers.push("filtered_audio_capture");
+    degraded = true;
+  }
+  if (metrics.suspendedAudioContextDeviceCount > 0) {
+    blockers.push("audio_context_not_running");
+    degraded = true;
+  }
+
+  return {
+    status: degraded ? "degraded" : blockers.length === 0 ? "ready" : "warming",
+    blockers,
+  };
+}
+
+function requiredAudioCaptureDevices(deviceCount: number) {
+  return deviceCount >= 3 ? 3 : Math.min(2, deviceCount);
 }
 
 function audioTimestampsSection(

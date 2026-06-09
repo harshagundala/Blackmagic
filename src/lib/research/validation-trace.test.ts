@@ -24,6 +24,7 @@ describe("validation trace", () => {
           deviceCount: 3,
           localizedDeviceCount: 3,
           rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
           audioTimestampReadyDeviceCount: 3,
           tdoaSourceCount: 1,
           worstAudioTimestampErrorMs: 3.4,
@@ -34,6 +35,7 @@ describe("validation trace", () => {
           deviceCount: 3,
           localizedDeviceCount: 3,
           rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
           audioTimestampReadyDeviceCount: 3,
           tdoaSourceCount: 1,
           worstAudioTimestampErrorMs: 2.8,
@@ -56,6 +58,7 @@ describe("validation trace", () => {
       "no_tdoa_source",
     ]);
     expect(summary.peakLocalizedDeviceCount).toBe(3);
+    expect(summary.peakAudioCaptureReadyDeviceCount).toBe(3);
     expect(summary.peakAudioTimestampReadyDeviceCount).toBe(3);
     expect(summary.worstAudioTimestampErrorMs).toBe(3.4);
     expect(summary.lowestAudioTimingConfidence).toBe(0.78);
@@ -110,6 +113,10 @@ function snapshot(
         status,
         blockers,
       },
+      audioCapture: {
+        status,
+        blockers,
+      },
       audioTimestamps: {
         status,
         blockers,
@@ -127,6 +134,11 @@ function snapshot(
         clockStatus: status === "ready" ? "ready" : "warming",
         worstClockErrorMs: status === "ready" ? 1.1 : null,
         roomClockConfidence: status === "ready" ? 0.9 : 0,
+        audioCaptureReadyDeviceCount: 0,
+        rawCaptureVerifiedDeviceCount: 0,
+        runningAudioContextDeviceCount: 0,
+        filteredCaptureDeviceCount: 0,
+        suspendedAudioContextDeviceCount: 0,
         audioTimestampDeviceCount: 0,
         audioTimestampReadyDeviceCount: 0,
         worstAudioTimestampErrorMs: null,

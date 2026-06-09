@@ -50,10 +50,28 @@ export type AcousticObservation = {
   clockUncertaintyMs?: number | null;
 };
 
+export type CaptureProcessingReport = {
+  echoCancellation: boolean | null;
+  noiseSuppression: boolean | null;
+  autoGainControl: boolean | null;
+  // True only when the browser confirmed all voice processing is off. iOS
+  // Safari can silently ignore constraints; unverified capture degrades chirp
+  // and speech alignment enough that the room should not be trusted as ready.
+  rawCaptureVerified: boolean;
+};
+
+export type AudioContextRunState =
+  | "closed"
+  | "interrupted"
+  | "running"
+  | "suspended";
+
 export type DeviceHeartbeat = {
   mic?: SensorState;
   micLevel?: number | null;
   sampleRate?: number | null;
+  captureProcessing?: CaptureProcessingReport | null;
+  audioContextState?: AudioContextRunState | null;
   clockQuality?: number | null;
   clockOffsetMs?: number | null;
   clockUncertaintyMs?: number | null;
@@ -370,6 +388,8 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     mic: heartbeat.mic,
     micLevel: clampNumber(heartbeat.micLevel, 0, 1),
     sampleRate: heartbeat.sampleRate ?? null,
+    captureProcessing: sanitizeCaptureProcessing(heartbeat.captureProcessing),
+    audioContextState: sanitizeAudioContextState(heartbeat.audioContextState),
     clockQuality: clampNumber(heartbeat.clockQuality, 0, 1),
     clockOffsetMs: finiteNumber(heartbeat.clockOffsetMs),
     clockUncertaintyMs: heartbeat.clockUncertaintyMs ?? null,
@@ -436,6 +456,32 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
       heartbeat.locationCapturedAtEpochMs,
     ),
   };
+}
+
+function sanitizeCaptureProcessing(
+  report: CaptureProcessingReport | null | undefined,
+): CaptureProcessingReport | null {
+  if (!report || typeof report.rawCaptureVerified !== "boolean") {
+    return null;
+  }
+
+  return {
+    echoCancellation: booleanOrNull(report.echoCancellation),
+    noiseSuppression: booleanOrNull(report.noiseSuppression),
+    autoGainControl: booleanOrNull(report.autoGainControl),
+    rawCaptureVerified: report.rawCaptureVerified,
+  };
+}
+
+function sanitizeAudioContextState(
+  state: AudioContextRunState | null | undefined,
+): AudioContextRunState | null {
+  return state === "running" ||
+    state === "suspended" ||
+    state === "closed" ||
+    state === "interrupted"
+    ? state
+    : null;
 }
 
 export function mergeHeartbeat(

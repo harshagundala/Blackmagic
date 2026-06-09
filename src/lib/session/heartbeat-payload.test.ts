@@ -45,6 +45,34 @@ describe("heartbeat payload", () => {
     expect(heartbeat.voiceEvent).toBeNull();
     expect(heartbeat.acousticPulse).toEqual(pulse);
   });
+
+  test("carries raw capture and audio context evidence", () => {
+    const snapshot = sensorSnapshot({
+      captureProcessing: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        rawCaptureVerified: true,
+      },
+      audioContextState: "running",
+    });
+
+    const heartbeat = createDeviceHeartbeatPayload({
+      snapshot,
+      calibration: {},
+      lastPublishedVoiceEventId: "",
+    });
+
+    expect(heartbeat).toMatchObject({
+      captureProcessing: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        rawCaptureVerified: true,
+      },
+      audioContextState: "running",
+    });
+  });
 });
 
 function sensorSnapshot(

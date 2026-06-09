@@ -307,6 +307,13 @@ function heartbeatAt(
   registry.heartbeat(roomUrl, deviceId, {
     mic: "active",
     sampleRate,
+    captureProcessing: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      rawCaptureVerified: true,
+    },
+    audioContextState: "running",
     clockQuality: 0.98,
     clockOffsetMs: 0,
     clockUncertaintyMs: 0.8,

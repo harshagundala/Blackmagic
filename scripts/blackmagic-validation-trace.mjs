@@ -156,6 +156,7 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
       peakDeviceCount: 0,
       peakLocalizedDeviceCount: 0,
       peakRangeCount: 0,
+      peakAudioCaptureReadyDeviceCount: 0,
       peakAudioTimestampReadyDeviceCount: 0,
       worstAudioTimestampErrorMs: null,
       lowestAudioTimingConfidence: null,
@@ -190,6 +191,10 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
+    peakAudioCaptureReadyDeviceCount: peakMetric(
+      ordered,
+      "audioCaptureReadyDeviceCount",
+    ),
     peakAudioTimestampReadyDeviceCount: peakMetric(
       ordered,
       "audioTimestampReadyDeviceCount",
