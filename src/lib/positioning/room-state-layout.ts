@@ -29,6 +29,8 @@ export type RoomAudioSourceHint = {
   confidence: number;
   ageMs: number;
   timeSpreadMs: number;
+  method: "arrival-leader" | "tdoa-grid";
+  residualMs: number | null;
   arrivalLeaderDeviceId: string;
   observedDeviceIds: string[];
 };
@@ -100,38 +102,195 @@ function deriveAudioSourceHints(
 
   return events
     .map((event) => {
-      const leader = byId.get(event.arrivalLeaderDeviceId);
-      if (!leader) {
-        return null;
-      }
-
-      const laterObservers = event.observedDeviceIds
-        .filter((deviceId) => deviceId !== event.arrivalLeaderDeviceId)
-        .map((deviceId) => byId.get(deviceId))
-        .filter((device): device is RoomConstellationDevice => Boolean(device));
-      const referenceDevices =
-        laterObservers.length > 0
-          ? laterObservers
-          : devices.filter((device) => device.deviceId !== leader.deviceId);
-      const reference = centroid(referenceDevices);
-      const direction = unitVector({
-        x: leader.x - reference.x,
-        y: leader.y - reference.y,
-      });
-      const offsetMeters = 0.72;
-
-      return {
-        eventId: event.id,
-        x: round(leader.x + direction.x * offsetMeters),
-        y: round(leader.y + direction.y * offsetMeters),
-        confidence: audioSourceConfidence(event),
-        ageMs: Math.max(0, round(roomUpdatedAtMs - event.centerHostEpochMs)),
-        timeSpreadMs: event.timeSpreadMs,
-        arrivalLeaderDeviceId: event.arrivalLeaderDeviceId,
-        observedDeviceIds: event.observedDeviceIds,
-      };
+      return (
+        fitAudioSourceByTdoa(event, devices, roomUpdatedAtMs) ??
+        projectLeaderSideSource(event, byId, devices, roomUpdatedAtMs)
+      );
     })
     .filter((source): source is RoomAudioSourceHint => source !== null);
+}
+
+export function fitAudioSourceByTdoa(
+  event: ReconciledAudioEvent,
+  devices: RoomConstellationDevice[],
+  roomUpdatedAtMs: number,
+): RoomAudioSourceHint | null {
+  const byId = new Map(devices.map((device) => [device.deviceId, device]));
+  const observations = event.observations
+    .map((observation) => ({
+      ...observation,
+      device: byId.get(observation.deviceId),
+    }))
+    .filter(
+      (observation): observation is typeof observation & {
+        device: RoomConstellationDevice;
+      } => Boolean(observation.device),
+    )
+    .sort(
+      (a, b) =>
+        a.detectedAtHostEpochMs - b.detectedAtHostEpochMs ||
+        a.deviceId.localeCompare(b.deviceId),
+    );
+
+  if (observations.length < 3) {
+    return null;
+  }
+
+  const leader = observations.find(
+    (observation) => observation.deviceId === event.arrivalLeaderDeviceId,
+  );
+  if (!leader) {
+    return null;
+  }
+
+  const bounds = expandedBounds(observations.map((observation) => observation.device));
+  const coarse = searchTdoaGrid(event, observations, leader, bounds, 0.18);
+  const fineBounds = {
+    minX: coarse.x - 0.32,
+    maxX: coarse.x + 0.32,
+    minY: coarse.y - 0.32,
+    maxY: coarse.y + 0.32,
+  };
+  const fit = searchTdoaGrid(event, observations, leader, fineBounds, 0.025);
+  const residualScore = 1 / (1 + fit.residualMs / 12);
+  const observerScore = Math.min(1, 0.54 + observations.length * 0.16);
+
+  return {
+    eventId: event.id,
+    x: round(fit.x),
+    y: round(fit.y),
+    confidence: round(
+      Math.max(
+        0.05,
+        Math.min(1, event.confidence * residualScore * observerScore),
+      ),
+    ),
+    ageMs: Math.max(0, round(roomUpdatedAtMs - event.centerHostEpochMs)),
+    timeSpreadMs: event.timeSpreadMs,
+    method: "tdoa-grid",
+    residualMs: round(fit.residualMs),
+    arrivalLeaderDeviceId: event.arrivalLeaderDeviceId,
+    observedDeviceIds: event.observedDeviceIds,
+  };
+}
+
+function projectLeaderSideSource(
+  event: ReconciledAudioEvent,
+  byId: Map<string, RoomConstellationDevice>,
+  devices: RoomConstellationDevice[],
+  roomUpdatedAtMs: number,
+): RoomAudioSourceHint | null {
+  const leader = byId.get(event.arrivalLeaderDeviceId);
+  if (!leader) {
+    return null;
+  }
+
+  const laterObservers = event.observedDeviceIds
+    .filter((deviceId) => deviceId !== event.arrivalLeaderDeviceId)
+    .map((deviceId) => byId.get(deviceId))
+    .filter((device): device is RoomConstellationDevice => Boolean(device));
+  const referenceDevices =
+    laterObservers.length > 0
+      ? laterObservers
+      : devices.filter((device) => device.deviceId !== leader.deviceId);
+  const reference = centroid(referenceDevices);
+  const direction = unitVector({
+    x: leader.x - reference.x,
+    y: leader.y - reference.y,
+  });
+  const offsetMeters = 0.72;
+
+  return {
+    eventId: event.id,
+    x: round(leader.x + direction.x * offsetMeters),
+    y: round(leader.y + direction.y * offsetMeters),
+    confidence: audioSourceConfidence(event),
+    ageMs: Math.max(0, round(roomUpdatedAtMs - event.centerHostEpochMs)),
+    timeSpreadMs: event.timeSpreadMs,
+    method: "arrival-leader",
+    residualMs: null,
+    arrivalLeaderDeviceId: event.arrivalLeaderDeviceId,
+    observedDeviceIds: event.observedDeviceIds,
+  };
+}
+
+function searchTdoaGrid(
+  event: ReconciledAudioEvent,
+  observations: Array<
+    ReconciledAudioEvent["observations"][number] & {
+      device: RoomConstellationDevice;
+    }
+  >,
+  leader: ReconciledAudioEvent["observations"][number] & {
+    device: RoomConstellationDevice;
+  },
+  bounds: { minX: number; maxX: number; minY: number; maxY: number },
+  stepMeters: number,
+) {
+  let best = { x: leader.device.x, y: leader.device.y, residualMs: Infinity };
+  for (let x = bounds.minX; x <= bounds.maxX; x += stepMeters) {
+    for (let y = bounds.minY; y <= bounds.maxY; y += stepMeters) {
+      const residualMs = tdoaResidualMs(event, observations, leader, { x, y });
+      if (residualMs < best.residualMs) {
+        best = { x, y, residualMs };
+      }
+    }
+  }
+  return best;
+}
+
+function tdoaResidualMs(
+  event: ReconciledAudioEvent,
+  observations: Array<
+    ReconciledAudioEvent["observations"][number] & {
+      device: RoomConstellationDevice;
+    }
+  >,
+  leader: ReconciledAudioEvent["observations"][number] & {
+    device: RoomConstellationDevice;
+  },
+  source: { x: number; y: number },
+) {
+  const speedOfSoundMetersPerSecond = 343;
+  let weightedSquares = 0;
+  let totalWeight = 0;
+  for (const observation of observations) {
+    if (observation.deviceId === leader.deviceId) {
+      continue;
+    }
+    const predictedMs =
+      ((distance(source, observation.device) - distance(source, leader.device)) /
+        speedOfSoundMetersPerSecond) *
+      1_000;
+    const observedMs =
+      observation.detectedAtHostEpochMs - leader.detectedAtHostEpochMs;
+    const uncertaintyMs = Math.max(
+      0.5,
+      observation.clockUncertaintyMs + leader.clockUncertaintyMs,
+    );
+    const weight =
+      (observation.confidence * leader.confidence * event.confidence) /
+      (1 + uncertaintyMs / 8);
+    weightedSquares += (predictedMs - observedMs) ** 2 * weight;
+    totalWeight += weight;
+  }
+  return totalWeight === 0
+    ? Number.POSITIVE_INFINITY
+    : Math.sqrt(weightedSquares / totalWeight);
+}
+
+function expandedBounds(devices: RoomConstellationDevice[]) {
+  const marginMeters = 2.4;
+  return {
+    minX: Math.min(...devices.map((device) => device.x)) - marginMeters,
+    maxX: Math.max(...devices.map((device) => device.x)) + marginMeters,
+    minY: Math.min(...devices.map((device) => device.y)) - marginMeters,
+    maxY: Math.max(...devices.map((device) => device.y)) + marginMeters,
+  };
+}
+
+function distance(from: { x: number; y: number }, to: { x: number; y: number }) {
+  return Math.hypot(to.x - from.x, to.y - from.y);
 }
 
 function centroid(devices: RoomConstellationDevice[]) {

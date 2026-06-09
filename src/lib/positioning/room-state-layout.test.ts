@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   estimateRoomConstellation,
+  fitAudioSourceByTdoa,
   rangeLayoutWeight,
 } from "./room-state-layout";
 import type { AcousticRange } from "@/lib/session/ranging";
@@ -170,6 +171,36 @@ describe("room state constellation", () => {
     expect(distance(source, host)).toBeLessThan(distance(source, phone));
     expect(distance(source, phone)).toBeGreaterThan(distance(host, phone));
   });
+
+  test("fits a source point from three-device time differences", () => {
+    const devices = [
+      constellationDevice({ deviceId: "host", role: "host", x: 0, y: 0 }),
+      constellationDevice({ deviceId: "phone-a", x: 2, y: 0 }),
+      constellationDevice({ deviceId: "phone-b", x: 0, y: 2 }),
+    ];
+    const actualSource = { x: -0.8, y: -0.55 };
+    const event = voiceEventFromSource({
+      devices,
+      source: actualSource,
+      eventId: "voice:tdoa",
+      emittedAtHostEpochMs: 40_000,
+    });
+
+    const fit = fitAudioSourceByTdoa(event, devices, 40_500);
+
+    expect(fit).toEqual(
+      expect.objectContaining({
+        eventId: "voice:tdoa",
+        arrivalLeaderDeviceId: "host",
+        method: "tdoa-grid",
+        observedDeviceIds: ["host", "phone-b", "phone-a"],
+      }),
+    );
+    expect(fit?.x).toBeCloseTo(actualSource.x, 1);
+    expect(fit?.y).toBeCloseTo(actualSource.y, 1);
+    expect(fit?.residualMs).toBeLessThan(1.5);
+    expect(fit?.confidence).toBeGreaterThan(0.7);
+  });
 });
 
 function acousticRange(
@@ -198,4 +229,66 @@ function distance(
     return Number.POSITIVE_INFINITY;
   }
   return Math.hypot(to.x - from.x, to.y - from.y);
+}
+
+function constellationDevice(
+  overrides: Partial<ReturnType<typeof estimateRoomConstellation>["devices"][number]> = {},
+): ReturnType<typeof estimateRoomConstellation>["devices"][number] {
+  return {
+    deviceId: "phone",
+    role: "phone",
+    x: 0,
+    y: 0,
+    distanceMeters: null,
+    confidence: 0.86,
+    ...overrides,
+  };
+}
+
+function voiceEventFromSource({
+  devices,
+  source,
+  eventId,
+  emittedAtHostEpochMs,
+}: {
+  devices: ReturnType<typeof estimateRoomConstellation>["devices"];
+  source: { x: number; y: number };
+  eventId: string;
+  emittedAtHostEpochMs: number;
+}) {
+  const observations = devices
+    .map((device) => {
+      const travelMs =
+        (Math.hypot(device.x - source.x, device.y - source.y) / 343) * 1_000;
+      return {
+        deviceId: device.deviceId,
+        eventId: `${eventId}:${device.deviceId}`,
+        detectedAtHostEpochMs: Number((emittedAtHostEpochMs + travelMs).toFixed(3)),
+        sampleIndex: Math.round(960_000 + travelMs * 48),
+        sampleRate: 48_000,
+        audioLevel: 0.08,
+        confidence: 0.9,
+        clockUncertaintyMs: 1,
+      };
+    })
+    .sort((a, b) => a.detectedAtHostEpochMs - b.detectedAtHostEpochMs);
+
+  return {
+    id: eventId,
+    startedAtHostEpochMs: observations[0].detectedAtHostEpochMs,
+    endedAtHostEpochMs:
+      observations[observations.length - 1].detectedAtHostEpochMs,
+    centerHostEpochMs:
+      observations.reduce(
+        (total, observation) => total + observation.detectedAtHostEpochMs,
+        0,
+      ) / observations.length,
+    timeSpreadMs:
+      observations[observations.length - 1].detectedAtHostEpochMs -
+      observations[0].detectedAtHostEpochMs,
+    arrivalLeaderDeviceId: observations[0].deviceId,
+    observedDeviceIds: observations.map((observation) => observation.deviceId),
+    observations,
+    confidence: 0.86,
+  };
 }
