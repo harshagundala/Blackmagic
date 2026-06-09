@@ -178,6 +178,36 @@ describe("pairwise calibration session", () => {
       }),
     );
   });
+
+  test("retries pulses when the current phone only has a non-sample observation", () => {
+    const devices: RoomDevice[] = [
+      deviceWithPulse("host", "host:needs-sample", 10_200),
+      {
+        ...deviceWithPulse("phone-a", "phone-a:later", 14_000),
+        acousticObservations: [
+          {
+            pulseId: "host:needs-sample",
+            detectedAtHostEpochMs: 10_205,
+            amplitude: 0.32,
+            confidence: 0.9,
+            clockUncertaintyMs: 2,
+          },
+        ],
+      },
+    ];
+
+    expect(
+      selectObservablePulse(devices, "phone-a", 10_000, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: "host:needs-sample",
+        emittedAtHostEpochMs: 10_200,
+      }),
+    );
+  });
 });
 
 function deviceWithPulse(

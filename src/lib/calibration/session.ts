@@ -168,7 +168,26 @@ function observedPulseIdsFor(devices: RoomDevice[], observerDeviceId: string) {
     [
       ...(observer.acousticObservations ?? []),
       ...(observer.acousticObservation ? [observer.acousticObservation] : []),
-    ].map((observation) => observation.pulseId),
+    ]
+      .filter(hasSampleAnchor)
+      .map((observation) => observation.pulseId),
+  );
+}
+
+function hasSampleAnchor(
+  observation: RoomDevice["acousticObservation"],
+): observation is NonNullable<RoomDevice["acousticObservation"]> {
+  if (!observation) {
+    return false;
+  }
+
+  return (
+    typeof observation.detectedSampleIndex === "number" &&
+    Number.isFinite(observation.detectedSampleIndex) &&
+    observation.detectedSampleIndex >= 0 &&
+    typeof observation.sampleRate === "number" &&
+    Number.isFinite(observation.sampleRate) &&
+    observation.sampleRate > 0
   );
 }
 
