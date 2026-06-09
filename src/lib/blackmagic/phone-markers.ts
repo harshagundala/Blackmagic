@@ -1,0 +1,92 @@
+export type PhoneMarkerDevice = {
+  deviceId: string;
+  x: number;
+  y: number;
+  distanceMeters: number | null;
+  confidence: number;
+  localized: boolean;
+};
+
+export type PhoneMarker = {
+  id: string;
+  xPx: number;
+  yPx: number;
+  scale: number;
+  opacity: number;
+  rotationDeg: number;
+  distanceLabel: string | null;
+  localized: boolean;
+};
+
+type PhoneMarkerOptions = {
+  scalePxPerMeter?: number;
+  maxX?: number;
+  maxY?: number;
+};
+
+export function createPhoneMarkers(
+  devices: PhoneMarkerDevice[],
+  options: PhoneMarkerOptions = {},
+): PhoneMarker[] {
+  const scalePxPerMeter = options.scalePxPerMeter ?? 72;
+  const maxX = options.maxX ?? 150;
+  const maxY = options.maxY ?? 224;
+
+  return devices.map((device, index) => {
+    const confidence = clamp(device.confidence, 0, 1);
+    const parked = parkedPeerPosition(index);
+    const xPx = device.localized
+      ? clamp(device.x * scalePxPerMeter, -maxX, maxX)
+      : parked.x;
+    const yPx = device.localized
+      ? clamp(device.y * scalePxPerMeter, -maxY, maxY)
+      : parked.y;
+
+    return {
+      id: device.deviceId,
+      xPx: round(xPx, 1),
+      yPx: round(yPx, 1),
+      scale: round(device.localized ? 0.9 + confidence * 0.18 : 0.82, 3),
+      opacity: round(device.localized ? 0.54 + confidence * 0.42 : 0.24, 3),
+      rotationDeg: round(device.localized ? clamp(device.x * 3, -8, 8) : 0, 1),
+      distanceLabel:
+        device.localized && device.distanceMeters !== null
+          ? formatDistanceLabel(device.distanceMeters)
+          : null,
+      localized: device.localized,
+    };
+  });
+}
+
+export function formatDistanceLabel(meters: number) {
+  if (!Number.isFinite(meters) || meters < 0) {
+    return null;
+  }
+
+  if (meters < 1) {
+    return `${meters.toFixed(2)}m`;
+  }
+
+  if (meters < 10) {
+    return `${meters.toFixed(1)}m`;
+  }
+
+  return `${Math.round(meters)}m`;
+}
+
+function parkedPeerPosition(index: number) {
+  const slot = index % 5;
+  const row = Math.floor(index / 5);
+  return {
+    x: (slot - 2) * 28,
+    y: 212 + row * 16,
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function round(value: number, digits: number) {
+  return Number(value.toFixed(digits));
+}

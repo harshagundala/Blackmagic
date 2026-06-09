@@ -31,82 +31,13 @@ button {
   font: inherit;
 }
 
-@keyframes breathe {
+@keyframes bottom-current {
   0%,
   100% {
-    opacity: 0.42;
-    transform: scale(0.94);
+    transform: translateX(-4%) scaleX(0.96);
   }
   50% {
-    opacity: 1;
-    transform: scale(1.04);
-  }
-}
-
-@keyframes sweep {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes liquid-field {
-  0%,
-  100% {
-    border-radius: 44% 56% 48% 52%;
-    transform: translate(-50%, -50%) scale(0.96) rotate(-2deg);
-  }
-  50% {
-    border-radius: 56% 44% 54% 46%;
-    transform: translate(-50%, -50%) scale(1.04) rotate(2deg);
-  }
-}
-
-@keyframes liquid-drift {
-  0%,
-  100% {
-    border-radius: 46% 54% 51% 49%;
-  }
-  50% {
-    border-radius: 54% 46% 45% 55%;
-  }
-}
-
-@keyframes liquid-pulse {
-  0%,
-  100% {
-    border-radius: 44% 56% 48% 52%;
-  }
-  50% {
-    border-radius: 56% 44% 54% 46%;
-  }
-}
-
-@keyframes source-bloom {
-  0% {
-    filter: blur(18px);
-    border-radius: 45% 55% 52% 48%;
-  }
-  50% {
-    filter: blur(24px);
-    border-radius: 58% 42% 46% 54%;
-  }
-  100% {
-    filter: blur(18px);
-    border-radius: 45% 55% 52% 48%;
+    transform: translateX(4%) scaleX(1.04);
   }
 }
 

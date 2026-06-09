@@ -3,7 +3,6 @@
 import {
   useCallback,
   useEffect,
-  Fragment,
   useMemo,
   useRef,
   useState,
@@ -11,6 +10,7 @@ import {
 } from "react";
 import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
+import { createPhoneMarkers } from "@/lib/blackmagic/phone-markers";
 import {
   calibrationEventKey,
   shouldFlushCalibrationEvent,
@@ -55,8 +55,6 @@ export function BlackmagicApp() {
   const observedPulseIdRef = useRef("");
   const flushedCalibrationEventRef = useRef("");
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
-  const peerCount =
-    roomState?.devices.filter((device) => device.deviceId !== deviceId).length ?? 0;
   const constellation = useMemo(
     () =>
       roomState
@@ -212,20 +210,20 @@ export function BlackmagicApp() {
     );
   }, [flushCalibrationEvent, phase, sensors.snapshot]);
 
-  const pulse = phase === "listening" ? Math.min(1, Math.max(0.18, sensors.snapshot.micLevel * 24)) : 0.28;
-  const constellationDots =
+  const pulse =
+    phase === "listening"
+      ? Math.min(1, Math.max(0.12, sensors.snapshot.micLevel * 24))
+      : 0.16;
+  const phoneMarkers = createPhoneMarkers(
     constellation?.devices.filter(
       (device) => device.deviceId !== deviceId,
-    ) ?? [];
-  const sourceHints =
-    constellation?.audioSources
-      .filter((source) => source.ageMs <= 6_000)
-      .slice(-3) ?? [];
+    ) ?? [],
+  );
 
   return (
     <main
       aria-label="Blackmagic session"
-      className="relative min-h-dvh cursor-default overflow-hidden bg-[#f7f9fc] text-[#05060a]"
+      className="relative min-h-dvh cursor-default overflow-hidden bg-white text-[#05060a] [touch-action:manipulation]"
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           void begin();
@@ -235,129 +233,78 @@ export function BlackmagicApp() {
       role="button"
       tabIndex={0}
     >
-      <div className="absolute inset-0 bg-[linear-gradient(180deg,#ffffff_0%,#eef7ff_58%,#fbfdff_100%)]" />
-      <div className="absolute inset-0 opacity-80 [background:radial-gradient(120%_84%_at_50%_-16%,rgba(255,255,255,0.98)_0%,rgba(255,255,255,0.52)_34%,rgba(129,202,255,0.20)_58%,rgba(255,255,255,0)_82%)]" />
-      <div className="absolute inset-x-[-20%] top-[18dvh] h-[58dvh] blur-3xl [background:linear-gradient(105deg,rgba(255,255,255,0)_0%,rgba(161,213,255,0.34)_32%,rgba(255,255,255,0.66)_52%,rgba(190,225,255,0.24)_70%,rgba(255,255,255,0)_100%)]" />
-      <div className="absolute inset-x-[-35%] bottom-[-18dvh] h-[46dvh] blur-3xl [background:linear-gradient(90deg,rgba(0,122,255,0)_0%,rgba(0,122,255,0.16)_42%,rgba(255,255,255,0.78)_56%,rgba(0,122,255,0.12)_76%,rgba(0,122,255,0)_100%)]" />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-[44dvh] blur-2xl will-change-transform"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(0,122,255,0.13) 36%, rgba(0,61,160,0.43) 66%, rgba(2,4,9,0.96) 100%)",
+          opacity: 0.78 + pulse * 0.18,
+          transform: `translateY(${18 - pulse * 18}px) scaleY(${0.82 + pulse * 0.24})`,
+          transformOrigin: "bottom",
+          transition:
+            "opacity 160ms linear, transform 180ms cubic-bezier(.2,.8,.2,1)",
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-[-34%] bottom-[-6dvh] h-[28dvh] blur-3xl"
+        style={{
+          animation: "bottom-current 7.5s ease-in-out infinite",
+          background: `linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(0,122,255,${
+            0.16 + pulse * 0.18
+          }) 28%, rgba(0,0,0,${0.58 + pulse * 0.24}) 52%, rgba(0,86,255,${
+            0.2 + pulse * 0.18
+          }) 76%, rgba(255,255,255,0) 100%)`,
+          transformOrigin: "bottom",
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-[18dvh]"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(0,0,0,0.2) 72%, rgba(0,0,0,0.82) 100%)",
+          opacity: 0.32 + pulse * 0.38,
+        }}
+      />
 
-      <div className="absolute inset-0 overflow-hidden">
+      <div className="absolute inset-0 overflow-hidden px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(28px,env(safe-area-inset-top))]">
         <div
-          className="absolute left-1/2 top-1/2 h-[68dvh] max-h-[720px] min-h-[420px] w-[68dvh] min-w-[420px] max-w-[720px] -translate-x-1/2 -translate-y-1/2 rounded-[45%] border border-white/55 bg-white/14 shadow-[inset_0_0_90px_rgba(255,255,255,0.82),0_40px_160px_rgba(56,146,255,0.18)] backdrop-blur-3xl"
-          style={{
-            animation: "liquid-field 7s ease-in-out infinite",
-            opacity: 0.86 + pulse * 0.08,
-          }}
-        />
-        <div
-          className="absolute left-1/2 top-1/2 h-[44dvh] max-h-[520px] min-h-[280px] w-[44dvh] min-w-[280px] max-w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-[42%] border border-white/65 bg-white/22 shadow-[inset_0_1px_30px_rgba(255,255,255,0.88),0_20px_90px_rgba(0,122,255,0.12)] backdrop-blur-2xl"
-          style={{
-            animation: "liquid-drift 9s ease-in-out infinite",
-            transform: `translate(-50%, -50%) scale(${0.96 + pulse * 0.06})`,
-          }}
-        />
-        {(constellationDots.length > 0
-          ? constellationDots.slice(0, 7)
-          : Array.from({ length: Math.min(peerCount, 5) }).map((_, index) => ({
-              confidence: 0.28 + index * 0.08,
-              deviceId: `fallback-${index}`,
-              x: Math.cos(index * 1.78 - 1.1) * 1.65,
-              y: Math.sin(index * 1.78 - 1.1) * 1.65,
-            }))
-        ).map((device, index) => {
-          const x = clamp(device.x * 84, -190, 190);
-          const y = clamp(device.y * 84, -190, 190);
-          const confidence = clamp(device.confidence, 0.2, 1);
-
-          return (
+          aria-hidden
+          className="pointer-events-none absolute left-1/2 top-[43dvh] h-px w-px"
+        >
+          {phoneMarkers.slice(0, 9).map((marker) => (
             <span
               aria-hidden
-              className="absolute left-1/2 top-1/2 h-3 w-3 rounded-full bg-[#05060a]/55 shadow-[0_0_28px_rgba(0,122,255,0.26)]"
-              key={device.deviceId}
+              className="absolute left-0 top-0 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center will-change-transform"
+              key={marker.id}
               style={{
-                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.82 + confidence * 0.36})`,
-                opacity: 0.28 + confidence * 0.42 + index * 0.025,
-                transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 300ms ease",
+                opacity: marker.opacity,
+                transform: `translate(${marker.xPx}px, ${marker.yPx}px) scale(${marker.scale})`,
+                transition:
+                  "opacity 280ms ease, transform 760ms cubic-bezier(.2,.8,.2,1)",
               }}
-            />
-          );
-        })}
-        {sourceHints.map((source, index) => {
-          const x = clamp(source.x * 84, -210, 210);
-          const y = clamp(source.y * 84, -210, 210);
-          const freshness = 1 - clamp(source.ageMs / 6_000, 0, 1);
-          const strength = clamp(source.confidence, 0.18, 1) * freshness;
-
-          const transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
-
-          return (
-            <Fragment key={source.eventId}>
+            >
               <span
-                aria-hidden
-                className="pointer-events-none absolute left-1/2 top-1/2 z-20 h-28 w-28 rounded-[44%] bg-[#007aff]/24 blur-xl"
+                className={
+                  marker.localized
+                    ? "block h-10 w-5 rounded-[6px] border border-black/15 bg-[linear-gradient(180deg,#06070a_0%,#061935_48%,#007aff_100%)] shadow-[0_18px_38px_rgba(0,77,190,0.24)]"
+                    : "block h-9 w-[18px] rounded-[6px] border border-black/10 bg-white/76 shadow-[0_12px_28px_rgba(0,88,180,0.10)] backdrop-blur-md"
+                }
                 style={{
-                  animation: "source-bloom 1.9s ease-out infinite",
-                  animationDelay: `${index * 120}ms`,
-                  opacity: 0.18 + strength * 0.58,
-                  transform: `${transform} scale(${0.5 + strength * 0.86})`,
-                  transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
+                  transform: `rotate(${marker.rotationDeg}deg)`,
                 }}
               />
-              <span
-                aria-hidden
-                className="pointer-events-none absolute left-1/2 top-1/2 z-30 h-4 w-4 rounded-full bg-[#007aff]/45 blur-[1px] shadow-[0_0_34px_rgba(0,122,255,0.48)]"
-                style={{
-                  opacity: 0.16 + strength * 0.62,
-                  transform: `${transform} scale(${0.82 + strength * 0.7})`,
-                  transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
-                }}
-              />
-            </Fragment>
-          );
-        })}
+              {marker.distanceLabel ? (
+                <span className="mt-1 font-mono text-[10px] font-medium leading-none tracking-normal text-black/54">
+                  {marker.distanceLabel}
+                </span>
+              ) : null}
+            </span>
+          ))}
+        </div>
       </div>
-
-      <section className="relative z-10 flex min-h-dvh flex-col items-center justify-between px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(34px,env(safe-area-inset-top))] text-center">
-        <div className="h-20" />
-
-        <div className="flex flex-col items-center">
-          <div className="relative grid h-36 w-36 place-items-center sm:h-44 sm:w-44">
-            <span className="absolute inset-0 rounded-[42%] bg-white/20 shadow-[inset_0_0_28px_rgba(255,255,255,0.92),0_22px_80px_rgba(16,98,180,0.20)] backdrop-blur-2xl" />
-            <span
-              className="absolute h-24 w-24 rounded-[44%] border border-white/70 bg-white/26 shadow-[inset_0_0_18px_rgba(255,255,255,0.95),0_10px_60px_rgba(0,122,255,0.18)]"
-              style={{
-                animation: "liquid-pulse 4.8s ease-in-out infinite reverse",
-                transform: `scale(${0.82 + pulse * 0.26})`,
-              }}
-            />
-            <span className="relative h-5 w-5 rounded-full bg-[#05060a] shadow-[0_0_34px_rgba(0,0,0,0.28)]" />
-          </div>
-
-          <p className="mt-8 min-h-5 font-mono text-[11px] uppercase tracking-[0.42em] text-black/40">
-          </p>
-        </div>
-
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-10">
-            {phase === "listening" ? (
-              <div className="flex h-10 items-center gap-1.5" aria-hidden>
-                {Array.from({ length: 7 }).map((_, index) => (
-                  <span
-                    className="w-1 rounded-full bg-[#007aff]/55"
-                    key={index}
-                    style={{
-                      height: `${8 + Math.sin(index + pulse * 7) * 5 + pulse * 28}px`,
-                      transition: "height 160ms ease",
-                    }}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <p className="max-w-56 text-[12px] font-medium leading-5 tracking-[0.04em] text-black/28">
-            {phase === "listening" ? "listening" : ""}
-          </p>
-        </div>
-      </section>
     </main>
   );
 }
@@ -447,8 +394,4 @@ function scheduleOutputPulse(
     },
   });
   void schedulerRef.current.schedule(pulse, { hostEpochNowMs: now });
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
 }

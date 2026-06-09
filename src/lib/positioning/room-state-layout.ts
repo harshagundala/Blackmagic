@@ -14,6 +14,7 @@ export type RoomConstellationDevice = {
   y: number;
   distanceMeters: number | null;
   confidence: number;
+  localized: boolean;
 };
 
 export type RoomConstellation = {
@@ -59,23 +60,37 @@ export function estimateRoomConstellation(
     anchorId: room.hostDeviceId,
     iterations: distances.length > 0 ? 850 : 0,
   });
+  const localizedDeviceIds = localizedDevicesFor(ranges);
+  const honestLayout = {
+    ...layout,
+    points: Object.fromEntries(
+      participantIds.map((deviceId) => [
+        deviceId,
+        localizedDeviceIds.has(deviceId)
+          ? (layout.points[deviceId] ?? { x: 0, y: 0 })
+          : { x: 0, y: 0 },
+      ]),
+    ),
+  };
 
   const devices = room.devices.map((device) => {
-    const point = layout.points[device.deviceId] ?? { x: 0, y: 0 };
+    const point = honestLayout.points[device.deviceId] ?? { x: 0, y: 0 };
     const range = strongestRangeForDevice(ranges, device.deviceId);
+    const localized = localizedDeviceIds.has(device.deviceId);
     return {
       deviceId: device.deviceId,
       role: device.role,
       x: point.x,
       y: point.y,
       distanceMeters: range?.meters ?? null,
-      confidence: range ? rangeLayoutWeight(range) : layout.quality,
+      confidence: localized && range ? rangeLayoutWeight(range) : 0.12,
+      localized,
     };
   });
 
   return applyPerspective(
     {
-      layout,
+      layout: honestLayout,
       devices,
       audioSources: deriveAudioSourceHints(
         room.audioEvents ?? [],
@@ -87,6 +102,15 @@ export function estimateRoomConstellation(
     room,
     options,
   );
+}
+
+function localizedDevicesFor(ranges: AcousticRange[]) {
+  const ids = new Set<string>();
+  for (const range of ranges) {
+    ids.add(range.from);
+    ids.add(range.to);
+  }
+  return ids;
 }
 
 function applyPerspective(
@@ -170,7 +194,7 @@ export function rangeLayoutWeight(range: AcousticRange) {
 
 function localizationDeviceIdsFor(room: RoomState) {
   const ids = room.timeSync?.localizationDeviceIds;
-  return Array.isArray(ids) ? new Set(ids) : null;
+  return Array.isArray(ids) && ids.length > 0 ? new Set(ids) : null;
 }
 
 function isLocalizationReadyRange(

@@ -61,6 +61,98 @@ describe("room state constellation", () => {
     ]);
   });
 
+  test("does not assign precise peer coordinates before range evidence exists", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 10_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 10_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 10_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      ranges: [],
+    };
+
+    const layout = estimateRoomConstellation(room);
+
+    expect(layout.devices).toEqual([
+      expect.objectContaining({
+        deviceId: "host",
+        localized: false,
+        x: 0,
+        y: 0,
+        distanceMeters: null,
+      }),
+      expect.objectContaining({
+        deviceId: "phone-a",
+        localized: false,
+        x: 0,
+        y: 0,
+        distanceMeters: null,
+      }),
+    ]);
+  });
+
+  test("uses reciprocal acoustic ranges when no clock localization gate is ready yet", () => {
+    const room: RoomState = {
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 10_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 10_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 10_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      timeSync: roomTimeSync({
+        status: "syncing",
+        synchronizedDeviceIds: [],
+        localizationDeviceIds: [],
+        roomConfidence: 0,
+      }),
+      ranges: [
+        acousticRange({
+          meters: 2.4,
+          distanceUncertaintyMeters: 0.01,
+          confidence: 0.91,
+        }),
+      ],
+    };
+
+    const phone = estimateRoomConstellation(room).devices.find(
+      (device) => device.deviceId === "phone-a",
+    );
+
+    expect(phone).toEqual(
+      expect.objectContaining({
+        localized: true,
+        distanceMeters: 2.4,
+      }),
+    );
+  });
+
   test("recenters device and source coordinates on the current phone", () => {
     const room: RoomState = {
       sessionKey: "room",
@@ -203,9 +295,9 @@ describe("room state constellation", () => {
     });
 
     expect(selfAnchored.devices).toEqual([
-      expect.objectContaining({ deviceId: "host", x: 1.4, y: 0 }),
-      expect.objectContaining({ deviceId: "phone-a", x: 0, y: 0 }),
-      expect.objectContaining({ deviceId: "phone-b", x: 2.8, y: 0 }),
+      expect.objectContaining({ deviceId: "host", localized: false, x: 0, y: 0 }),
+      expect.objectContaining({ deviceId: "phone-a", localized: false, x: 0, y: 0 }),
+      expect.objectContaining({ deviceId: "phone-b", localized: false, x: 0, y: 0 }),
     ]);
   });
 
@@ -628,6 +720,7 @@ function constellationDevice(
     y: 0,
     distanceMeters: null,
     confidence: 0.86,
+    localized: true,
     ...overrides,
   };
 }
