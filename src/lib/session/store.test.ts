@@ -77,6 +77,35 @@ describe("session stores", () => {
     ]);
   });
 
+  test("redis store persists mutation revisions separately from read timestamps", async () => {
+    let now = 100;
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => now });
+
+    await store.claim("https://blackmagic.app/", "host");
+    now = 150;
+    const firstRead = await store.state("https://blackmagic.app/");
+    now = 200;
+    const secondRead = await store.state("https://blackmagic.app/");
+
+    expect(firstRead.revision).toBeGreaterThan(0);
+    expect(firstRead.changedAt).toBe(100);
+    expect(firstRead.updatedAt).toBe(150);
+    expect(secondRead.revision).toBe(firstRead.revision);
+    expect(secondRead.changedAt).toBe(firstRead.changedAt);
+    expect(secondRead.updatedAt).toBe(200);
+
+    now = 250;
+    const heartbeatState = await store.heartbeat(
+      "https://blackmagic.app/",
+      "host",
+      { micLevel: 0.2 },
+    );
+
+    expect(heartbeatState.revision).toBeGreaterThan(secondRead.revision);
+    expect(heartbeatState.changedAt).toBe(250);
+  });
+
   test("redis store publishes the next calibration turn from persisted room state", async () => {
     const redis = new FakeRedisSessionClient();
     const store = createRedisSessionStore(redis, { now: () => 100 });
@@ -202,6 +231,12 @@ class FakeRedisSessionClient implements RedisSessionClient {
     }
     this.strings.set(key, value);
     return 1;
+  }
+
+  async incr(key: string) {
+    const next = Number(this.strings.get(key) ?? "0") + 1;
+    this.strings.set(key, String(next));
+    return next;
   }
 
   async del(...keys: string[]) {

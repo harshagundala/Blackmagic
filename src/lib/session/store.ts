@@ -31,6 +31,7 @@ export type RedisSessionClient = {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<"OK" | null>;
   setnx(key: string, value: string): Promise<number>;
+  incr(key: string): Promise<number>;
   del(...keys: string[]): Promise<number>;
   hget(key: string, field: string): Promise<string | null>;
   hset(key: string, field: string, value: string): Promise<number>;
@@ -112,7 +113,7 @@ export function createRedisSessionStore(
         sessionKey,
       };
       await writeRedisDevice(redis, keys, device);
-      await refreshRedisSessionTtl(redis, keys, ttlSeconds);
+      await touchRedisSession(redis, keys, timestamp, ttlSeconds);
 
       return claimFromDevice(device);
     },
@@ -126,16 +127,17 @@ export function createRedisSessionStore(
       const previous = parseDevice(await redis.hget(keys.devices, deviceId));
       const hostDeviceId = (await redis.get(keys.host)) ?? claim.deviceId;
       const mergedHeartbeat = mergeHeartbeat(previous, heartbeat);
+      const timestamp = now();
       const device: RoomDevice = {
         ...previous,
         ...claim,
         ...mergedHeartbeat,
-        lastSeenAt: now(),
+        lastSeenAt: timestamp,
         role: hostDeviceId === deviceId ? "host" : "phone",
       };
 
       await writeRedisDevice(redis, keys, device);
-      await refreshRedisSessionTtl(redis, keys, ttlSeconds);
+      await touchRedisSession(redis, keys, timestamp, ttlSeconds);
       return this.state(url);
     },
     async state(url: string) {
@@ -148,10 +150,13 @@ export function createRedisSessionStore(
       const devices = (await readRedisDevices(redis, keys)).sort(
         compareDevicesForOutput,
       );
+      const version = await readRedisVersion(redis, keys);
 
       return {
         sessionKey,
         hostDeviceId: devices.length === 0 ? "" : hostDeviceId,
+        revision: version.revision,
+        changedAt: version.changedAt,
         devices,
         calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
         timeSync: deriveRoomTimeSync(devices),
@@ -241,6 +246,9 @@ export function createUpstashRestRedisClient({
     setnx(key: string, value: string) {
       return command<number>(["SETNX", key, value]);
     },
+    incr(key: string) {
+      return command<number>(["INCR", key]);
+    },
     del(...keys: string[]) {
       if (keys.length === 0) {
         return Promise.resolve(0);
@@ -274,6 +282,8 @@ function redisSessionKeys(sessionKey: string) {
   return {
     host: `${prefix}:host`,
     devices: `${prefix}:devices`,
+    revision: `${prefix}:revision`,
+    changedAt: `${prefix}:changedAt`,
   };
 }
 
@@ -291,13 +301,18 @@ async function pruneRedisSession(
   const staleDeviceIds = devices
     .filter((device) => timestamp - device.lastSeenAt > staleAfterMs)
     .map((device) => device.deviceId);
+  let changed = false;
 
   if (staleDeviceIds.length > 0) {
     await redis.hdel(keys.devices, ...staleDeviceIds);
+    changed = true;
   }
 
   if (activeDevices.length === 0) {
     await redis.del(keys.host, keys.devices);
+    if (devices.length > 0) {
+      await touchRedisSession(redis, keys, timestamp, ttlSeconds);
+    }
     return;
   }
 
@@ -305,6 +320,7 @@ async function pruneRedisSession(
   if (!hostDeviceId || !activeDevices.some((device) => device.deviceId === hostDeviceId)) {
     if (hostDeviceId) {
       await redis.del(keys.host);
+      changed = true;
     }
     const [nextHost] = activeDevices.sort(compareDevicesByJoin);
     const claimedHost = await redis.setnx(keys.host, nextHost.deviceId);
@@ -312,6 +328,7 @@ async function pruneRedisSession(
       claimedHost === 1
         ? nextHost.deviceId
         : (await redis.get(keys.host)) ?? nextHost.deviceId;
+    changed = true;
   }
 
   await Promise.all(
@@ -320,9 +337,14 @@ async function pruneRedisSession(
       if (device.role === role) {
         return Promise.resolve();
       }
+      changed = true;
       return writeRedisDevice(redis, keys, { ...device, role });
     }),
   );
+  if (changed) {
+    await touchRedisSession(redis, keys, timestamp, ttlSeconds);
+    return;
+  }
   await refreshRedisSessionTtl(redis, keys, ttlSeconds);
 }
 
@@ -386,6 +408,32 @@ function writeRedisDevice(
   return redis.hset(keys.devices, device.deviceId, JSON.stringify(device));
 }
 
+async function touchRedisSession(
+  redis: RedisSessionClient,
+  keys: ReturnType<typeof redisSessionKeys>,
+  timestamp: number,
+  ttlSeconds: number,
+) {
+  await redis.incr(keys.revision);
+  await redis.set(keys.changedAt, String(timestamp));
+  await refreshRedisSessionTtl(redis, keys, ttlSeconds);
+}
+
+async function readRedisVersion(
+  redis: RedisSessionClient,
+  keys: ReturnType<typeof redisSessionKeys>,
+) {
+  const [revision, changedAt] = await Promise.all([
+    redis.get(keys.revision),
+    redis.get(keys.changedAt),
+  ]);
+
+  return {
+    revision: parseRedisNumber(revision),
+    changedAt: parseRedisNumber(changedAt),
+  };
+}
+
 async function refreshRedisSessionTtl(
   redis: RedisSessionClient,
   keys: ReturnType<typeof redisSessionKeys>,
@@ -394,7 +442,14 @@ async function refreshRedisSessionTtl(
   await Promise.all([
     redis.expire(keys.host, ttlSeconds),
     redis.expire(keys.devices, ttlSeconds),
+    redis.expire(keys.revision, ttlSeconds),
+    redis.expire(keys.changedAt, ttlSeconds),
   ]);
+}
+
+function parseRedisNumber(value: string | null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function claimFromDevice(device: RoomDevice): SessionClaim {

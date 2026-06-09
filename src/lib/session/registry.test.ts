@@ -17,6 +17,32 @@ describe("session registry", () => {
     expect(registry.claim("https://blackmagic.app/alpha", "b").role).toBe("host");
   });
 
+  test("tracks mutation revisions separately from read timestamps", () => {
+    let now = 100;
+    const registry = createSessionRegistry({ now: () => now });
+
+    registry.claim("https://blackmagic.app/", "host");
+    now = 150;
+    const firstRead = registry.state("https://blackmagic.app/");
+    now = 200;
+    const secondRead = registry.state("https://blackmagic.app/");
+
+    expect(firstRead.revision).toBeGreaterThan(0);
+    expect(firstRead.changedAt).toBe(100);
+    expect(firstRead.updatedAt).toBe(150);
+    expect(secondRead.revision).toBe(firstRead.revision);
+    expect(secondRead.changedAt).toBe(firstRead.changedAt);
+    expect(secondRead.updatedAt).toBe(200);
+
+    now = 250;
+    const heartbeatState = registry.heartbeat("https://blackmagic.app/", "host", {
+      micLevel: 0.2,
+    });
+
+    expect(heartbeatState.revision).toBeGreaterThan(secondRead.revision);
+    expect(heartbeatState.changedAt).toBe(250);
+  });
+
   test("publishes the next calibration turn from the room state clock", () => {
     const registry = createSessionRegistry({ now: () => 100 });
 

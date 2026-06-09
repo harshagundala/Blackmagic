@@ -105,6 +105,8 @@ export type RoomDevice = SessionClaim & DeviceHeartbeat;
 export type RoomState = {
   sessionKey: string;
   hostDeviceId: string;
+  revision: number;
+  changedAt: number;
   devices: RoomDevice[];
   calibrationTurn: LiveCalibrationTurn | null;
   timeSync: RoomTimeSyncState;
@@ -115,6 +117,8 @@ export type RoomState = {
 
 type SessionRecord = {
   hostDeviceId: string;
+  revision: number;
+  changedAt: number;
   claims: Map<string, RoomDevice>;
 };
 
@@ -149,12 +153,16 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         };
         sessions.set(sessionKey, {
           hostDeviceId: deviceId,
+          revision: 1,
+          changedAt: timestamp,
           claims: new Map([[deviceId, claim]]),
         });
         return claim;
       }
 
-      pruneStaleClaims(existing, timestamp, staleAfterMs);
+      if (pruneStaleClaims(existing, timestamp, staleAfterMs)) {
+        touchRecord(existing, timestamp);
+      }
 
       if (existing.claims.size === 0) {
         const claim = {
@@ -166,12 +174,14 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         };
         existing.hostDeviceId = deviceId;
         existing.claims.set(deviceId, claim);
+        touchRecord(existing, timestamp);
         return claim;
       }
 
       const previous = existing.claims.get(deviceId);
       if (previous) {
         previous.lastSeenAt = timestamp;
+        touchRecord(existing, timestamp);
         return previous;
       }
 
@@ -183,6 +193,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         sessionKey,
       };
       existing.claims.set(deviceId, claim);
+      touchRecord(existing, timestamp);
       return claim;
     },
 
@@ -202,9 +213,11 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         throw new Error("Device claim missing after claim.");
       }
 
+      const timestamp = now();
       Object.assign(current, mergeHeartbeat(current, heartbeat), {
-        lastSeenAt: now(),
+        lastSeenAt: timestamp,
       });
+      touchRecord(record, timestamp);
 
       return this.state(url);
     },
@@ -218,6 +231,8 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         return {
           sessionKey,
           hostDeviceId: "",
+          revision: 0,
+          changedAt: 0,
           devices: [],
           calibrationTurn: null,
           timeSync: deriveRoomTimeSync([]),
@@ -227,12 +242,16 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         };
       }
 
-      pruneStaleClaims(record, timestamp, staleAfterMs);
+      if (pruneStaleClaims(record, timestamp, staleAfterMs)) {
+        touchRecord(record, timestamp);
+      }
       const devices = [...record.claims.values()].sort(compareDevices);
 
       return {
         sessionKey,
         hostDeviceId: record.hostDeviceId,
+        revision: record.revision,
+        changedAt: record.changedAt,
         devices,
         calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
         timeSync: deriveRoomTimeSync(devices),
@@ -254,31 +273,44 @@ export function selectRoomCalibrationTurn(
   );
 }
 
+function touchRecord(record: SessionRecord, timestamp: number) {
+  record.revision += 1;
+  record.changedAt = timestamp;
+}
+
 function pruneStaleClaims(
   record: SessionRecord,
   timestamp: number,
   staleAfterMs: number,
 ) {
+  let changed = false;
   for (const [deviceId, claim] of record.claims.entries()) {
     if (timestamp - claim.lastSeenAt > staleAfterMs) {
       record.claims.delete(deviceId);
+      changed = true;
     }
   }
 
   if (record.claims.size === 0) {
+    changed = changed || record.hostDeviceId !== "";
     record.hostDeviceId = "";
-    return;
+    return changed;
   }
 
   if (!record.claims.has(record.hostDeviceId)) {
     const [nextHost] = [...record.claims.values()].sort(compareDevices);
+    changed = record.hostDeviceId !== nextHost.deviceId || changed;
     record.hostDeviceId = nextHost.deviceId;
     nextHost.role = "host";
   }
 
   for (const claim of record.claims.values()) {
-    claim.role = claim.deviceId === record.hostDeviceId ? "host" : "phone";
+    const role = claim.deviceId === record.hostDeviceId ? "host" : "phone";
+    changed = changed || claim.role !== role;
+    claim.role = role;
   }
+
+  return changed;
 }
 
 export function normalizeSessionKey(url: string) {

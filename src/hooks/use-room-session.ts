@@ -40,6 +40,7 @@ export function useRoomSession({
   const [sessionKey, setSessionKey] = useState("");
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const urlRef = useRef("");
+  const roomRevisionRef = useRef(0);
 
   useEffect(() => {
     urlRef.current = window.location.href;
@@ -67,6 +68,15 @@ export function useRoomSession({
     };
   }, [deviceId]);
 
+  const applyRoomState = useCallback((state: RoomState) => {
+    const revision =
+      typeof state.revision === "number" && Number.isFinite(state.revision)
+        ? state.revision
+        : roomRevisionRef.current;
+    roomRevisionRef.current = Math.max(roomRevisionRef.current, revision);
+    setRoomState(state);
+  }, []);
+
   const pollState = useCallback(async () => {
     if (!urlRef.current) {
       return;
@@ -78,14 +88,58 @@ export function useRoomSession({
       return;
     }
     const state = (await response.json()) as RoomState;
-    setRoomState(state);
-  }, []);
+    applyRoomState(state);
+  }, [applyRoomState]);
 
   useEffect(() => {
     void pollState();
     const timer = window.setInterval(() => void pollState(), pollIntervalMs);
     return () => window.clearInterval(timer);
   }, [pollIntervalMs, pollState, sessionKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let controller: AbortController | null = null;
+
+    async function waitForChanges() {
+      while (!cancelled) {
+        if (!urlRef.current) {
+          await sleep(250);
+          continue;
+        }
+
+        const params = new URLSearchParams({
+          url: urlRef.current,
+          revision: String(roomRevisionRef.current),
+          timeoutMs: "4500",
+        });
+        controller = new AbortController();
+
+        try {
+          const response = await fetch(`/api/session/wait?${params.toString()}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (response.ok) {
+            applyRoomState((await response.json()) as RoomState);
+            continue;
+          }
+        } catch {
+          if (cancelled) {
+            return;
+          }
+        }
+
+        await sleep(Math.min(1_000, pollIntervalMs));
+      }
+    }
+
+    void waitForChanges();
+    return () => {
+      cancelled = true;
+      controller?.abort();
+    };
+  }, [applyRoomState, pollIntervalMs, sessionKey]);
 
   const heartbeat = useCallback(
     async (
@@ -158,10 +212,10 @@ export function useRoomSession({
         }),
       });
       if (response.ok) {
-        setRoomState((await response.json()) as RoomState);
+        applyRoomState((await response.json()) as RoomState);
       }
     },
-    [deviceId],
+    [applyRoomState, deviceId],
   );
 
   return {
@@ -171,6 +225,10 @@ export function useRoomSession({
     claimReady: role !== null,
     heartbeat,
   };
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
 function getOrCreateDeviceId() {
