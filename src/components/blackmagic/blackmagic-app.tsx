@@ -279,13 +279,13 @@ export function BlackmagicApp() {
           return (
             <span
               aria-hidden
-              className="absolute left-1/2 top-1/2 h-32 w-32 rounded-[44%] bg-[#3aa0ff]/35 blur-2xl mix-blend-multiply"
+              className="pointer-events-none absolute left-1/2 top-1/2 z-20 h-28 w-28 rounded-[44%] bg-[#007aff]/24 blur-xl"
               key={source.eventId}
               style={{
                 animation: "source-bloom 1.9s ease-out infinite",
                 animationDelay: `${index * 120}ms`,
-                opacity: 0.18 + strength * 0.68,
-                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.48 + strength * 0.9})`,
+                opacity: 0.18 + strength * 0.58,
+                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.5 + strength * 0.86})`,
                 transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
               }}
             />
