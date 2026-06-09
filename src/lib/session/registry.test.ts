@@ -62,17 +62,54 @@ describe("session registry", () => {
     ]);
   });
 
-  test("prunes stale non-host phones but keeps the host anchor", () => {
+  test("prunes stale non-host phones while keeping an active host", () => {
     let now = 1_000;
     const registry = createSessionRegistry({ now: () => now, staleAfterMs: 5_000 });
 
     registry.claim("https://blackmagic.app/", "host");
     registry.claim("https://blackmagic.app/", "phone-a");
     registry.heartbeat("https://blackmagic.app/", "phone-a", { micLevel: 0.1 });
+    now = 4_000;
+    registry.heartbeat("https://blackmagic.app/", "host", { micLevel: 0.1 });
     now = 8_000;
 
     const state = registry.state("https://blackmagic.app/");
 
     expect(state.devices.map((device) => device.deviceId)).toEqual(["host"]);
+  });
+
+  test("releases a stale host so the next active device becomes host", () => {
+    let now = 1_000;
+    const registry = createSessionRegistry({ now: () => now, staleAfterMs: 5_000 });
+
+    registry.claim("https://blackmagic.app/", "host");
+    now = 8_000;
+
+    expect(registry.claim("https://blackmagic.app/", "next").role).toBe("host");
+    expect(registry.state("https://blackmagic.app/")).toEqual(
+      expect.objectContaining({
+        hostDeviceId: "next",
+        devices: [expect.objectContaining({ deviceId: "next", role: "host" })],
+      }),
+    );
+  });
+
+  test("promotes the oldest active phone when the host goes stale", () => {
+    let now = 1_000;
+    const registry = createSessionRegistry({ now: () => now, staleAfterMs: 5_000 });
+
+    registry.claim("https://blackmagic.app/", "host");
+    now = 2_000;
+    registry.claim("https://blackmagic.app/", "phone-a");
+    now = 7_000;
+    registry.heartbeat("https://blackmagic.app/", "phone-a", { micLevel: 0.1 });
+    now = 8_000;
+
+    const state = registry.state("https://blackmagic.app/");
+
+    expect(state.hostDeviceId).toBe("phone-a");
+    expect(state.devices).toEqual([
+      expect.objectContaining({ deviceId: "phone-a", role: "host" }),
+    ]);
   });
 });

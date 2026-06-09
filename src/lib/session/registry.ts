@@ -73,6 +73,21 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         return claim;
       }
 
+      pruneStaleClaims(existing, timestamp, staleAfterMs);
+
+      if (existing.claims.size === 0) {
+        const claim = {
+          deviceId,
+          joinedAt: timestamp,
+          lastSeenAt: timestamp,
+          role: "host" as const,
+          sessionKey,
+        };
+        existing.hostDeviceId = deviceId;
+        existing.claims.set(deviceId, claim);
+        return claim;
+      }
+
       const previous = existing.claims.get(deviceId);
       if (previous) {
         previous.lastSeenAt = timestamp;
@@ -127,14 +142,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         };
       }
 
-      for (const [deviceId, claim] of record.claims.entries()) {
-        if (
-          deviceId !== record.hostDeviceId &&
-          timestamp - claim.lastSeenAt > staleAfterMs
-        ) {
-          record.claims.delete(deviceId);
-        }
-      }
+      pruneStaleClaims(record, timestamp, staleAfterMs);
 
       return {
         sessionKey,
@@ -144,6 +152,33 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
       };
     },
   };
+}
+
+function pruneStaleClaims(
+  record: SessionRecord,
+  timestamp: number,
+  staleAfterMs: number,
+) {
+  for (const [deviceId, claim] of record.claims.entries()) {
+    if (timestamp - claim.lastSeenAt > staleAfterMs) {
+      record.claims.delete(deviceId);
+    }
+  }
+
+  if (record.claims.size === 0) {
+    record.hostDeviceId = "";
+    return;
+  }
+
+  if (!record.claims.has(record.hostDeviceId)) {
+    const [nextHost] = [...record.claims.values()].sort(compareDevices);
+    record.hostDeviceId = nextHost.deviceId;
+    nextHost.role = "host";
+  }
+
+  for (const claim of record.claims.values()) {
+    claim.role = claim.deviceId === record.hostDeviceId ? "host" : "phone";
+  }
 }
 
 export function normalizeSessionKey(url: string) {

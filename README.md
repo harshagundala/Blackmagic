@@ -10,6 +10,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, and uncertainty.
 - URL-based room claim: first device is host, later devices are nearby phones.
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
+- Stale hosts are released so the next active device can become host instead of leaving the room pinned forever.
 - Tested acoustic delay primitives and distance conversion.
 - Tested pairwise calibration planner with robust median/outlier handling.
 - Tested 2D weighted stress minimization for relative phone layout.
