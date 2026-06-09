@@ -10,7 +10,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, offset, jitter, best RTT, max error, and uncertainty.
 - URL-based room claim: first device is host, later devices are nearby phones.
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
-- Active acoustic pulse history: hosts publish scheduled ultrasonic-ish pulses, peers run matched detection over a rolling audio sample window, report host-aligned observations, and room state aggregates repeated pulse IDs into pairwise meter ranges with sample counts and uncertainty.
+- Active acoustic pulse history: devices take deterministic host-clock turns publishing scheduled ultrasonic-ish pulses, peers run matched detection over a rolling audio sample window, report host-aligned observations, and room state aggregates repeated pulse IDs into pairwise meter ranges with sample counts and uncertainty.
 - Minimal constellation dots are now layout-driven from acoustic ranges when present, with radial fallback before measurements arrive.
 - Stale hosts are released so the next active device can become host instead of leaving the room pinned forever.
 - Session APIs use a `SessionStore` abstraction: Upstash Redis via Vercel Marketplace env when configured, in-memory fallback when not.
@@ -21,7 +21,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 
 ## Research Direction
 
-The core V1 assumption is active acoustic calibration, not passive GPS/gyro inference. Each phone should eventually play and record short chirps in pairwise slots, estimate sample offsets on-device, exchange derived ranges, reject outliers, and solve a 2D layout. See `docs/research/blackmagic-v1-technical-brief.md`.
+The core V1 assumption is active acoustic calibration, not passive GPS/gyro inference. Each phone now has enough live orchestration to play and record short chirps in deterministic turns, estimate sample offsets on-device, exchange derived ranges, reject outliers, and solve a 2D layout. See `docs/research/blackmagic-v1-technical-brief.md`.
 
 Audio timing is treated as sample-domain truth. Browser/network clocks are synchronized continuously as a coarse host-time prior with explicit uncertainty, then audio events are mapped through a Web Audio context-time/performance-time anchor so historical samples are not collapsed to heartbeat delivery time. Every active mic heartbeat can now carry an audio-frame stamp and a rolling local audio window for on-device pulse detection; acoustic pulse observations turn those stamps into same-room range hints with meter-level uncertainty. The room state keeps bounded pulse/observation histories so late heartbeats can still be reconciled by the original audio-event timestamp rather than by server receive time. Localization should ultimately realign recordings by sample indices and audio cross-correlation.
 

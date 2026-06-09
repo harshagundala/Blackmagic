@@ -15,6 +15,10 @@ import {
   createScheduledAcousticPulse,
   createToneObservation,
 } from "@/lib/calibration/pulse";
+import {
+  selectObservablePulse,
+  selectUpcomingCalibrationTurn,
+} from "@/lib/calibration/session";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
 import type {
   AcousticObservation,
@@ -30,17 +34,12 @@ type CalibrationHeartbeat = Pick<
 
 export function BlackmagicApp() {
   const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession();
-  const activeHostPulse =
-    role === "phone"
-      ? roomState?.devices.find(
-          (device) => device.deviceId === roomState.hostDeviceId,
-        )?.acousticPulse ?? null
-      : null;
-  const sensors = useSensorSuite(activeHostPulse);
+  const sensors = useSensorSuite();
   const [phase, setPhase] = useState<Phase>("arriving");
   const snapshotRef = useRef(sensors.snapshot);
   const calibrationRef = useRef<CalibrationHeartbeat>({});
-  const pulseSequenceRef = useRef(0);
+  const publishedPulseIdRef = useRef("");
+  const observablePulseRef = useRef<AcousticPulse | null>(null);
   const observedPulseIdRef = useRef("");
   const pulseTimeoutRef = useRef<number | null>(null);
   const peerCount =
@@ -77,7 +76,7 @@ export function BlackmagicApp() {
   }, [heartbeat, phase]);
 
   useEffect(() => {
-    if (phase !== "listening" || role !== "host") {
+    if (phase !== "listening" || !roomState) {
       return;
     }
 
@@ -87,21 +86,35 @@ export function BlackmagicApp() {
         return;
       }
 
+      const turn = selectUpcomingCalibrationTurn(
+        roomState.devices.map((device) => device.deviceId),
+        hostEpochNowMs,
+      );
+      if (!turn || turn.emitterId !== deviceId) {
+        return;
+      }
+
       const pulse = createScheduledAcousticPulse({
         deviceId,
-        sequence: pulseSequenceRef.current,
+        sequence: turn.sequence,
         hostEpochNowMs,
+        leadMs: turn.pulseEmittedAtHostEpochMs - hostEpochNowMs,
+        durationMs: turn.pulseDurationMs,
       });
-      pulseSequenceRef.current += 1;
+      if (pulse.id === publishedPulseIdRef.current) {
+        return;
+      }
+
+      publishedPulseIdRef.current = pulse.id;
       calibrationRef.current = {
         acousticPulse: pulse,
-        acousticObservation: null,
+        acousticObservation: calibrationRef.current.acousticObservation ?? null,
       };
       scheduleOutputPulse(pulse, snapshotRef.current, pulseTimeoutRef);
     };
 
     publishPulse();
-    const timer = window.setInterval(publishPulse, 3_600);
+    const timer = window.setInterval(publishPulse, 700);
     return () => {
       window.clearInterval(timer);
       if (pulseTimeoutRef.current !== null) {
@@ -109,18 +122,37 @@ export function BlackmagicApp() {
         pulseTimeoutRef.current = null;
       }
     };
-  }, [deviceId, phase, role]);
+  }, [deviceId, phase, roomState]);
 
   useEffect(() => {
-    if (phase !== "listening" || role !== "phone" || !roomState) {
+    if (phase !== "listening" || !roomState) {
+      observablePulseRef.current = null;
+      sensors.trackPulse(null);
       return;
     }
 
-    const hostPulse = roomState.devices.find(
-      (device) => device.deviceId === roomState.hostDeviceId,
-    )?.acousticPulse;
+    const hostEpochNowMs = hostEpochNow(sensors.snapshot);
+    const pulse =
+      hostEpochNowMs === null
+        ? null
+        : selectObservablePulse(roomState.devices, deviceId, hostEpochNowMs);
+
+    if (observablePulseRef.current?.id === pulse?.id) {
+      return;
+    }
+
+    observablePulseRef.current = pulse;
+    sensors.trackPulse(pulse);
+  }, [deviceId, phase, roomState, sensors]);
+
+  useEffect(() => {
+    const pulse = observablePulseRef.current;
+    if (phase !== "listening" || !pulse) {
+      return;
+    }
+
     const observation = maybeCreateObservation(
-      hostPulse ?? null,
+      pulse,
       sensors.snapshot,
       observedPulseIdRef.current,
     );
@@ -131,10 +163,10 @@ export function BlackmagicApp() {
 
     observedPulseIdRef.current = observation.pulseId;
     calibrationRef.current = {
-      acousticPulse: null,
+      acousticPulse: calibrationRef.current.acousticPulse ?? null,
       acousticObservation: observation,
     };
-  }, [phase, role, roomState, sensors.snapshot]);
+  }, [phase, sensors.snapshot]);
 
   const visualPhase: Phase = phase === "arriving" && claimReady ? "waiting" : phase;
   const label = visualPhase === "arriving" ? "" : role === "host" ? "host" : "nearby";

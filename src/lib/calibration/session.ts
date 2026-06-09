@@ -1,4 +1,5 @@
 import type { PairwiseDistance } from "@/lib/positioning/layout";
+import type { AcousticPulse, RoomDevice } from "@/lib/session/registry";
 
 export type PhonePair = {
   from: string;
@@ -21,6 +22,26 @@ export type CalibrationPlan = {
   pairs: PhonePair[];
   slots: CalibrationSlot[];
   durationMs: number;
+};
+
+export type LiveCalibrationTurnOptions = {
+  slotDurationMs?: number;
+  pulseOffsetMs?: number;
+  minLeadMs?: number;
+  pulseDurationMs?: number;
+};
+
+export type LiveCalibrationTurn = {
+  emitterId: string;
+  sequence: number;
+  slotStartsAtHostEpochMs: number;
+  pulseEmittedAtHostEpochMs: number;
+  pulseDurationMs: number;
+};
+
+export type ObservablePulseOptions = {
+  maxFutureMs?: number;
+  maxLateMs?: number;
 };
 
 export type PairwiseMeasurement = PhonePair & {
@@ -63,6 +84,77 @@ export function createPairwiseCalibrationPlan(
     slots,
     durationMs: slots.length * strideMs,
   };
+}
+
+export function selectUpcomingCalibrationTurn(
+  participantIds: string[],
+  hostEpochNowMs: number,
+  options: LiveCalibrationTurnOptions = {},
+): LiveCalibrationTurn | null {
+  const ids = [...new Set(participantIds.filter(Boolean))];
+  if (ids.length < 2 || !Number.isFinite(hostEpochNowMs)) {
+    return null;
+  }
+
+  const slotDurationMs = options.slotDurationMs ?? 5_000;
+  const pulseOffsetMs = options.pulseOffsetMs ?? 3_400;
+  const minLeadMs = options.minLeadMs ?? 2_500;
+  const pulseDurationMs = options.pulseDurationMs ?? 48;
+  if (
+    slotDurationMs <= 0 ||
+    pulseOffsetMs < 0 ||
+    pulseOffsetMs >= slotDurationMs ||
+    minLeadMs < 0 ||
+    pulseDurationMs <= 0
+  ) {
+    return null;
+  }
+
+  let sequence = Math.max(0, Math.floor(hostEpochNowMs / slotDurationMs));
+  let slotStartsAtHostEpochMs = sequence * slotDurationMs;
+  let pulseEmittedAtHostEpochMs = slotStartsAtHostEpochMs + pulseOffsetMs;
+
+  while (pulseEmittedAtHostEpochMs - hostEpochNowMs < minLeadMs) {
+    sequence += 1;
+    slotStartsAtHostEpochMs = sequence * slotDurationMs;
+    pulseEmittedAtHostEpochMs = slotStartsAtHostEpochMs + pulseOffsetMs;
+  }
+
+  return {
+    emitterId: ids[sequence % ids.length],
+    sequence,
+    slotStartsAtHostEpochMs,
+    pulseEmittedAtHostEpochMs,
+    pulseDurationMs,
+  };
+}
+
+export function selectObservablePulse(
+  devices: RoomDevice[],
+  observerDeviceId: string,
+  hostEpochNowMs: number,
+  options: ObservablePulseOptions = {},
+): AcousticPulse | null {
+  if (!Number.isFinite(hostEpochNowMs)) {
+    return null;
+  }
+
+  const maxFutureMs = options.maxFutureMs ?? 5_500;
+  const maxLateMs = options.maxLateMs ?? 180;
+  const candidates = devices
+    .filter((device) => device.deviceId !== observerDeviceId)
+    .flatMap((device) => (device.acousticPulse ? [device.acousticPulse] : []))
+    .filter((pulse) => {
+      const deltaMs = pulse.emittedAtHostEpochMs - hostEpochNowMs;
+      return deltaMs <= maxFutureMs && deltaMs >= -maxLateMs;
+    })
+    .sort(
+      (a, b) =>
+        Math.abs(a.emittedAtHostEpochMs - hostEpochNowMs) -
+        Math.abs(b.emittedAtHostEpochMs - hostEpochNowMs),
+    );
+
+  return candidates[0] ?? null;
 }
 
 export function summarizePairwiseMeasurements(

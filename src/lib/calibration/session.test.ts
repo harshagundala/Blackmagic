@@ -1,9 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
   createPairwiseCalibrationPlan,
+  selectObservablePulse,
+  selectUpcomingCalibrationTurn,
   summarizePairwiseMeasurements,
   type PairwiseMeasurement,
 } from "./session";
+import type { RoomDevice } from "@/lib/session/registry";
 
 describe("pairwise calibration session", () => {
   test("creates non-overlapping chirp slots for every phone pair", () => {
@@ -42,4 +45,77 @@ describe("pairwise calibration session", () => {
     });
     expect(ranges[0].weight).toBeGreaterThan(ranges[1].weight ?? 0);
   });
+
+  test("selects a deterministic future emitter turn for all devices", () => {
+    const options = {
+      slotDurationMs: 1_000,
+      pulseOffsetMs: 600,
+      minLeadMs: 250,
+      pulseDurationMs: 40,
+    };
+
+    expect(
+      selectUpcomingCalibrationTurn(["host", "a", "b"], 100, options),
+    ).toEqual({
+      emitterId: "host",
+      sequence: 0,
+      slotStartsAtHostEpochMs: 0,
+      pulseEmittedAtHostEpochMs: 600,
+      pulseDurationMs: 40,
+    });
+
+    expect(
+      selectUpcomingCalibrationTurn(["host", "a", "b"], 400, options),
+    ).toEqual(
+      expect.objectContaining({
+        emitterId: "a",
+        sequence: 1,
+        pulseEmittedAtHostEpochMs: 1_600,
+      }),
+    );
+
+    expect(selectUpcomingCalibrationTurn(["host"], 100, options)).toBeNull();
+  });
+
+  test("chooses the peer pulse that should be observed now", () => {
+    const devices: RoomDevice[] = [
+      deviceWithPulse("host", "host:old", 8_800),
+      deviceWithPulse("phone-a", "phone-a:self", 10_200),
+      deviceWithPulse("phone-b", "phone-b:near", 10_900),
+      deviceWithPulse("phone-c", "phone-c:future", 16_000),
+    ];
+
+    expect(
+      selectObservablePulse(devices, "phone-a", 10_000, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: "phone-b:near",
+        emittedAtHostEpochMs: 10_900,
+      }),
+    );
+  });
 });
+
+function deviceWithPulse(
+  deviceId: string,
+  pulseId: string,
+  emittedAtHostEpochMs: number,
+): RoomDevice {
+  return {
+    deviceId,
+    joinedAt: 1_000,
+    lastSeenAt: 2_000,
+    role: deviceId === "host" ? "host" : "phone",
+    sessionKey: "room",
+    acousticPulse: {
+      id: pulseId,
+      emittedAtHostEpochMs,
+      durationMs: 48,
+      frequencyHz: 17_200,
+      endFrequencyHz: 19_200,
+    },
+  };
+}

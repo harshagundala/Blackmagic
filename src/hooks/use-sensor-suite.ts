@@ -85,6 +85,16 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const clockModelRef = useRef<ClockModel | null>(null);
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
 
+  const trackPulse = useCallback((pulse: AcousticPulse | null) => {
+    activePulseRef.current = pulse;
+    updateStreamingMatcherPulse(
+      pulse,
+      audioContextRef.current,
+      clockModelRef.current,
+      streamingMatcherRef.current,
+    );
+  }, []);
+
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
       cancelAnimationFrame(animationRef.current);
@@ -270,16 +280,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
 
   useEffect(() => stop, [stop]);
   useEffect(() => {
-    activePulseRef.current = activePulse;
-    updateStreamingMatcherPulse(
-      activePulse,
-      audioContextRef.current,
-      clockModelRef.current,
-      streamingMatcherRef.current,
-    );
-  }, [activePulse]);
+    trackPulse(activePulse);
+  }, [activePulse, trackPulse]);
 
-  return { snapshot, start, stop };
+  return { snapshot, start, stop, trackPulse };
 
   function handleOrientation(event: DeviceOrientationEvent) {
     headingActiveRef.current = true;
