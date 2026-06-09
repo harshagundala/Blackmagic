@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "trace:validation": "node scripts/blackmagic-validation-trace.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
