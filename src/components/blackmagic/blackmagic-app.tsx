@@ -39,6 +39,7 @@ import type {
   AcousticPulse,
   DeviceHeartbeat,
 } from "@/lib/session/registry";
+import { captureProcessingState } from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
 
@@ -257,9 +258,10 @@ export function BlackmagicApp() {
   );
   const peerCount = Math.max(0, (roomState?.devices.length ?? 1) - 1);
   const syncLabel = describeTimeSync(roomState?.timeSync ?? null, peerCount);
-  const captureFiltered =
-    sensors.snapshot.captureProcessing !== null &&
-    !sensors.snapshot.captureProcessing.rawCaptureVerified;
+  const captureStatus = captureProcessingState(
+    sensors.snapshot.captureProcessing,
+  );
+  const captureFiltered = captureStatus === "filtered";
   const reconnecting = connection === "reconnecting";
 
   return (

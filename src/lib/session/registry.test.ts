@@ -265,6 +265,33 @@ describe("session registry", () => {
     ]);
   });
 
+  test("preserves unreported capture processing fields as unknown", () => {
+    const registry = createSessionRegistry({ now: () => 10_000 });
+
+    const state = registry.heartbeat("https://blackmagic.app/", "host", {
+      mic: "active",
+      captureProcessing: {
+        echoCancellation: null,
+        noiseSuppression: null,
+        autoGainControl: null,
+        rawCaptureVerified: false,
+      },
+      audioContextState: "running",
+    });
+
+    expect(state.devices[0]).toEqual(
+      expect.objectContaining({
+        captureProcessing: {
+          echoCancellation: null,
+          noiseSuppression: null,
+          autoGainControl: null,
+          rawCaptureVerified: false,
+        },
+        audioContextState: "running",
+      }),
+    );
+  });
+
   test("reconciles near-simultaneous voice events into room audio events", () => {
     const registry = createSessionRegistry({ now: () => 20_000 });
 

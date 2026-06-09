@@ -60,6 +60,12 @@ export type CaptureProcessingReport = {
   rawCaptureVerified: boolean;
 };
 
+export type CaptureProcessingState =
+  | "filtered"
+  | "missing"
+  | "unverified"
+  | "verified";
+
 export type AudioContextRunState =
   | "closed"
   | "interrupted"
@@ -334,6 +340,24 @@ export function selectRoomCalibrationTurn(
     emitterCapable.map((device) => device.deviceId),
     hostEpochNowMs,
   );
+}
+
+export function captureProcessingState(
+  report: CaptureProcessingReport | null | undefined,
+): CaptureProcessingState {
+  if (!report) {
+    return "missing";
+  }
+
+  if (report.rawCaptureVerified) {
+    return "verified";
+  }
+
+  return report.echoCancellation === true ||
+    report.noiseSuppression === true ||
+    report.autoGainControl === true
+    ? "filtered"
+    : "unverified";
 }
 
 function touchRecord(record: SessionRecord, timestamp: number) {

@@ -18,6 +18,7 @@ describe("validation trace", () => {
           deviceCount: 3,
           localizedDeviceCount: 3,
           rangeCount: 3,
+          unverifiedCaptureDeviceCount: 1,
           tdoaSourceCount: 0,
         }),
         snapshot(7_000, "ready", [], {
@@ -59,6 +60,8 @@ describe("validation trace", () => {
     ]);
     expect(summary.peakLocalizedDeviceCount).toBe(3);
     expect(summary.peakAudioCaptureReadyDeviceCount).toBe(3);
+    expect(summary.peakUnverifiedCaptureDeviceCount).toBe(1);
+    expect(summary.peakFilteredCaptureDeviceCount).toBe(0);
     expect(summary.peakAudioTimestampReadyDeviceCount).toBe(3);
     expect(summary.worstAudioTimestampErrorMs).toBe(3.4);
     expect(summary.lowestAudioTimingConfidence).toBe(0.78);
@@ -136,6 +139,7 @@ function snapshot(
         roomClockConfidence: status === "ready" ? 0.9 : 0,
         audioCaptureReadyDeviceCount: 0,
         rawCaptureVerifiedDeviceCount: 0,
+        unverifiedCaptureDeviceCount: 0,
         runningAudioContextDeviceCount: 0,
         filteredCaptureDeviceCount: 0,
         suspendedAudioContextDeviceCount: 0,

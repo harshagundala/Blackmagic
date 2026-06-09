@@ -193,4 +193,53 @@ describe("physical room validation", () => {
     expect(report.metrics.rawCaptureVerifiedDeviceCount).toBe(2);
     expect(report.blockers).toContain("filtered_audio_capture");
   });
+
+  test("keeps unreported browser capture settings warming instead of degraded", () => {
+    const simulation = simulateAcousticRoom({
+      roomUrl: "https://blackmagic.app/lab-unreported-capture",
+      devices: [
+        { deviceId: "host", x: 0, y: 0 },
+        { deviceId: "phone-a", x: 2.2, y: 0.25 },
+        { deviceId: "phone-b", x: 0.65, y: 2.15 },
+      ],
+      exchangesPerPair: 3,
+      speechEvents: [
+        {
+          id: "speaker-1",
+          x: -0.5,
+          y: -0.35,
+        },
+      ],
+    });
+    const unreportedRoom = {
+      ...simulation.roomState,
+      devices: simulation.roomState.devices.map((device, index) =>
+        index === 1
+          ? {
+              ...device,
+              captureProcessing: {
+                echoCancellation: null,
+                noiseSuppression: null,
+                autoGainControl: null,
+                rawCaptureVerified: false,
+              },
+            }
+          : device,
+      ),
+    };
+
+    const report = validatePhysicalRoomLocalization(
+      unreportedRoom,
+      simulation.constellation,
+    );
+
+    expect(report.audioCapture.status).toBe("warming");
+    expect(report.status).toBe("warming");
+    expect(report.metrics.audioCaptureReadyDeviceCount).toBe(2);
+    expect(report.metrics.rawCaptureVerifiedDeviceCount).toBe(2);
+    expect(report.metrics.unverifiedCaptureDeviceCount).toBe(1);
+    expect(report.metrics.filteredCaptureDeviceCount).toBe(0);
+    expect(report.blockers).toContain("audio_capture_unverified");
+    expect(report.blockers).not.toContain("filtered_audio_capture");
+  });
 });

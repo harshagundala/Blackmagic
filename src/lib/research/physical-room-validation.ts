@@ -2,7 +2,11 @@ import {
   estimateRoomConstellation,
   type RoomConstellation,
 } from "../positioning/room-state-layout";
-import type { RoomDevice, RoomState } from "../session/registry";
+import {
+  captureProcessingState,
+  type RoomDevice,
+  type RoomState,
+} from "../session/registry";
 
 export type PhysicalRoomValidationStatus = "ready" | "warming" | "degraded";
 
@@ -21,6 +25,7 @@ export type PhysicalRoomValidationMetrics = {
   roomClockConfidence: number;
   audioCaptureReadyDeviceCount: number;
   rawCaptureVerifiedDeviceCount: number;
+  unverifiedCaptureDeviceCount: number;
   runningAudioContextDeviceCount: number;
   filteredCaptureDeviceCount: number;
   suspendedAudioContextDeviceCount: number;
@@ -111,6 +116,9 @@ function validationMetrics(
     rawCaptureVerifiedDeviceCount: captureStates.filter(
       (state) => state.rawVerified,
     ).length,
+    unverifiedCaptureDeviceCount: captureStates.filter(
+      (state) => state.unverified,
+    ).length,
     runningAudioContextDeviceCount: captureStates.filter(
       (state) => state.contextRunning,
     ).length,
@@ -140,11 +148,10 @@ function validationMetrics(
 }
 
 function audioCaptureState(device: RoomDevice) {
-  const rawVerified = device.captureProcessing?.rawCaptureVerified === true;
-  const filtered =
-    device.captureProcessing !== null &&
-    device.captureProcessing !== undefined &&
-    !rawVerified;
+  const state = captureProcessingState(device.captureProcessing);
+  const rawVerified = state === "verified";
+  const filtered = state === "filtered";
+  const unverified = state === "unverified";
   const contextRunning = device.audioContextState === "running";
   const contextBlocked =
     device.audioContextState !== null &&
@@ -155,6 +162,7 @@ function audioCaptureState(device: RoomDevice) {
   return {
     ready: micActive && rawVerified && contextRunning,
     rawVerified,
+    unverified,
     contextRunning,
     filtered,
     contextBlocked,
@@ -227,6 +235,9 @@ function audioCaptureSection(
   }
   if (metrics.audioCaptureReadyDeviceCount < required) {
     blockers.push("insufficient_audio_capture");
+  }
+  if (metrics.unverifiedCaptureDeviceCount > 0) {
+    blockers.push("audio_capture_unverified");
   }
   if (metrics.filteredCaptureDeviceCount > 0) {
     blockers.push("filtered_audio_capture");
