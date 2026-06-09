@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  Fragment,
   useMemo,
   useRef,
   useState,
@@ -276,19 +277,31 @@ export function BlackmagicApp() {
           const freshness = 1 - clamp(source.ageMs / 6_000, 0, 1);
           const strength = clamp(source.confidence, 0.18, 1) * freshness;
 
+          const transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
+
           return (
-            <span
-              aria-hidden
-              className="pointer-events-none absolute left-1/2 top-1/2 z-20 h-28 w-28 rounded-[44%] bg-[#007aff]/24 blur-xl"
-              key={source.eventId}
-              style={{
-                animation: "source-bloom 1.9s ease-out infinite",
-                animationDelay: `${index * 120}ms`,
-                opacity: 0.18 + strength * 0.58,
-                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.5 + strength * 0.86})`,
-                transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
-              }}
-            />
+            <Fragment key={source.eventId}>
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-1/2 top-1/2 z-20 h-28 w-28 rounded-[44%] bg-[#007aff]/24 blur-xl"
+                style={{
+                  animation: "source-bloom 1.9s ease-out infinite",
+                  animationDelay: `${index * 120}ms`,
+                  opacity: 0.18 + strength * 0.58,
+                  transform: `${transform} scale(${0.5 + strength * 0.86})`,
+                  transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
+                }}
+              />
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-1/2 top-1/2 z-30 h-4 w-4 rounded-full bg-[#007aff]/45 blur-[1px] shadow-[0_0_34px_rgba(0,122,255,0.48)]"
+                style={{
+                  opacity: 0.16 + strength * 0.62,
+                  transform: `${transform} scale(${0.82 + strength * 0.7})`,
+                  transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
+                }}
+              />
+            </Fragment>
           );
         })}
       </div>
