@@ -5,6 +5,9 @@ export type SpeechFingerprint = {
   hopMs: number;
   windowMs: number;
   values: number[];
+  alignmentHopMs?: number | null;
+  alignmentWindowMs?: number | null;
+  alignmentValues?: number[] | null;
 };
 
 export type SpeechFingerprintInput = {
@@ -14,12 +17,14 @@ export type SpeechFingerprintInput = {
   centerSampleIndex: number;
   windowMs?: number;
   bins?: number;
+  alignmentBins?: number;
 };
 
 export type FingerprintOffsetEstimate = {
   offsetMs: number;
   lagBins: number;
   correlation: number;
+  source: "alignment-sketch" | "energy-contour";
 };
 
 export function createSpeechFingerprint({
@@ -29,6 +34,7 @@ export function createSpeechFingerprint({
   centerSampleIndex,
   windowMs = 240,
   bins = 32,
+  alignmentBins,
 }: SpeechFingerprintInput): SpeechFingerprint | null {
   if (
     sampleRate <= 0 ||
@@ -66,6 +72,17 @@ export function createSpeechFingerprint({
     return null;
   }
 
+  const alignment = alignmentBins
+    ? createAlignmentSketch({
+        samples,
+        sampleRate,
+        startSampleIndex,
+        centerSampleIndex,
+        windowMs,
+        bins: alignmentBins,
+      })
+    : null;
+
   return {
     sampleRate,
     startSampleIndex: fingerprintStartSampleIndex,
@@ -73,13 +90,19 @@ export function createSpeechFingerprint({
     hopMs: round((binSamples / sampleRate) * 1_000),
     windowMs: round((actualWindowSamples / sampleRate) * 1_000),
     values: values.map((value) => round(value / peak)),
+    alignmentHopMs: alignment?.hopMs ?? null,
+    alignmentWindowMs: alignment?.windowMs ?? null,
+    alignmentValues: alignment?.values ?? null,
   };
 }
 
 export function estimateFingerprintOffset(
   reference: SpeechFingerprint | null | undefined,
   candidate: SpeechFingerprint | null | undefined,
-  { maxLagBins = 8 }: { maxLagBins?: number } = {},
+  {
+    maxLagBins = 8,
+    maxAlignmentLagBins = 16,
+  }: { maxLagBins?: number; maxAlignmentLagBins?: number } = {},
 ): FingerprintOffsetEstimate | null {
   if (
     !reference ||
@@ -88,6 +111,15 @@ export function estimateFingerprintOffset(
     candidate.values.length === 0
   ) {
     return null;
+  }
+
+  const alignment = estimateAlignmentSketchOffset(
+    reference,
+    candidate,
+    maxAlignmentLagBins,
+  );
+  if (alignment && alignment.correlation >= 0.35) {
+    return alignment;
   }
 
   const maxLag = Math.max(0, Math.round(maxLagBins));
@@ -106,6 +138,90 @@ export function estimateFingerprintOffset(
         offsetMs: round(lag * candidate.hopMs),
         lagBins: lag,
         correlation: round(correlation),
+        source: "energy-contour",
+      };
+    }
+  }
+
+  return best;
+}
+
+function createAlignmentSketch({
+  samples,
+  sampleRate,
+  startSampleIndex,
+  centerSampleIndex,
+  windowMs,
+  bins,
+}: Required<Pick<SpeechFingerprintInput, "sampleRate" | "startSampleIndex" | "centerSampleIndex" | "windowMs" | "bins">> & {
+  samples: Float32Array | number[];
+}) {
+  const windowSamples = Math.max(1, Math.round((windowMs / 1_000) * sampleRate));
+  const binSamples = Math.max(1, Math.floor(windowSamples / bins));
+  const actualWindowSamples = binSamples * bins;
+  const sketchStartSampleIndex = Math.round(centerSampleIndex - actualWindowSamples / 2);
+  const values: number[] = [];
+
+  for (let bin = 0; bin < bins; bin += 1) {
+    const binStartSampleIndex = sketchStartSampleIndex + bin * binSamples;
+    let total = 0;
+    for (let offset = 0; offset < binSamples; offset += 1) {
+      const globalSampleIndex = binStartSampleIndex + offset;
+      const localSampleIndex = globalSampleIndex - startSampleIndex;
+      total +=
+        localSampleIndex >= 0 && localSampleIndex < samples.length
+          ? samples[localSampleIndex]
+          : 0;
+    }
+    values.push(total / binSamples);
+  }
+
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const centered = values.map((value) => value - mean);
+  const peak = Math.max(...centered.map((value) => Math.abs(value)));
+  if (!Number.isFinite(peak) || peak <= 0) {
+    return null;
+  }
+
+  return {
+    hopMs: round((binSamples / sampleRate) * 1_000),
+    windowMs: round((actualWindowSamples / sampleRate) * 1_000),
+    values: centered.map((value) => round(value / peak)),
+  };
+}
+
+function estimateAlignmentSketchOffset(
+  reference: SpeechFingerprint,
+  candidate: SpeechFingerprint,
+  maxLagBins: number,
+): FingerprintOffsetEstimate | null {
+  if (
+    !reference.alignmentValues ||
+    !candidate.alignmentValues ||
+    reference.alignmentValues.length === 0 ||
+    candidate.alignmentValues.length === 0 ||
+    !candidate.alignmentHopMs
+  ) {
+    return null;
+  }
+
+  const maxLag = Math.max(0, Math.round(maxLagBins));
+  let best: FingerprintOffsetEstimate | null = null;
+  for (let lag = -maxLag; lag <= maxLag; lag += 1) {
+    const correlation = normalizedCorrelation(
+      reference.alignmentValues,
+      candidate.alignmentValues,
+      lag,
+    );
+    if (correlation === null) {
+      continue;
+    }
+    if (!best || correlation > best.correlation) {
+      best = {
+        offsetMs: round(lag * candidate.alignmentHopMs),
+        lagBins: lag,
+        correlation: round(correlation),
+        source: "alignment-sketch",
       };
     }
   }

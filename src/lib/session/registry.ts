@@ -636,12 +636,20 @@ function sanitizeSpeechFingerprint(
   const centerSampleIndex = finiteNumber(fingerprint.centerSampleIndex);
   const hopMs = nonNegativeNumber(fingerprint.hopMs);
   const windowMs = nonNegativeNumber(fingerprint.windowMs);
+  const alignmentHopMs = nonNegativeNumber(fingerprint.alignmentHopMs);
+  const alignmentWindowMs = nonNegativeNumber(fingerprint.alignmentWindowMs);
   const values = Array.isArray(fingerprint.values)
     ? fingerprint.values
         .slice(0, 64)
         .map((value) => clampNumber(value, 0, 1))
         .filter((value): value is number => typeof value === "number")
     : [];
+  const alignmentValues = Array.isArray(fingerprint.alignmentValues)
+    ? fingerprint.alignmentValues
+        .slice(0, 128)
+        .map((value) => clampNumber(value, -1, 1))
+        .filter((value): value is number => typeof value === "number")
+    : null;
 
   if (
     sampleRate === null ||
@@ -657,7 +665,7 @@ function sanitizeSpeechFingerprint(
     return null;
   }
 
-  return {
+  const sanitized = {
     sampleRate,
     startSampleIndex: Math.max(0, Math.round(startSampleIndex)),
     centerSampleIndex: Math.max(0, Math.round(centerSampleIndex)),
@@ -665,6 +673,24 @@ function sanitizeSpeechFingerprint(
     windowMs,
     values,
   };
+
+  if (
+    alignmentHopMs !== null &&
+    alignmentHopMs > 0 &&
+    alignmentWindowMs !== null &&
+    alignmentWindowMs > 0 &&
+    alignmentValues &&
+    alignmentValues.length >= 4
+  ) {
+    return {
+      ...sanitized,
+      alignmentHopMs,
+      alignmentWindowMs,
+      alignmentValues,
+    };
+  }
+
+  return sanitized;
 }
 
 function clampNumber(value: number | null | undefined, min: number, max: number) {

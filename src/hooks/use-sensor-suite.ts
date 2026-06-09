@@ -507,6 +507,7 @@ function attachSpeechFingerprint(
     centerSampleIndex: event.sampleIndex,
     windowMs: 240,
     bins: 32,
+    alignmentBins: 96,
   });
 
   return {

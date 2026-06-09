@@ -243,6 +243,9 @@ describe("session registry", () => {
           hopMs: 5,
           windowMs: 80,
           values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+          alignmentHopMs: 2,
+          alignmentWindowMs: 24,
+          alignmentValues: [0, 0.2, 0.8, 1, 0.6, -0.2, -0.8, -1],
         },
       },
     });
@@ -254,6 +257,9 @@ describe("session registry", () => {
           hopMs: 5,
           windowMs: 80,
           values: [0, 0.1, 0.35, 1, 0.7, 0.28, 0.1, 0],
+          alignmentHopMs: 2,
+          alignmentWindowMs: 24,
+          alignmentValues: [0, 0.2, 0.8, 1, 0.6, -0.2, -0.8, -1],
         }),
       }),
     );
