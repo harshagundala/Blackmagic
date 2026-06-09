@@ -142,7 +142,7 @@ export function selectObservablePulse(
   const maxFutureMs = options.maxFutureMs ?? 5_500;
   const maxLateMs = options.maxLateMs ?? 180;
   const candidates = devices
-    .flatMap((device) => (device.acousticPulse ? [device.acousticPulse] : []))
+    .flatMap(acousticPulseHistory)
     .filter((pulse) => {
       const deltaMs = pulse.emittedAtHostEpochMs - hostEpochNowMs;
       return deltaMs <= maxFutureMs && deltaMs >= -maxLateMs;
@@ -154,6 +154,16 @@ export function selectObservablePulse(
     );
 
   return candidates[0] ?? null;
+}
+
+function acousticPulseHistory(device: RoomDevice) {
+  return uniqueBy(
+    [
+      ...(device.acousticPulses ?? []),
+      ...(device.acousticPulse ? [device.acousticPulse] : []),
+    ],
+    (pulse) => pulse.id,
+  );
 }
 
 export function summarizePairwiseMeasurements(
@@ -218,4 +228,13 @@ function roundMeters(value: number) {
 
 function roundWeight(value: number) {
   return Number(value.toFixed(3));
+}
+
+function uniqueBy<T>(items: T[], keyFor: (item: T) => string) {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    map.delete(keyFor(item));
+    map.set(keyFor(item), item);
+  }
+  return [...map.values()];
 }

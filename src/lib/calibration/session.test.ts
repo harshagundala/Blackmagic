@@ -97,6 +97,37 @@ describe("pairwise calibration session", () => {
       }),
     );
   });
+
+  test("chooses observable pulses from bounded pulse history after latest heartbeat clears the pulse", () => {
+    const devices: RoomDevice[] = [
+      {
+        ...deviceWithPulse("host", "host:history", 10_200),
+        acousticPulse: null,
+        acousticPulses: [
+          {
+            id: "host:history",
+            emittedAtHostEpochMs: 10_200,
+            durationMs: 48,
+            frequencyHz: 17_200,
+            endFrequencyHz: 19_200,
+          },
+        ],
+      },
+      deviceWithPulse("phone-a", "phone-a:later", 14_000),
+    ];
+
+    expect(
+      selectObservablePulse(devices, "phone-a", 10_000, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: "host:history",
+        emittedAtHostEpochMs: 10_200,
+      }),
+    );
+  });
 });
 
 function deviceWithPulse(
