@@ -153,6 +153,14 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
       readyStreakMs: 0,
       finalBlockers: [],
       observedBlockers: [],
+      peakDeviceCount: 0,
+      peakLocalizedDeviceCount: 0,
+      peakRangeCount: 0,
+      peakAudioTimestampReadyDeviceCount: 0,
+      worstAudioTimestampErrorMs: null,
+      lowestAudioTimingConfidence: null,
+      peakTdoaSourceCount: 0,
+      bestSourceResidualMs: null,
     };
   }
 
@@ -182,6 +190,12 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
+    peakAudioTimestampReadyDeviceCount: peakMetric(
+      ordered,
+      "audioTimestampReadyDeviceCount",
+    ),
+    worstAudioTimestampErrorMs: worstAudioTimestampErrorMs(ordered),
+    lowestAudioTimingConfidence: lowestAudioTimingConfidence(ordered),
     peakTdoaSourceCount: peakMetric(ordered, "tdoaSourceCount"),
     bestSourceResidualMs: bestSourceResidualMs(ordered),
   };
@@ -228,6 +242,20 @@ function bestSourceResidualMs(snapshots) {
     .map((snapshot) => snapshot.validation.metrics.bestSourceResidualMs)
     .filter((value) => typeof value === "number" && Number.isFinite(value));
   return residuals.length === 0 ? null : Math.min(...residuals);
+}
+
+function worstAudioTimestampErrorMs(snapshots) {
+  const errors = snapshots
+    .map((snapshot) => snapshot.validation.metrics.worstAudioTimestampErrorMs)
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
+  return errors.length === 0 ? null : Math.max(...errors);
+}
+
+function lowestAudioTimingConfidence(snapshots) {
+  const confidences = snapshots
+    .map((snapshot) => snapshot.validation.metrics.lowestAudioTimingConfidence)
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
+  return confidences.length === 0 ? null : Math.min(...confidences);
 }
 
 function sleep(ms) {

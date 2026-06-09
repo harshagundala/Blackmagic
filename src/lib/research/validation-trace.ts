@@ -26,6 +26,9 @@ export type PhysicalRoomValidationTraceSummary = {
   peakDeviceCount: number;
   peakLocalizedDeviceCount: number;
   peakRangeCount: number;
+  peakAudioTimestampReadyDeviceCount: number;
+  worstAudioTimestampErrorMs: number | null;
+  lowestAudioTimingConfidence: number | null;
   peakTdoaSourceCount: number;
   bestSourceResidualMs: number | null;
 };
@@ -68,6 +71,12 @@ export function summarizePhysicalRoomValidationTrace(
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
+    peakAudioTimestampReadyDeviceCount: peakMetric(
+      ordered,
+      "audioTimestampReadyDeviceCount",
+    ),
+    worstAudioTimestampErrorMs: worstAudioTimestampErrorMs(ordered),
+    lowestAudioTimingConfidence: lowestAudioTimingConfidence(ordered),
     peakTdoaSourceCount: peakMetric(ordered, "tdoaSourceCount"),
     bestSourceResidualMs: bestSourceResidualMs(ordered),
   };
@@ -86,6 +95,9 @@ function emptySummary(): PhysicalRoomValidationTraceSummary {
     peakDeviceCount: 0,
     peakLocalizedDeviceCount: 0,
     peakRangeCount: 0,
+    peakAudioTimestampReadyDeviceCount: 0,
+    worstAudioTimestampErrorMs: null,
+    lowestAudioTimingConfidence: null,
     peakTdoaSourceCount: 0,
     bestSourceResidualMs: null,
   };
@@ -126,13 +138,35 @@ function peakMetric(
   snapshots: PhysicalRoomValidationSnapshot[],
   metric: keyof Pick<
     PhysicalRoomValidationReport["metrics"],
-    "deviceCount" | "localizedDeviceCount" | "rangeCount" | "tdoaSourceCount"
+    | "deviceCount"
+    | "localizedDeviceCount"
+    | "rangeCount"
+    | "audioTimestampReadyDeviceCount"
+    | "tdoaSourceCount"
   >,
 ) {
   return Math.max(
     0,
     ...snapshots.map((snapshot) => snapshot.validation.metrics[metric]),
   );
+}
+
+function worstAudioTimestampErrorMs(
+  snapshots: PhysicalRoomValidationSnapshot[],
+) {
+  const errors = snapshots
+    .map((snapshot) => snapshot.validation.metrics.worstAudioTimestampErrorMs)
+    .filter((value): value is number => value !== null);
+  return errors.length === 0 ? null : Math.max(...errors);
+}
+
+function lowestAudioTimingConfidence(
+  snapshots: PhysicalRoomValidationSnapshot[],
+) {
+  const confidences = snapshots
+    .map((snapshot) => snapshot.validation.metrics.lowestAudioTimingConfidence)
+    .filter((value): value is number => value !== null);
+  return confidences.length === 0 ? null : Math.min(...confidences);
 }
 
 function bestSourceResidualMs(snapshots: PhysicalRoomValidationSnapshot[]) {

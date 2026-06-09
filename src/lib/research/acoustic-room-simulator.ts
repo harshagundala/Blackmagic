@@ -1,5 +1,6 @@
 import { estimateRoomConstellation } from "../positioning/room-state-layout";
 import { createSessionRegistry, type RoomState } from "../session/registry";
+import type { AudioFrameTimestamp } from "../timing/clock-sync";
 import {
   validatePhysicalRoomLocalization,
   type PhysicalRoomValidationReport,
@@ -302,9 +303,10 @@ function heartbeatAt(
   heartbeat: Parameters<ReturnType<typeof createSessionRegistry>["heartbeat"]>[2],
 ) {
   setNow(hostEpochMs);
+  const sampleRate = heartbeat?.sampleRate ?? DEFAULT_SAMPLE_RATE;
   registry.heartbeat(roomUrl, deviceId, {
     mic: "active",
-    sampleRate: heartbeat?.sampleRate ?? DEFAULT_SAMPLE_RATE,
+    sampleRate,
     clockQuality: 0.98,
     clockOffsetMs: 0,
     clockUncertaintyMs: 0.8,
@@ -314,10 +316,39 @@ function heartbeatAt(
     clockSamplesUsed: 12,
     clockOutliersRejected: 0,
     clockOffsetStabilityMs: 0.2,
+    audioFrame: audioFrameAt(hostEpochMs, sampleRate),
     motion: "active",
     motionStability: 0.96,
     ...heartbeat,
   });
+}
+
+function audioFrameAt(
+  hostEpochMs: number,
+  sampleRate: number,
+): AudioFrameTimestamp {
+  const sampleIndex = Math.max(0, Math.round((hostEpochMs / 1_000) * sampleRate));
+  const audioContextTimeSeconds = sampleIndex / sampleRate;
+
+  return {
+    audioContextTimeSeconds,
+    sampleIndex,
+    sampleRate,
+    clientPerfOriginEpochMs: 0,
+    performanceNowMs: hostEpochMs,
+    clockOffsetMs: 0,
+    clockUncertaintyMs: 0.8,
+    clockQuality: 0.98,
+    clockMaxErrorMs: 1.1,
+    clockBestRoundTripMs: 3.2,
+    clockJitterMs: 0.18,
+    clockSamplesUsed: 12,
+    clockOutliersRejected: 0,
+    clockOffsetStabilityMs: 0.2,
+    audioElapsedMs: round(audioContextTimeSeconds * 1_000),
+    hostEstimatedEpochMs: hostEpochMs,
+    timingConfidence: 0.94,
+  };
 }
 
 function pulse(id: string, emittedAtHostEpochMs: number, sampleRate: number) {
