@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import {
   DEFAULT_STALE_AFTER_MS,
   createSessionRegistry,
+  mergeHeartbeat,
   normalizeSessionKey,
-  sanitizeHeartbeat,
   type DeviceHeartbeat,
   type RoomDevice,
   type RoomState,
@@ -120,10 +120,11 @@ export function createRedisSessionStore(
       const keys = redisSessionKeys(claim.sessionKey);
       const previous = parseDevice(await redis.hget(keys.devices, deviceId));
       const hostDeviceId = (await redis.get(keys.host)) ?? claim.deviceId;
+      const mergedHeartbeat = mergeHeartbeat(previous, heartbeat);
       const device: RoomDevice = {
         ...previous,
         ...claim,
-        ...sanitizeHeartbeat(heartbeat),
+        ...mergedHeartbeat,
         lastSeenAt: now(),
         role: hostDeviceId === deviceId ? "host" : "phone",
       };

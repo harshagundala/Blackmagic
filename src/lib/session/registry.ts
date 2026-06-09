@@ -42,7 +42,9 @@ export type DeviceHeartbeat = {
   clockSamplesUsed?: number | null;
   audioFrame?: AudioFrameTimestamp | null;
   acousticPulse?: AcousticPulse | null;
+  acousticPulses?: AcousticPulse[] | null;
   acousticObservation?: AcousticObservation | null;
+  acousticObservations?: AcousticObservation[] | null;
   motion?: SensorState;
   heading?: SensorState;
   location?: SensorState;
@@ -71,6 +73,7 @@ export type SessionRegistryOptions = {
 };
 
 export const DEFAULT_STALE_AFTER_MS = 12_000;
+const MAX_ACOUSTIC_HISTORY = 8;
 
 export function createSessionRegistry(options: SessionRegistryOptions = {}) {
   const sessions = new Map<string, SessionRecord>();
@@ -146,7 +149,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         throw new Error("Device claim missing after claim.");
       }
 
-      Object.assign(current, sanitizeHeartbeat(heartbeat), {
+      Object.assign(current, mergeHeartbeat(current, heartbeat), {
         lastSeenAt: now(),
       });
 
@@ -230,13 +233,82 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     clockSamplesUsed: integerAtLeast(heartbeat.clockSamplesUsed, 0),
     audioFrame: sanitizeAudioFrame(heartbeat.audioFrame),
     acousticPulse: sanitizeAcousticPulse(heartbeat.acousticPulse),
+    acousticPulses: null,
     acousticObservation: sanitizeAcousticObservation(
       heartbeat.acousticObservation,
     ),
+    acousticObservations: null,
     motion: heartbeat.motion,
     heading: heartbeat.heading,
     location: heartbeat.location,
   };
+}
+
+export function mergeHeartbeat(
+  previous: DeviceHeartbeat | null | undefined,
+  heartbeat: DeviceHeartbeat,
+): DeviceHeartbeat {
+  const sanitized = sanitizeHeartbeat(heartbeat);
+  const acousticPulses = appendAcousticPulseHistory(
+    previous?.acousticPulses,
+    previous?.acousticPulse,
+    sanitized.acousticPulse,
+  );
+  const acousticObservations = appendAcousticObservationHistory(
+    previous?.acousticObservations,
+    previous?.acousticObservation,
+    sanitized.acousticObservation,
+  );
+
+  return {
+    ...sanitized,
+    acousticPulses,
+    acousticObservations,
+  };
+}
+
+function appendAcousticPulseHistory(
+  history: AcousticPulse[] | null | undefined,
+  previousLatest: AcousticPulse | null | undefined,
+  next: AcousticPulse | null | undefined,
+) {
+  return appendUniqueHistory(history, previousLatest, next, (pulse) => pulse.id);
+}
+
+function appendAcousticObservationHistory(
+  history: AcousticObservation[] | null | undefined,
+  previousLatest: AcousticObservation | null | undefined,
+  next: AcousticObservation | null | undefined,
+) {
+  return appendUniqueHistory(
+    history,
+    previousLatest,
+    next,
+    (observation) => observation.pulseId,
+  );
+}
+
+function appendUniqueHistory<T>(
+  history: T[] | null | undefined,
+  previousLatest: T | null | undefined,
+  next: T | null | undefined,
+  keyFor: (item: T) => string,
+) {
+  const entries = [...(history ?? [])];
+  if (previousLatest) {
+    entries.push(previousLatest);
+  }
+  if (next) {
+    entries.push(next);
+  }
+
+  const deduped = new Map<string, T>();
+  for (const entry of entries) {
+    deduped.delete(keyFor(entry));
+    deduped.set(keyFor(entry), entry);
+  }
+
+  return [...deduped.values()].slice(-MAX_ACOUSTIC_HISTORY);
 }
 
 function sanitizeAudioFrame(

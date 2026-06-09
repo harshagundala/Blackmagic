@@ -84,6 +84,69 @@ describe("session registry", () => {
     ]);
   });
 
+  test("keeps bounded acoustic pulse and observation histories across heartbeats", () => {
+    let now = 1_000;
+    const registry = createSessionRegistry({ now: () => now });
+
+    registry.claim("https://blackmagic.app/", "host");
+    registry.claim("https://blackmagic.app/", "phone-a");
+
+    for (let index = 0; index < 10; index += 1) {
+      now += 100;
+      registry.heartbeat("https://blackmagic.app/", "host", {
+        acousticPulse: {
+          id: `pulse-${index}`,
+          emittedAtHostEpochMs: 10_000 + index * 1_000,
+          durationMs: 48,
+          frequencyHz: 17_200,
+          endFrequencyHz: 19_200,
+        },
+      });
+      registry.heartbeat("https://blackmagic.app/", "phone-a", {
+        acousticObservation: {
+          pulseId: `pulse-${index}`,
+          detectedAtHostEpochMs: 10_006 + index * 1_000,
+          amplitude: 0.3,
+          confidence: 0.8,
+          clockUncertaintyMs: 2,
+        },
+      });
+    }
+
+    const state = registry.state("https://blackmagic.app/");
+    const host = state.devices.find((device) => device.deviceId === "host");
+    const phone = state.devices.find((device) => device.deviceId === "phone-a");
+
+    expect(host?.acousticPulses?.map((pulse) => pulse.id)).toEqual([
+      "pulse-2",
+      "pulse-3",
+      "pulse-4",
+      "pulse-5",
+      "pulse-6",
+      "pulse-7",
+      "pulse-8",
+      "pulse-9",
+    ]);
+    expect(phone?.acousticObservations?.map((observation) => observation.pulseId)).toEqual([
+      "pulse-2",
+      "pulse-3",
+      "pulse-4",
+      "pulse-5",
+      "pulse-6",
+      "pulse-7",
+      "pulse-8",
+      "pulse-9",
+    ]);
+    expect(state.ranges).toEqual([
+      expect.objectContaining({
+        from: "host",
+        to: "phone-a",
+        samplesUsed: 8,
+        meters: 2.06,
+      }),
+    ]);
+  });
+
   test("prunes stale non-host phones while keeping an active host", () => {
     let now = 1_000;
     const registry = createSessionRegistry({ now: () => now, staleAfterMs: 5_000 });

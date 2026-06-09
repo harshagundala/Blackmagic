@@ -36,8 +36,8 @@ The current repository keeps that provider seam explicit through `src/lib/realti
 The deployed V1 now also exposes polling endpoints:
 
 - `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
-- `/api/session/heartbeat`: publishes low-rate sensor, clock quality, audio-frame timestamp, acoustic pulse, and acoustic observation summaries.
-- `/api/session/state`: reads active room devices, prunes stale phones, and derives acoustic range hints from matched pulse/observation metadata.
+- `/api/session/heartbeat`: publishes low-rate sensor, clock quality, audio-frame timestamp, latest acoustic pulse, and latest acoustic observation summaries.
+- `/api/session/state`: reads active room devices, prunes stale phones, preserves bounded acoustic pulse/observation histories, and derives acoustic range hints from matched pulse metadata.
 
 The room API is backed by a `SessionStore` abstraction. With `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, it stores host claims and device heartbeats in Upstash Redis over REST, which matches Vercel Marketplace's current Redis path. Without those variables, it falls back to an in-memory store for local development and demos.
 
@@ -67,6 +67,8 @@ The first detector is now a normalized matched filter over a rolling local audio
 
 The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. Worklet chunks also feed a streaming chirp matcher immediately when a host pulse is active; if worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
 
+The session layer now treats pulses and observations as histories, not a single mutable fact. Each device keeps a bounded recent sequence of sanitized acoustic pulses or pulse observations keyed by pulse id. Room ranging first reconstructs each raw pulse/observation delay in host time, then groups by device pair, rejects low-confidence/outlier samples, confidence-weights the remaining distances, and returns `pulseIds`, `samplesUsed`, timing uncertainty, distance uncertainty, and the latest observed host timestamp. This is the beginning of the reconciliation path needed for meeting audio: network transport can lag, but the metadata still preserves when the audio event happened.
+
 ## Active Pulse Ranging
 
 The current V1 range path is intentionally conservative:
@@ -75,5 +77,6 @@ The current V1 range path is intentionally conservative:
 2. The host publishes the pulse id, intended host epoch, start frequency, end frequency, and duration through the normal heartbeat.
 3. A peer that matches the pulse template inside its recent audio sample window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
 4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
+5. Repeated observations for the same phone pair are aggregated into one range with `samplesUsed`, contributing `pulseIds`, and outlier-aware confidence.
 
 This is not yet the final detector. The next detector should move more matching work into the worklet, adapt chirp parameters to device response, and add GCC-PHAT-style cross-correlation over longer rolling history.
