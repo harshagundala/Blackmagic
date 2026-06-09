@@ -43,6 +43,8 @@ export type SessionStoreOptions = {
 };
 
 export type SessionEnvironment = Readonly<{
+  KV_REST_API_URL?: string;
+  KV_REST_API_TOKEN?: string;
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
   [key: string]: string | undefined;
@@ -157,17 +159,38 @@ export function createSessionStoreFromEnvironment(
   env: SessionEnvironment = process.env,
   options: SessionStoreOptions = {},
 ): SessionStore {
-  if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+  const credentials = redisRestCredentials(env);
+  if (credentials) {
     return createRedisSessionStore(
       createUpstashRestRedisClient({
-        url: env.UPSTASH_REDIS_REST_URL,
-        token: env.UPSTASH_REDIS_REST_TOKEN,
+        url: credentials.url,
+        token: credentials.token,
       }),
       options,
     );
   }
 
   return createMemorySessionStore(options);
+}
+
+export function redisRestCredentials(env: SessionEnvironment = process.env) {
+  if (env.KV_REST_API_URL && env.KV_REST_API_TOKEN) {
+    return {
+      url: env.KV_REST_API_URL,
+      token: env.KV_REST_API_TOKEN,
+      source: "vercel-marketplace-kv" as const,
+    };
+  }
+
+  if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+    return {
+      url: env.UPSTASH_REDIS_REST_URL,
+      token: env.UPSTASH_REDIS_REST_TOKEN,
+      source: "upstash-rest" as const,
+    };
+  }
+
+  return null;
 }
 
 export function createUpstashRestRedisClient({

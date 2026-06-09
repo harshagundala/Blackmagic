@@ -114,6 +114,12 @@ describe("session stores", () => {
         UPSTASH_REDIS_REST_TOKEN: "secret",
       }).kind,
     ).toBe("redis");
+    expect(
+      createSessionStoreFromEnvironment({
+        KV_REST_API_URL: "https://example.upstash.io",
+        KV_REST_API_TOKEN: "secret",
+      }).kind,
+    ).toBe("redis");
   });
 });
 

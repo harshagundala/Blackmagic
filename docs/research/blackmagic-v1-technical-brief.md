@@ -38,8 +38,9 @@ The deployed V1 now also exposes polling endpoints:
 - `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
 - `/api/session/heartbeat`: publishes low-rate sensor, clock quality, audio-frame timestamp, latest acoustic pulse, and latest acoustic observation summaries.
 - `/api/session/state`: reads active room devices, prunes stale phones, preserves bounded acoustic pulse/observation histories, and derives acoustic range hints from matched pulse metadata.
+- `/api/session/readiness`: reports whether production room state is backed by durable Redis or degraded to process-local memory.
 
-The room API is backed by a `SessionStore` abstraction. With `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, it stores host claims and device heartbeats in Upstash Redis over REST, which matches Vercel Marketplace's current Redis path. Without those variables, it falls back to an in-memory store for local development and demos.
+The room API is backed by a `SessionStore` abstraction. With Vercel Marketplace Redis env (`KV_REST_API_URL` and `KV_REST_API_TOKEN`), it stores host claims and device heartbeats in Upstash Redis over REST. The older direct Upstash env names are still accepted for manual setups. Without durable Redis variables, it falls back to an in-memory store for local development and demos.
 
 This is intentionally a stepping stone. Durable Redis-backed polling makes room state independent of a single serverless runtime, but production rooms should still move to realtime pub/sub transport so nearby phones receive presence, timing, and calibration updates with lower latency.
 

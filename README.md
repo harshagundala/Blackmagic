@@ -10,6 +10,7 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, offset, jitter, best RTT, max error, and uncertainty.
 - URL-based room claim: first device is host, later devices are nearby phones.
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
+- Storage readiness endpoint at `/api/session/readiness` so production can prove whether room state is durable Redis or degraded in-memory.
 - Active acoustic pulse history: devices take deterministic host-clock turns publishing scheduled ultrasonic-ish pulses, peers run matched detection over a rolling audio sample window, report host-aligned observations, and room state aggregates repeated pulse IDs into pairwise meter ranges with sample counts and uncertainty.
 - Minimal constellation dots are now layout-driven from acoustic ranges when present, with radial fallback before measurements arrive.
 - Stale hosts are released so the next active device can become host instead of leaving the room pinned forever.
@@ -45,18 +46,14 @@ npm run start
 
 Vercel hosts the app, HTTPS sensor permission surface, URL session pages, and token APIs. Persistent realtime should live in a provider such as Ably, with WebRTC/TURN added for reliable media/data channels. Without `ABLY_API_KEY`, `/api/realtime/config` reports demo mode.
 
-Room presence is server-polled today. In production, set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` from a Vercel Marketplace Redis integration to make host claims and sensor presence durable across serverless instances. Without those variables, the app keeps the local in-memory store for development and demo deployments.
+Room presence is server-polled today. In production, set `KV_REST_API_URL` and `KV_REST_API_TOKEN` from a Vercel Marketplace Redis integration to make host claims and sensor presence durable across serverless instances. Without those variables, the app keeps the local in-memory store for development and demo deployments.
+
+Check `/api/session/readiness` on the deployment before serious multi-phone tests. `status: "ready"` means Redis is active; `status: "degraded"` means production is using process-local memory and room continuity can depend on serverless instance reuse.
 
 Durable polling is still not the final realtime layer. The next step is pushing the same heartbeat/timing payloads over realtime pub/sub so phones see each other with lower latency.
 
-Suggested Vercel Marketplace Redis install after accepting Upstash terms:
+Vercel Marketplace Redis install:
 
 ```bash
-vercel integration add upstash/upstash-kv \
-  --plan free \
-  --name blackmagic-presence \
-  -m primaryRegion=iad1 \
-  -m prodPack=false \
-  -m autoUpgrade=false \
-  -e production -e preview -e development
+vercel integration add upstash/upstash-kv
 ```
