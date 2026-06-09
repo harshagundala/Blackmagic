@@ -65,7 +65,7 @@ For historical audio events, the app maps `sampleIndex / sampleRate` into the ho
 
 The first detector is now a normalized matched filter over a rolling local audio window. The observer synthesizes the expected pulse template from the advertised start frequency, end frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 
-The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. If worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
+The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. Worklet chunks also feed a streaming chirp matcher immediately when a host pulse is active; if worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
 
 ## Active Pulse Ranging
 
@@ -76,4 +76,4 @@ The current V1 range path is intentionally conservative:
 3. A peer that matches the pulse template inside its recent audio sample window publishes an observation with its host-aligned detected time, amplitude, confidence, and clock uncertainty.
 4. The room state derives `meters = propagationMs / 1000 * 343`, carries `distanceUncertaintyMeters` from the clock model, and rejects negative or implausibly late observations.
 
-This is not yet the final detector. The next detector should run matching inside or closer to the worklet, adapt chirp parameters to device response, and add GCC-PHAT-style cross-correlation over longer rolling history.
+This is not yet the final detector. The next detector should move more matching work into the worklet, adapt chirp parameters to device response, and add GCC-PHAT-style cross-correlation over longer rolling history.

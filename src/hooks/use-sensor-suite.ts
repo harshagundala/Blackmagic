@@ -19,7 +19,14 @@ import {
   type ClockModel,
 } from "@/lib/timing/clock-sync";
 import type { AudioPulseWindow } from "@/lib/calibration/pulse";
-import { RollingSampleBuffer } from "@/lib/acoustics/rolling-buffer";
+import {
+  RollingSampleBuffer,
+  type RollingSampleWindow,
+} from "@/lib/acoustics/rolling-buffer";
+import {
+  StreamingPulseMatcher,
+} from "@/lib/acoustics/streaming-pulse-matcher";
+import type { AcousticPulse } from "@/lib/session/registry";
 
 type SensorState = "idle" | "active" | "blocked";
 
@@ -56,23 +63,27 @@ const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
 const ANALYSER_WINDOW_SAMPLES = 4096;
 const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
+const STREAMING_MATCH_MAX_LATE_MS = 45;
 
 type PermissionEventConstructor = {
   requestPermission?: () => Promise<"granted" | "denied" | "default">;
 };
 
-export function useSensorSuite() {
+export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const [snapshot, setSnapshot] = useState<SensorSnapshot>(idleSnapshot);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioWorkletRef = useRef<AudioWorkletNode | null>(null);
   const rollingAudioRef = useRef<RollingSampleBuffer | null>(null);
+  const streamingMatcherRef = useRef<StreamingPulseMatcher | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
   const clockSyncRunRef = useRef(0);
   const motionActiveRef = useRef(false);
   const headingActiveRef = useRef(false);
   const clockExchangesRef = useRef<ClockExchange[]>([]);
+  const clockModelRef = useRef<ClockModel | null>(null);
+  const activePulseRef = useRef<AcousticPulse | null>(activePulse);
 
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
@@ -90,6 +101,8 @@ export function useSensorSuite() {
     audioWorkletRef.current?.disconnect();
     audioWorkletRef.current = null;
     rollingAudioRef.current = null;
+    streamingMatcherRef.current?.clear();
+    streamingMatcherRef.current = null;
     void audioContextRef.current?.close();
     audioContextRef.current = null;
     window.removeEventListener("deviceorientation", handleOrientation);
@@ -97,6 +110,8 @@ export function useSensorSuite() {
     motionActiveRef.current = false;
     headingActiveRef.current = false;
     clockExchangesRef.current = [];
+    clockModelRef.current = null;
+    activePulseRef.current = null;
     setSnapshot(idleSnapshot);
   }, []);
 
@@ -104,14 +119,40 @@ export function useSensorSuite() {
     const syncRun = clockSyncRunRef.current + 1;
     clockSyncRunRef.current = syncRun;
     await requestMotionPermission();
-    await syncClock(setSnapshot, clockExchangesRef);
+    await syncClock(setSnapshot, clockExchangesRef, (clock) => {
+      clockModelRef.current = clock;
+      updateStreamingMatcherPulse(
+        activePulseRef.current,
+        audioContextRef.current,
+        clock,
+        streamingMatcherRef.current,
+      );
+    });
     void warmClockSync(
       setSnapshot,
       clockExchangesRef,
       () => clockSyncRunRef.current === syncRun,
+      (clock) => {
+        clockModelRef.current = clock;
+        updateStreamingMatcherPulse(
+          activePulseRef.current,
+          audioContextRef.current,
+          clock,
+          streamingMatcherRef.current,
+        );
+      },
     );
     clockTimerRef.current = window.setInterval(
-      () => void syncClock(setSnapshot, clockExchangesRef),
+      () =>
+        void syncClock(setSnapshot, clockExchangesRef, (clock) => {
+          clockModelRef.current = clock;
+          updateStreamingMatcherPulse(
+            activePulseRef.current,
+            audioContextRef.current,
+            clock,
+            streamingMatcherRef.current,
+          );
+        }),
       CLOCK_SYNC_INTERVAL_MS,
     );
     window.addEventListener("deviceorientation", handleOrientation);
@@ -141,6 +182,19 @@ export function useSensorSuite() {
       audioContextRef.current = audioContext;
       const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
       rollingAudioRef.current = rollingAudio;
+      const streamingMatcher = new StreamingPulseMatcher({
+        sampleRate: audioContext.sampleRate,
+        historySamples: ROLLING_AUDIO_HISTORY_SAMPLES,
+        minScore: 0.5,
+        minPeakRatio: 2.2,
+      });
+      streamingMatcherRef.current = streamingMatcher;
+      updateStreamingMatcherPulse(
+        activePulseRef.current,
+        audioContext,
+        clockModelRef.current,
+        streamingMatcher,
+      );
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = ANALYSER_WINDOW_SAMPLES;
       const source = audioContext.createMediaStreamSource(stream);
@@ -149,6 +203,17 @@ export function useSensorSuite() {
         audioContext,
         source,
         rollingAudio,
+        streamingMatcher,
+        (window) => {
+          const clock = clockModelRef.current;
+          if (!clock) {
+            return;
+          }
+          setSnapshot((current) => ({
+            ...current,
+            ...audioWindowFromRollingWindow(audioContext, window, clock),
+          }));
+        },
       );
       const samples = new Float32Array(analyser.fftSize);
 
@@ -204,6 +269,15 @@ export function useSensorSuite() {
   }, []);
 
   useEffect(() => stop, [stop]);
+  useEffect(() => {
+    activePulseRef.current = activePulse;
+    updateStreamingMatcherPulse(
+      activePulse,
+      audioContextRef.current,
+      clockModelRef.current,
+      streamingMatcherRef.current,
+    );
+  }, [activePulse]);
 
   return { snapshot, start, stop };
 
@@ -238,6 +312,7 @@ async function requestMotionPermission() {
 async function syncClock(
   setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
   exchangesRef: MutableRefObject<ClockExchange[]>,
+  onClock?: (clock: ClockModel) => void,
 ) {
   try {
     const clientPerfOriginEpochMs = Date.now() - performance.now();
@@ -259,6 +334,7 @@ async function syncClock(
     const estimate = estimateClockOffset(exchange);
     exchangesRef.current = retainClockExchanges(exchangesRef.current, exchange);
     const clock = robustClockModel(exchangesRef.current);
+    onClock?.(clock);
 
     setSnapshot((current) => ({
       ...current,
@@ -275,13 +351,14 @@ async function warmClockSync(
   setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
   exchangesRef: MutableRefObject<ClockExchange[]>,
   isCurrentRun: () => boolean,
+  onClock?: (clock: ClockModel) => void,
 ) {
   for (let index = 0; index < CLOCK_SYNC_WARMUP_COUNT; index += 1) {
     await wait(CLOCK_SYNC_WARMUP_SPACING_MS);
     if (!isCurrentRun()) {
       return;
     }
-    await syncClock(setSnapshot, exchangesRef);
+    await syncClock(setSnapshot, exchangesRef, onClock);
   }
 }
 
@@ -329,6 +406,8 @@ async function startAudioWorkletCapture(
   audioContext: AudioContext,
   source: MediaStreamAudioSourceNode,
   rollingAudio: RollingSampleBuffer,
+  streamingMatcher: StreamingPulseMatcher,
+  onDetectionWindow: (window: RollingSampleWindow) => void,
 ) {
   if (!audioContext.audioWorklet) {
     return null;
@@ -354,16 +433,101 @@ async function startAudioWorkletCapture(
         return;
       }
 
-      rollingAudio.append(
-        new Float32Array(event.data.samples),
+      const samples = new Float32Array(event.data.samples);
+      rollingAudio.append(samples, event.data.startSampleIndex);
+      const detection = streamingMatcher.append(
+        samples,
         event.data.startSampleIndex,
       );
+      if (detection) {
+        const window = streamingMatcher.latestWindow();
+        if (window) {
+          onDetectionWindow(window);
+        }
+      }
     };
     source.connect(node);
     return node;
   } catch {
     return null;
   }
+}
+
+function updateStreamingMatcherPulse(
+  pulse: AcousticPulse | null,
+  audioContext: AudioContext | null,
+  clock: ClockModel | null,
+  matcher: StreamingPulseMatcher | null,
+) {
+  if (!pulse || !audioContext || !clock || !matcher) {
+    matcher?.track(null);
+    return;
+  }
+
+  matcher.track({
+    id: pulse.id,
+    frequencyHz: pulse.frequencyHz,
+    endFrequencyHz: pulse.endFrequencyHz,
+    durationMs: pulse.durationMs,
+    expectedStartSampleIndex: hostEpochMsToSampleIndex(
+      pulse.emittedAtHostEpochMs,
+      audioContext,
+      clock,
+    ),
+    maxLateSamples: Math.ceil(
+      (STREAMING_MATCH_MAX_LATE_MS / 1_000) * audioContext.sampleRate,
+    ),
+  });
+}
+
+function hostEpochMsToSampleIndex(
+  hostEpochMs: number,
+  audioContext: AudioContext,
+  clock: ClockModel,
+) {
+  const outputTimestamp = audioContext.getOutputTimestamp?.();
+  const anchorAudioContextTimeSeconds = validTimestamp(
+    outputTimestamp?.contextTime,
+    audioContext.currentTime,
+  );
+  const anchorPerformanceNowMs = validTimestamp(
+    outputTimestamp?.performanceTime,
+    performance.now(),
+  );
+  const clientPerformanceNowMs =
+    hostEpochMs -
+    (performance.timeOrigin || Date.now() - performance.now()) -
+    clock.offsetMs;
+  const targetAudioContextTimeSeconds =
+    anchorAudioContextTimeSeconds +
+    (clientPerformanceNowMs - anchorPerformanceNowMs) / 1_000;
+
+  return Math.max(
+    0,
+    Math.round(targetAudioContextTimeSeconds * audioContext.sampleRate),
+  );
+}
+
+function audioWindowFromRollingWindow(
+  audioContext: AudioContext,
+  window: RollingSampleWindow,
+  clock: ClockModel,
+): Pick<SensorSnapshot, "audioFrame" | "audioWindow"> {
+  const audioFrame = timestampAudioFrame(audioContext, clock);
+
+  return {
+    audioFrame,
+    audioWindow: {
+      samples: window.samples,
+      sampleRate: audioFrame.sampleRate,
+      startSampleIndex: window.startSampleIndex,
+      anchorAudioContextTimeSeconds: audioFrame.audioContextTimeSeconds,
+      anchorPerformanceNowMs: audioFrame.performanceNowMs,
+      clientPerfOriginEpochMs: audioFrame.clientPerfOriginEpochMs,
+      clockOffsetMs: audioFrame.clockOffsetMs,
+      clockUncertaintyMs: audioFrame.clockUncertaintyMs,
+    },
+  };
 }
 
 function timestampAudioFrame(

@@ -29,8 +29,14 @@ type CalibrationHeartbeat = Pick<
 >;
 
 export function BlackmagicApp() {
-  const sensors = useSensorSuite();
   const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession();
+  const activeHostPulse =
+    role === "phone"
+      ? roomState?.devices.find(
+          (device) => device.deviceId === roomState.hostDeviceId,
+        )?.acousticPulse ?? null
+      : null;
+  const sensors = useSensorSuite(activeHostPulse);
   const [phase, setPhase] = useState<Phase>("arriving");
   const snapshotRef = useRef(sensors.snapshot);
   const calibrationRef = useRef<CalibrationHeartbeat>({});
