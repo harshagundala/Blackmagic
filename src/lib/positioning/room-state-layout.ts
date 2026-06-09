@@ -53,8 +53,13 @@ export function estimateRoomConstellation(
 ): RoomConstellation {
   const participantIds = room.devices.map((device) => device.deviceId);
   const localizationDeviceIds = localizationDeviceIdsFor(room);
-  const ranges = room.ranges.filter((range) =>
+  const localizationReadyRanges = room.ranges.filter((range) =>
     isLocalizationReadyRange(range, localizationDeviceIds),
+  );
+  const ranges = geometricallyConsistentRanges(
+    localizationReadyRanges,
+    participantIds,
+    room.hostDeviceId,
   );
   const distances: PairwiseDistance[] = ranges.map((range) => ({
     from: range.from,
@@ -126,6 +131,78 @@ function localizedDevicesFor(ranges: AcousticRange[]) {
     ids.add(range.to);
   }
   return ids;
+}
+
+const LAYOUT_STRESS_TRUST_THRESHOLD_METERS = 0.35;
+const LAYOUT_STRESS_MIN_IMPROVEMENT_METERS = 0.12;
+
+function geometricallyConsistentRanges(
+  ranges: AcousticRange[],
+  participantIds: string[],
+  anchorId: string,
+) {
+  if (ranges.length < 3 || participantIds.length < 3) {
+    return ranges;
+  }
+
+  let kept = ranges;
+
+  while (kept.length >= 3) {
+    const current = solveRangeStress(participantIds, kept, anchorId);
+    if (current.stress <= LAYOUT_STRESS_TRUST_THRESHOLD_METERS) {
+      return kept;
+    }
+
+    const candidate = [...kept]
+      .map((removedRange) => {
+        const candidateRanges = kept.filter((range) => range !== removedRange);
+        const solve = solveRangeStress(participantIds, candidateRanges, anchorId);
+        return {
+          ranges: candidateRanges,
+          removedWeight: rangeLayoutWeight(removedRange),
+          stress: solve.stress,
+        };
+      })
+      .filter(
+        (item) =>
+          item.stress <=
+          current.stress - LAYOUT_STRESS_MIN_IMPROVEMENT_METERS,
+      )
+      .sort(
+        (a, b) =>
+          a.stress + a.removedWeight * 0.22 -
+            (b.stress + b.removedWeight * 0.22) ||
+          a.removedWeight - b.removedWeight,
+      )[0];
+
+    if (!candidate) {
+      return kept;
+    }
+
+    kept = candidate.ranges;
+  }
+
+  return kept;
+}
+
+function solveRangeStress(
+  participantIds: string[],
+  ranges: AcousticRange[],
+  anchorId: string,
+) {
+  return estimateConstellation(
+    participantIds,
+    ranges.map((range) => ({
+      from: range.from,
+      to: range.to,
+      meters: range.meters,
+      weight: rangeLayoutWeight(range),
+    })),
+    {
+      anchorId,
+      iterations: 450,
+    },
+  );
 }
 
 function applyPerspective(

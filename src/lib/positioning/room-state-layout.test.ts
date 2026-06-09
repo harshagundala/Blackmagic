@@ -332,6 +332,80 @@ describe("room state constellation", () => {
     );
   });
 
+  test("filters weak geometrically impossible ranges before labeling peer distance", () => {
+    const room = makeRoomState({
+      sessionKey: "room",
+      hostDeviceId: "host",
+      updatedAt: 24_000,
+      devices: [
+        {
+          deviceId: "host",
+          joinedAt: 1_000,
+          lastSeenAt: 24_000,
+          role: "host",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-a",
+          joinedAt: 1_500,
+          lastSeenAt: 24_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+        {
+          deviceId: "phone-b",
+          joinedAt: 1_600,
+          lastSeenAt: 24_000,
+          role: "phone",
+          sessionKey: "room",
+        },
+      ],
+      ranges: [
+        acousticRange({
+          from: "host",
+          to: "phone-a",
+          meters: 2,
+          confidence: 0.92,
+          distanceUncertaintyMeters: 0.12,
+          samplesUsed: 8,
+        }),
+        acousticRange({
+          from: "host",
+          to: "phone-b",
+          meters: 2.1,
+          confidence: 0.9,
+          distanceUncertaintyMeters: 0.14,
+          samplesUsed: 8,
+        }),
+        acousticRange({
+          from: "phone-a",
+          to: "phone-b",
+          meters: 7,
+          confidence: 0.28,
+          distanceUncertaintyMeters: 0.9,
+          samplesUsed: 1,
+        }),
+      ],
+    });
+
+    const phoneAnchored = estimateRoomConstellation(room, {
+      perspectiveDeviceId: "phone-a",
+    });
+    const host = phoneAnchored.devices.find((device) => device.deviceId === "host");
+    const phoneB = phoneAnchored.devices.find(
+      (device) => device.deviceId === "phone-b",
+    );
+
+    expect(phoneAnchored.layout.stress).toBeLessThan(0.25);
+    expect(host).toEqual(expect.objectContaining({ distanceMeters: 2 }));
+    expect(phoneB).toEqual(
+      expect.objectContaining({
+        localized: true,
+        distanceMeters: null,
+      }),
+    );
+  });
+
   test("rotates self-centered coordinates by the current phone heading", () => {
     const room = makeRoomState({
       sessionKey: "room",
