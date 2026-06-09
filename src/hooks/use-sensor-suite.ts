@@ -19,19 +19,21 @@ import {
   type ClockModel,
 } from "@/lib/timing/clock-sync";
 import type { AudioPulseWindow } from "@/lib/calibration/pulse";
+import { createSampledToneObservation } from "@/lib/calibration/pulse";
 import {
   RollingSampleBuffer,
   type RollingSampleWindow,
 } from "@/lib/acoustics/rolling-buffer";
 import {
   StreamingPulseMatcher,
+  type StreamingPulseDetection,
 } from "@/lib/acoustics/streaming-pulse-matcher";
 import {
   detectVoiceActivityEvent,
   type VoiceActivityGate,
 } from "@/lib/acoustics/voice-activity";
 import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
-import type { AcousticPulse } from "@/lib/session/registry";
+import type { AcousticObservation, AcousticPulse } from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import {
   idleMotionMetadata,
@@ -50,6 +52,7 @@ export type SensorSnapshot = MotionSensorMetadata & {
   sampleRate: number | null;
   audioFrame: AudioFrameTimestamp | null;
   audioWindow: AudioPulseWindow | null;
+  pulseObservation: AcousticObservation | null;
   voiceEvent: VoiceActivityEvent | null;
   headingDegrees: number | null;
   orientationBetaDegrees: number | null;
@@ -76,6 +79,7 @@ const idleSnapshot: SensorSnapshot = {
   sampleRate: null,
   audioFrame: null,
   audioWindow: null,
+  pulseObservation: null,
   voiceEvent: null,
   headingDegrees: null,
   orientationBetaDegrees: null,
@@ -260,14 +264,21 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         source,
         rollingAudio,
         streamingMatcher,
-        (window) => {
+        (detection, window) => {
           const clock = clockModelRef.current;
           if (!clock) {
             return;
           }
+          const timing = audioWindowFromRollingWindow(audioContext, window, clock);
           setSnapshot((current) => ({
             ...current,
-            ...audioWindowFromRollingWindow(audioContext, window, clock),
+            ...timing,
+            pulseObservation:
+              createPulseObservationFromStreamingDetection({
+                detection,
+                audioWindow: timing.audioWindow,
+                pulse: activePulseRef.current,
+              }) ?? current.pulseObservation,
           }));
         },
       );
@@ -521,7 +532,10 @@ async function startAudioWorkletCapture(
   source: MediaStreamAudioSourceNode,
   rollingAudio: RollingSampleBuffer,
   streamingMatcher: StreamingPulseMatcher,
-  onDetectionWindow: (window: RollingSampleWindow) => void,
+  onDetectionWindow: (
+    detection: StreamingPulseDetection,
+    window: RollingSampleWindow,
+  ) => void,
 ) {
   if (!audioContext.audioWorklet) {
     return null;
@@ -556,7 +570,7 @@ async function startAudioWorkletCapture(
       if (detection) {
         const window = streamingMatcher.latestWindow();
         if (window) {
-          onDetectionWindow(window);
+          onDetectionWindow(detection, window);
         }
       }
     };
@@ -565,6 +579,33 @@ async function startAudioWorkletCapture(
   } catch {
     return null;
   }
+}
+
+function createPulseObservationFromStreamingDetection({
+  detection,
+  audioWindow,
+  pulse,
+}: {
+  detection: StreamingPulseDetection;
+  audioWindow: AudioPulseWindow | null;
+  pulse: AcousticPulse | null;
+}) {
+  if (!audioWindow || !pulse || pulse.id !== detection.pulseId) {
+    return null;
+  }
+
+  return createSampledToneObservation({
+    pulse,
+    detectedSampleIndex: detection.startSampleIndex,
+    sampleRate: audioWindow.sampleRate,
+    anchorAudioContextTimeSeconds: audioWindow.anchorAudioContextTimeSeconds,
+    anchorPerformanceNowMs: audioWindow.anchorPerformanceNowMs,
+    clientPerfOriginEpochMs: audioWindow.clientPerfOriginEpochMs,
+    clockOffsetMs: audioWindow.clockOffsetMs,
+    clockUncertaintyMs: audioWindow.clockUncertaintyMs,
+    amplitude: detection.detection.amplitude,
+    detectionConfidence: detection.detection.confidence,
+  });
 }
 
 function updateStreamingMatcherPulse(

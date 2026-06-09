@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   createMatchedToneObservation,
+  createSampledToneObservation,
   createScheduledAcousticPulse,
   createToneObservation,
 } from "./pulse";
@@ -123,5 +124,40 @@ describe("active acoustic pulse metadata", () => {
       }),
     );
     expect(observation?.confidence).toBeGreaterThan(0.5);
+  });
+
+  test("creates a sample-anchored observation from an already-detected streaming chirp", () => {
+    const pulse = createScheduledAcousticPulse({
+      deviceId: "host-a",
+      sequence: 3,
+      hostEpochNowMs: 20_000,
+      leadMs: 0,
+      durationMs: 12,
+      frequencyHz: 2_000,
+      endFrequencyHz: 3_200,
+    });
+
+    expect(
+      createSampledToneObservation({
+        pulse,
+        detectedSampleIndex: 512_240,
+        sampleRate: 48_000,
+        anchorAudioContextTimeSeconds: 11,
+        anchorPerformanceNowMs: 11_000,
+        clientPerfOriginEpochMs: 0,
+        clockOffsetMs: 12,
+        clockUncertaintyMs: 1.4,
+        amplitude: 0.42,
+        detectionConfidence: 0.86,
+      }),
+    ).toEqual({
+      pulseId: "host-a:3:20000",
+      detectedAtHostEpochMs: 10_683.667,
+      detectedSampleIndex: 512_240,
+      sampleRate: 48_000,
+      amplitude: 0.42,
+      confidence: 0.798,
+      clockUncertaintyMs: 1.4,
+    });
   });
 });

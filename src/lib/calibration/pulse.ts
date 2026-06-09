@@ -57,6 +57,19 @@ export type MatchedToneObservationInput = {
   audioWindow: AudioPulseWindow;
 } & PulseDetectionOptions;
 
+export type SampledToneObservationInput = {
+  pulse: AcousticPulse;
+  detectedSampleIndex: number;
+  sampleRate: number;
+  anchorAudioContextTimeSeconds: number;
+  anchorPerformanceNowMs: number;
+  clientPerfOriginEpochMs: number;
+  clockOffsetMs: number;
+  clockUncertaintyMs: number;
+  amplitude: number;
+  detectionConfidence: number;
+};
+
 export function createScheduledAcousticPulse({
   deviceId,
   sequence,
@@ -161,6 +174,52 @@ export function createMatchedToneObservation({
       3,
     ),
     clockUncertaintyMs: audioWindow.clockUncertaintyMs,
+  };
+}
+
+export function createSampledToneObservation({
+  pulse,
+  detectedSampleIndex,
+  sampleRate,
+  anchorAudioContextTimeSeconds,
+  anchorPerformanceNowMs,
+  clientPerfOriginEpochMs,
+  clockOffsetMs,
+  clockUncertaintyMs,
+  amplitude,
+  detectionConfidence,
+}: SampledToneObservationInput): AcousticObservation | null {
+  if (
+    !Number.isFinite(detectedSampleIndex) ||
+    detectedSampleIndex < 0 ||
+    !Number.isFinite(sampleRate) ||
+    sampleRate <= 0
+  ) {
+    return null;
+  }
+
+  const timestamp = audioSampleTimestamp({
+    sampleIndex: detectedSampleIndex,
+    sampleRate,
+    anchorAudioContextTimeSeconds,
+    anchorPerformanceNowMs,
+    clientPerfOriginEpochMs,
+    clockOffsetMs,
+    clockUncertaintyMs,
+  });
+
+  return {
+    pulseId: pulse.id,
+    detectedAtHostEpochMs: timestamp.hostEstimatedEpochMs,
+    detectedSampleIndex,
+    sampleRate,
+    amplitude: round(Math.min(1, Math.max(0, amplitude)), 3),
+    confidence: round(
+      observationConfidence(amplitude, clockUncertaintyMs) *
+        Math.max(0, Math.min(1, detectionConfidence)),
+      3,
+    ),
+    clockUncertaintyMs,
   };
 }
 

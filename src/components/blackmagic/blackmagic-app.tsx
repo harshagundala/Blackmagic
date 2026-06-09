@@ -190,13 +190,16 @@ export function BlackmagicApp() {
       return;
     }
 
-    const observation = maybeCreateObservation(
-      pulse,
-      sensors.snapshot,
-      observedPulseIdRef.current,
-    );
+    const observation =
+      sensors.snapshot.pulseObservation?.pulseId === pulse.id
+        ? sensors.snapshot.pulseObservation
+        : maybeCreateObservation(
+            pulse,
+            sensors.snapshot,
+            observedPulseIdRef.current,
+          );
 
-    if (!observation) {
+    if (!observation || observation.pulseId === observedPulseIdRef.current) {
       return;
     }
 
