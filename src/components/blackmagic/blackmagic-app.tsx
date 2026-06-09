@@ -131,7 +131,6 @@ export function BlackmagicApp() {
         deviceId,
         sequence: turn.sequence,
         hostEpochNowMs,
-        audioFrame: snapshotRef.current.audioFrame,
         leadMs: turn.pulseEmittedAtHostEpochMs - hostEpochNowMs,
         durationMs: turn.pulseDurationMs,
       });

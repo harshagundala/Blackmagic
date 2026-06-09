@@ -8,18 +8,13 @@ import {
 import { synthesizePulseTemplate } from "../acoustics/pulse-detector";
 
 describe("active acoustic pulse metadata", () => {
-  test("schedules a future host-aligned pulse with a stable id", () => {
+  test("schedules a future host-aligned pulse without claiming a microphone sample anchor", () => {
     expect(
       createScheduledAcousticPulse({
         deviceId: "host-a",
         sequence: 7,
         hostEpochNowMs: 20_000,
         leadMs: 2_200,
-        audioFrame: {
-          sampleIndex: 480_000,
-          sampleRate: 48_000,
-          hostEstimatedEpochMs: 20_000,
-        },
       }),
     ).toEqual({
       id: "host-a:7:22200",
@@ -27,8 +22,6 @@ describe("active acoustic pulse metadata", () => {
       durationMs: 48,
       frequencyHz: 17_200,
       endFrequencyHz: 19_200,
-      emittedSampleIndex: 585_600,
-      sampleRate: 48_000,
     });
   });
 

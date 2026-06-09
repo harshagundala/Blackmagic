@@ -28,7 +28,6 @@ type SampleAnchor = {
   confidence: number;
   amplitude: number;
   hostEpochMs: number;
-  source: "observation" | "scheduled-pulse";
 };
 
 type RawAcousticRange = AcousticRange & {
@@ -142,24 +141,16 @@ function deriveReciprocalRange(
   const secondDeviceObservations =
     observationsByDevice.get(second.device.deviceId) ?? new Map();
   const firstSelfAnchor = sampleAnchorFor({
-    pulse: first.pulse,
     observation: firstDeviceObservations.get(first.pulse.id),
-    allowScheduledPulseAnchor: true,
   });
   const secondHeardByFirstAnchor = sampleAnchorFor({
-    pulse: second.pulse,
     observation: firstDeviceObservations.get(second.pulse.id),
-    allowScheduledPulseAnchor: false,
   });
   const firstHeardBySecondAnchor = sampleAnchorFor({
-    pulse: first.pulse,
     observation: secondDeviceObservations.get(first.pulse.id),
-    allowScheduledPulseAnchor: false,
   });
   const secondSelfAnchor = sampleAnchorFor({
-    pulse: second.pulse,
     observation: secondDeviceObservations.get(second.pulse.id),
-    allowScheduledPulseAnchor: true,
   });
 
   if (
@@ -219,13 +210,9 @@ function deriveReciprocalRange(
 }
 
 function sampleAnchorFor({
-  pulse,
   observation,
-  allowScheduledPulseAnchor,
 }: {
-  pulse: AcousticPulse;
   observation: AcousticObservation | undefined;
-  allowScheduledPulseAnchor: boolean;
 }): SampleAnchor | null {
   if (
     observation &&
@@ -238,22 +225,6 @@ function sampleAnchorFor({
       confidence: observation.confidence,
       amplitude: observation.amplitude,
       hostEpochMs: observation.detectedAtHostEpochMs,
-      source: "observation",
-    };
-  }
-
-  if (
-    allowScheduledPulseAnchor &&
-    isUsableSampleIndex(pulse.emittedSampleIndex) &&
-    isUsableSampleRate(pulse.sampleRate)
-  ) {
-    return {
-      sampleIndex: Math.round(pulse.emittedSampleIndex),
-      sampleRate: pulse.sampleRate,
-      confidence: 0.52,
-      amplitude: 0.18,
-      hostEpochMs: pulse.emittedAtHostEpochMs,
-      source: "scheduled-pulse",
     };
   }
 
@@ -278,12 +249,9 @@ function compatibleSampleRates(left: number, right: number) {
 }
 
 function reciprocalTimingUncertaintyMs(anchors: SampleAnchor[]) {
-  const sampleQuantizationMs = Math.max(
+  return Math.max(
     ...anchors.map((anchor) => 1_000 / anchor.sampleRate),
   );
-  const scheduledAnchorPenaltyMs =
-    anchors.filter((anchor) => anchor.source === "scheduled-pulse").length * 2;
-  return sampleQuantizationMs + scheduledAnchorPenaltyMs;
 }
 
 function reciprocalRangeConfidence(anchors: SampleAnchor[]) {
@@ -292,13 +260,8 @@ function reciprocalRangeConfidence(anchors: SampleAnchor[]) {
     1,
     Math.max(0, average(anchors.map((anchor) => anchor.amplitude))) / 0.28,
   );
-  const scheduledPenalty = anchors.reduce(
-    (score, anchor) => score * (anchor.source === "scheduled-pulse" ? 0.72 : 1),
-    1,
-  );
-
   return round(
-    Math.max(0, Math.min(1, confidenceMean * amplitudeScore * scheduledPenalty)),
+    Math.max(0, Math.min(1, confidenceMean * amplitudeScore)),
     3,
   );
 }

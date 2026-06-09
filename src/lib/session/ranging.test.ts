@@ -112,7 +112,7 @@ describe("acoustic room ranging", () => {
     expect(deriveAcousticRanges(devices)).toEqual([]);
   });
 
-  test("can use scheduled sample-domain emission anchors until self-chirp detections arrive", () => {
+  test("rejects scheduled emission anchors until self-chirp detections arrive", () => {
     const timeOfFlightSamples = 280;
     const turnaroundSamples = 36_000;
     const hostPulse = pulse("host-pulse", 10_000, {
@@ -144,14 +144,7 @@ describe("acoustic room ranging", () => {
       ],
     });
 
-    expect(deriveAcousticRanges(devices)).toEqual([
-      expect.objectContaining({
-        from: "host",
-        to: "phone-a",
-        pulseIds: ["host-pulse", "phone-pulse"],
-        meters: 2,
-      }),
-    ]);
+    expect(deriveAcousticRanges(devices)).toEqual([]);
   });
 
   test("does not derive ranges from one-way host timestamp observations", () => {
