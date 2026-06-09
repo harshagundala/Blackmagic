@@ -61,6 +61,18 @@ describe("session registry", () => {
         frequencyHz: 17_200,
         endFrequencyHz: 19_200,
       },
+      voiceEvent: {
+        id: "voice-phone-a",
+        detectedAtHostEpochMs: 10_250,
+        audioContextTimeSeconds: 10.2,
+        sampleIndex: 489_600,
+        sampleRate: 48_000,
+        audioLevel: 0.08,
+        confidence: 0.82,
+        clockOffsetMs: 2,
+        clockUncertaintyMs: 6,
+        clockQuality: 0.92,
+      },
     });
 
     expect(state.devices).toEqual([
@@ -91,6 +103,55 @@ describe("session registry", () => {
           clockSamplesUsed: 5,
           clockOutliersRejected: 1,
         }),
+        voiceEvent: expect.objectContaining({
+          id: "voice-phone-a",
+          sampleIndex: 489_600,
+          detectedAtHostEpochMs: 10_250,
+        }),
+      }),
+    ]);
+  });
+
+  test("reconciles near-simultaneous voice events into room audio events", () => {
+    const registry = createSessionRegistry({ now: () => 20_000 });
+
+    registry.claim("https://blackmagic.app/", "host");
+    registry.claim("https://blackmagic.app/", "phone-a");
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      voiceEvent: {
+        id: "voice-host",
+        detectedAtHostEpochMs: 18_000,
+        audioContextTimeSeconds: 20,
+        sampleIndex: 960_000,
+        sampleRate: 48_000,
+        audioLevel: 0.09,
+        confidence: 0.85,
+        clockOffsetMs: 1,
+        clockUncertaintyMs: 3,
+        clockQuality: 0.95,
+      },
+    });
+    const state = registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      voiceEvent: {
+        id: "voice-phone-a",
+        detectedAtHostEpochMs: 18_008,
+        audioContextTimeSeconds: 20.008,
+        sampleIndex: 960_384,
+        sampleRate: 48_000,
+        audioLevel: 0.07,
+        confidence: 0.78,
+        clockOffsetMs: 2,
+        clockUncertaintyMs: 4,
+        clockQuality: 0.94,
+      },
+    });
+
+    expect(state.audioEvents).toEqual([
+      expect.objectContaining({
+        arrivalLeaderDeviceId: "host",
+        observedDeviceIds: ["host", "phone-a"],
+        startedAtHostEpochMs: 18_000,
+        endedAtHostEpochMs: 18_008,
       }),
     ]);
   });

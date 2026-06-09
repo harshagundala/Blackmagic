@@ -26,7 +26,12 @@ import {
 import {
   StreamingPulseMatcher,
 } from "@/lib/acoustics/streaming-pulse-matcher";
+import {
+  detectVoiceActivityEvent,
+  type VoiceActivityGate,
+} from "@/lib/acoustics/voice-activity";
 import type { AcousticPulse } from "@/lib/session/registry";
+import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 
 type SensorState = "idle" | "active" | "blocked";
 
@@ -39,6 +44,7 @@ export type SensorSnapshot = {
   sampleRate: number | null;
   audioFrame: AudioFrameTimestamp | null;
   audioWindow: AudioPulseWindow | null;
+  voiceEvent: VoiceActivityEvent | null;
   headingDegrees: number | null;
   locationAccuracyMeters: number | null;
   clock: ClockModel | null;
@@ -53,6 +59,7 @@ const idleSnapshot: SensorSnapshot = {
   sampleRate: null,
   audioFrame: null,
   audioWindow: null,
+  voiceEvent: null,
   headingDegrees: null,
   locationAccuracyMeters: null,
   clock: null,
@@ -84,6 +91,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const clockExchangesRef = useRef<ClockExchange[]>([]);
   const clockModelRef = useRef<ClockModel | null>(null);
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
+  const voiceGateRef = useRef<VoiceActivityGate>({
+    open: false,
+    lastEventHostEpochMs: null,
+  });
 
   const trackPulse = useCallback((pulse: AcousticPulse | null) => {
     activePulseRef.current = pulse;
@@ -122,6 +133,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     clockExchangesRef.current = [];
     clockModelRef.current = null;
     activePulseRef.current = null;
+    voiceGateRef.current = { open: false, lastEventHostEpochMs: null };
     setSnapshot(idleSnapshot);
   }, []);
 
@@ -234,17 +246,25 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
           sum += sample * sample;
         }
         const micLevel = Math.sqrt(sum / samples.length);
+        const timing = timestampCurrentAudioWindow(
+          audioContext,
+          samples,
+          rollingAudioRef.current,
+          clockModelRef.current,
+        );
+        const voiceActivity = detectVoiceActivityEvent({
+          gate: voiceGateRef.current,
+          micLevel,
+          frame: timing.audioFrame,
+        });
+        voiceGateRef.current = voiceActivity.gate;
         setSnapshot((current) => ({
           ...current,
           mic: "active",
           micLevel,
           sampleRate: audioContext.sampleRate,
-          ...timestampCurrentAudioWindow(
-            audioContext,
-            samples,
-            rollingAudioRef.current,
-            current.clock,
-          ),
+          ...timing,
+          voiceEvent: voiceActivity.event ?? current.voiceEvent,
           motion: motionActiveRef.current ? "active" : current.motion,
           heading: headingActiveRef.current ? "active" : current.heading,
         }));

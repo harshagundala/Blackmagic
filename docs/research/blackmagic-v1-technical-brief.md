@@ -24,7 +24,10 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 - MDN DeviceOrientation permission model: https://developer.mozilla.org/en-US/docs/Web/API/DeviceOrientationEvent/requestPermission_static
 - W3C High Resolution Time monotonic clock and `performance.timeOrigin`: https://w3c.github.io/hr-time/
 - Web Audio API `AudioContext.getOutputTimestamp()` context/performance-time bridge: https://webaudio.github.io/web-audio-api/#dom-audiocontext-getoutputtimestamp
+- AudioWorklet `currentFrame` sample-frame counter: https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletGlobalScope/currentFrame
 - NTPv4 offset, delay, jitter, and clock-filter framing: https://datatracker.ietf.org/doc/html/rfc5905
+- GCC-PHAT / TDOA speaker-localization baseline: https://www.isca-archive.org/interspeech_2021/salvati21_interspeech.pdf
+- rVAD unsupervised robust voice-activity direction: https://arxiv.org/abs/1906.03588
 - Vercel realtime guidance and WebSocket limitation: https://vercel.com/docs/solutions/realtime and https://vercel.com/docs/limits#websockets
 
 ## Realtime Architecture Decision
@@ -71,6 +74,8 @@ The first detector is now a normalized matched filter over a rolling local audio
 The capture path now prefers an `AudioWorkletProcessor` that posts render-quantum sample chunks tagged with `currentFrame` into a one-second rolling buffer. The Web Audio spec's default render quantum is 128 sample frames, so this is much closer to continuous sample history than animation-frame polling. Worklet chunks also feed a streaming chirp matcher immediately when a peer pulse is active; if worklet registration fails, the app falls back to the analyser snapshot path and keeps the same `audioWindow` interface.
 
 The session layer now treats pulses and observations as histories, not a single mutable fact. Each device keeps a bounded recent sequence of sanitized acoustic pulses or pulse observations keyed by pulse id. Room ranging first reconstructs each raw pulse/observation delay in host time, then groups by device pair, rejects low-confidence/outlier samples, confidence-weights the remaining distances, and returns `pulseIds`, `samplesUsed`, timing uncertainty, distance uncertainty, and the latest observed host timestamp. This is the beginning of the reconciliation path needed for meeting audio: network transport can lag, but the metadata still preserves when the audio event happened.
+
+The deployed app now also has a speech-event reconciliation ledger. Each phone can emit a lightweight voice/energy edge with sample index, audio context time, host-aligned detection time, audio level, confidence, and clock uncertainty. The room state keeps bounded per-device voice histories and projects near-simultaneous detections into reconciled audio events with arrival leader, participating devices, timing spread, observations, and confidence. This does not yet stream full speech audio or solve diarization; it creates the real-time metadata spine needed to later run GCC-PHAT/cross-correlation over retained audio windows and decide where a spoken event arrived first.
 
 The live calibration loop now rotates emitters across all active room devices using deterministic host-clock slots. Each phone can independently compute the same upcoming emitter from room membership and host time; only that emitter schedules the chirp, while every other phone tracks the currently valid peer pulse. This makes non-host phone-to-phone ranges possible without exposing any extra controls.
 

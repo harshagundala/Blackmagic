@@ -1,4 +1,9 @@
 import type { AudioFrameTimestamp } from "@/lib/timing/clock-sync";
+import {
+  deriveReconciledAudioEvents,
+  type ReconciledAudioEvent,
+  type VoiceActivityEvent,
+} from "./audio-events";
 import { deriveAcousticRanges, type AcousticRange } from "./ranging";
 
 export type SessionRole = "host" | "phone";
@@ -47,6 +52,8 @@ export type DeviceHeartbeat = {
   acousticPulses?: AcousticPulse[] | null;
   acousticObservation?: AcousticObservation | null;
   acousticObservations?: AcousticObservation[] | null;
+  voiceEvent?: VoiceActivityEvent | null;
+  voiceEvents?: VoiceActivityEvent[] | null;
   motion?: SensorState;
   heading?: SensorState;
   location?: SensorState;
@@ -59,6 +66,7 @@ export type RoomState = {
   hostDeviceId: string;
   devices: RoomDevice[];
   ranges: AcousticRange[];
+  audioEvents: ReconciledAudioEvent[];
   updatedAt: number;
 };
 
@@ -169,6 +177,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
           hostDeviceId: "",
           devices: [],
           ranges: [],
+          audioEvents: [],
           updatedAt: timestamp,
         };
       }
@@ -181,6 +190,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         hostDeviceId: record.hostDeviceId,
         devices,
         ranges: deriveAcousticRanges(devices),
+        audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,
       };
     },
@@ -242,6 +252,8 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
       heartbeat.acousticObservation,
     ),
     acousticObservations: null,
+    voiceEvent: sanitizeVoiceActivityEvent(heartbeat.voiceEvent),
+    voiceEvents: null,
     motion: heartbeat.motion,
     heading: heartbeat.heading,
     location: heartbeat.location,
@@ -263,11 +275,17 @@ export function mergeHeartbeat(
     previous?.acousticObservation,
     sanitized.acousticObservation,
   );
+  const voiceEvents = appendVoiceEventHistory(
+    previous?.voiceEvents,
+    previous?.voiceEvent,
+    sanitized.voiceEvent,
+  );
 
   return {
     ...sanitized,
     acousticPulses,
     acousticObservations,
+    voiceEvents,
   };
 }
 
@@ -290,6 +308,14 @@ function appendAcousticObservationHistory(
     next,
     (observation) => observation.pulseId,
   );
+}
+
+function appendVoiceEventHistory(
+  history: VoiceActivityEvent[] | null | undefined,
+  previousLatest: VoiceActivityEvent | null | undefined,
+  next: VoiceActivityEvent | null | undefined,
+) {
+  return appendUniqueHistory(history, previousLatest, next, (event) => event.id);
 }
 
 function appendUniqueHistory<T>(
@@ -435,6 +461,54 @@ function sanitizeAcousticObservation(
     amplitude,
     confidence,
     clockUncertaintyMs: observation.clockUncertaintyMs ?? null,
+  };
+}
+
+function sanitizeVoiceActivityEvent(
+  event: VoiceActivityEvent | null | undefined,
+): VoiceActivityEvent | null {
+  if (!event) {
+    return null;
+  }
+
+  const detectedAtHostEpochMs = finiteNumber(event.detectedAtHostEpochMs);
+  const audioContextTimeSeconds = finiteNumber(event.audioContextTimeSeconds);
+  const sampleIndex = finiteNumber(event.sampleIndex);
+  const sampleRate = finiteNumber(event.sampleRate);
+  const audioLevel = clampNumber(event.audioLevel, 0, 1);
+  const confidence = clampNumber(event.confidence, 0, 1);
+  const clockOffsetMs = finiteNumber(event.clockOffsetMs);
+  const clockUncertaintyMs = nonNegativeNumber(event.clockUncertaintyMs);
+  const clockQuality = clampNumber(event.clockQuality, 0, 1);
+
+  if (
+    typeof event.id !== "string" ||
+    event.id.length === 0 ||
+    detectedAtHostEpochMs === null ||
+    audioContextTimeSeconds === null ||
+    sampleIndex === null ||
+    sampleRate === null ||
+    sampleRate <= 0 ||
+    audioLevel === null ||
+    confidence === null ||
+    confidence <= 0 ||
+    clockOffsetMs === null ||
+    clockUncertaintyMs === null
+  ) {
+    return null;
+  }
+
+  return {
+    id: event.id.slice(0, 80),
+    detectedAtHostEpochMs,
+    audioContextTimeSeconds,
+    sampleIndex: Math.max(0, Math.round(sampleIndex)),
+    sampleRate,
+    audioLevel,
+    confidence,
+    clockOffsetMs,
+    clockUncertaintyMs,
+    clockQuality,
   };
 }
 
