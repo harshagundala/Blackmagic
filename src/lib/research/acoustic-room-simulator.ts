@@ -1,5 +1,9 @@
 import { estimateRoomConstellation } from "../positioning/room-state-layout";
 import { createSessionRegistry, type RoomState } from "../session/registry";
+import {
+  validatePhysicalRoomLocalization,
+  type PhysicalRoomValidationReport,
+} from "./physical-room-validation";
 
 export type SimulatedPhone = {
   deviceId: string;
@@ -32,6 +36,7 @@ export type AcousticRoomSimulationResult = {
   maxRangeErrorMeters: number;
   maxLayoutPairErrorMeters: number;
   maxSourceDistanceErrorMeters: number;
+  validation: PhysicalRoomValidationReport;
 };
 
 const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
@@ -97,6 +102,7 @@ export function simulateAcousticRoom(
 
   const roomState = registry.state(options.roomUrl);
   const constellation = estimateRoomConstellation(roomState);
+  const validation = validatePhysicalRoomLocalization(roomState, constellation);
 
   return {
     roomState,
@@ -111,6 +117,7 @@ export function simulateAcousticRoom(
       speechEvents,
       constellation,
     ),
+    validation,
   };
 }
 
@@ -298,6 +305,15 @@ function heartbeatAt(
   registry.heartbeat(roomUrl, deviceId, {
     mic: "active",
     sampleRate: heartbeat?.sampleRate ?? DEFAULT_SAMPLE_RATE,
+    clockQuality: 0.98,
+    clockOffsetMs: 0,
+    clockUncertaintyMs: 0.8,
+    clockMaxErrorMs: 1.1,
+    clockBestRoundTripMs: 3.2,
+    clockJitterMs: 0.18,
+    clockSamplesUsed: 12,
+    clockOutliersRejected: 0,
+    clockOffsetStabilityMs: 0.2,
     motion: "active",
     motionStability: 0.96,
     ...heartbeat,
