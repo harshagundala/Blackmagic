@@ -24,6 +24,7 @@ import {
   selectUpcomingCalibrationTurn,
 } from "@/lib/calibration/session";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
+import { roomStatePollingIntervalMs } from "@/lib/session/polling";
 import type {
   AcousticObservation,
   AcousticPulse,
@@ -37,9 +38,13 @@ type CalibrationHeartbeat = Pick<
 >;
 
 export function BlackmagicApp() {
-  const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession();
-  const sensors = useSensorSuite();
   const [phase, setPhase] = useState<Phase>("arriving");
+  const { claimReady, deviceId, heartbeat, role, roomState } = useRoomSession({
+    pollIntervalMs: roomStatePollingIntervalMs({
+      listening: phase === "listening",
+    }),
+  });
+  const sensors = useSensorSuite();
   const snapshotRef = useRef(sensors.snapshot);
   const calibrationRef = useRef<CalibrationHeartbeat>({});
   const publishedPulseIdRef = useRef("");

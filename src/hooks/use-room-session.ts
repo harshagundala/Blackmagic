@@ -7,6 +7,7 @@ import type {
   RoomState,
   SessionRole,
 } from "@/lib/session/registry";
+import { IDLE_ROOM_POLL_INTERVAL_MS } from "@/lib/session/polling";
 
 type SessionClaimResponse = {
   role: SessionRole;
@@ -27,7 +28,13 @@ type RoomSession = {
   ) => Promise<void>;
 };
 
-export function useRoomSession(): RoomSession {
+export type RoomSessionOptions = {
+  pollIntervalMs?: number;
+};
+
+export function useRoomSession({
+  pollIntervalMs = IDLE_ROOM_POLL_INTERVAL_MS,
+}: RoomSessionOptions = {}): RoomSession {
   const deviceId = useMemo(() => getOrCreateDeviceId(), []);
   const [role, setRole] = useState<SessionRole | null>(null);
   const [sessionKey, setSessionKey] = useState("");
@@ -76,9 +83,9 @@ export function useRoomSession(): RoomSession {
 
   useEffect(() => {
     void pollState();
-    const timer = window.setInterval(() => void pollState(), 2_000);
+    const timer = window.setInterval(() => void pollState(), pollIntervalMs);
     return () => window.clearInterval(timer);
-  }, [pollState, sessionKey]);
+  }, [pollIntervalMs, pollState, sessionKey]);
 
   const heartbeat = useCallback(
     async (

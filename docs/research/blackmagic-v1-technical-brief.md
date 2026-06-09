@@ -72,7 +72,7 @@ The session layer now treats pulses and observations as histories, not a single 
 
 The live calibration loop now rotates emitters across all active room devices using deterministic host-clock slots. Each phone can independently compute the same upcoming emitter from room membership and host time; only that emitter schedules the chirp, while every other phone tracks the currently valid peer pulse. This makes non-host phone-to-phone ranges possible without exposing any extra controls.
 
-Calibration events now bypass the slow periodic heartbeat path. When a device schedules a chirp or detects a peer chirp, it immediately flushes the latest calibration payload to the room store, then the normal heartbeat continues carrying sensor state and deduped event history. This keeps Redis-backed polling simple while shaving event propagation latency.
+Calibration events now bypass the slow periodic heartbeat path. When a device schedules a chirp or detects a peer chirp, it immediately flushes the latest calibration payload to the room store, then the normal heartbeat continues carrying sensor state and deduped event history. Devices also poll room state faster while listening and relax back before sensors start. This keeps Redis-backed polling simple while shaving event propagation latency.
 
 ## Active Pulse Ranging
 
