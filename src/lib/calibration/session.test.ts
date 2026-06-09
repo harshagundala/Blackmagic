@@ -128,6 +128,56 @@ describe("pairwise calibration session", () => {
       }),
     );
   });
+
+  test("skips pulses already observed by the current phone", () => {
+    const devices: RoomDevice[] = [
+      {
+        ...deviceWithPulse("host", "host:already", 10_200),
+        acousticPulses: [
+          {
+            id: "host:already",
+            emittedAtHostEpochMs: 10_200,
+            durationMs: 48,
+            frequencyHz: 17_200,
+            endFrequencyHz: 19_200,
+          },
+          {
+            id: "host:next",
+            emittedAtHostEpochMs: 10_400,
+            durationMs: 48,
+            frequencyHz: 17_200,
+            endFrequencyHz: 19_200,
+          },
+        ],
+      },
+      {
+        ...deviceWithPulse("phone-a", "phone-a:later", 14_000),
+        acousticObservations: [
+          {
+            pulseId: "host:already",
+            detectedAtHostEpochMs: 10_205,
+            detectedSampleIndex: 480_240,
+            sampleRate: 48_000,
+            amplitude: 0.32,
+            confidence: 0.9,
+            clockUncertaintyMs: 2,
+          },
+        ],
+      },
+    ];
+
+    expect(
+      selectObservablePulse(devices, "phone-a", 10_000, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: "host:next",
+        emittedAtHostEpochMs: 10_400,
+      }),
+    );
+  });
 });
 
 function deviceWithPulse(
