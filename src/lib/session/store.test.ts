@@ -77,6 +77,30 @@ describe("session stores", () => {
     ]);
   });
 
+  test("redis store publishes the next calibration turn from persisted room state", async () => {
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => 100 });
+
+    await store.claim("https://blackmagic.app/", "host");
+    await expect(store.state("https://blackmagic.app/")).resolves.toEqual(
+      expect.objectContaining({ calibrationTurn: null }),
+    );
+
+    await store.claim("https://blackmagic.app/", "phone-a");
+
+    await expect(store.state("https://blackmagic.app/")).resolves.toEqual(
+      expect.objectContaining({
+        calibrationTurn: {
+          emitterId: "host",
+          sequence: 0,
+          slotStartsAtHostEpochMs: 0,
+          pulseEmittedAtHostEpochMs: 3_400,
+          pulseDurationMs: 48,
+        },
+      }),
+    );
+  });
+
   test("redis store releases a stale host across store instances", async () => {
     let now = 1_000;
     const redis = new FakeRedisSessionClient();

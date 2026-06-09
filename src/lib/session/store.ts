@@ -4,6 +4,7 @@ import {
   createSessionRegistry,
   mergeHeartbeat,
   normalizeSessionKey,
+  selectRoomCalibrationTurn,
   type DeviceHeartbeat,
   type RoomDevice,
   type RoomState,
@@ -143,12 +144,15 @@ export function createRedisSessionStore(
 
       await pruneRedisSession(redis, keys, timestamp, staleAfterMs, ttlSeconds);
       const hostDeviceId = (await redis.get(keys.host)) ?? "";
-      const devices = await readRedisDevices(redis, keys);
+      const devices = (await readRedisDevices(redis, keys)).sort(
+        compareDevicesForOutput,
+      );
 
       return {
         sessionKey,
         hostDeviceId: devices.length === 0 ? "" : hostDeviceId,
-        devices: devices.sort(compareDevicesForOutput),
+        devices,
+        calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
         ranges: deriveAcousticRanges(devices),
         audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,

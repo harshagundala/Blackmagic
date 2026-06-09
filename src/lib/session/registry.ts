@@ -7,6 +7,10 @@ import {
   type ReconciledAudioEvent,
   type VoiceActivityEvent,
 } from "./audio-events";
+import {
+  selectUpcomingCalibrationTurn,
+  type LiveCalibrationTurn,
+} from "../calibration/session";
 import { deriveAcousticRanges, type AcousticRange } from "./ranging";
 
 export type SessionRole = "host" | "phone";
@@ -98,6 +102,7 @@ export type RoomState = {
   sessionKey: string;
   hostDeviceId: string;
   devices: RoomDevice[];
+  calibrationTurn: LiveCalibrationTurn | null;
   ranges: AcousticRange[];
   audioEvents: ReconciledAudioEvent[];
   updatedAt: number;
@@ -209,6 +214,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
           sessionKey,
           hostDeviceId: "",
           devices: [],
+          calibrationTurn: null,
           ranges: [],
           audioEvents: [],
           updatedAt: timestamp,
@@ -222,12 +228,23 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         sessionKey,
         hostDeviceId: record.hostDeviceId,
         devices,
+        calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
         ranges: deriveAcousticRanges(devices),
         audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,
       };
     },
   };
+}
+
+export function selectRoomCalibrationTurn(
+  devices: RoomDevice[],
+  hostEpochNowMs: number,
+) {
+  return selectUpcomingCalibrationTurn(
+    devices.map((device) => device.deviceId),
+    hostEpochNowMs,
+  );
 }
 
 function pruneStaleClaims(

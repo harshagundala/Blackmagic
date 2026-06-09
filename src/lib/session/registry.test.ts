@@ -17,6 +17,23 @@ describe("session registry", () => {
     expect(registry.claim("https://blackmagic.app/alpha", "b").role).toBe("host");
   });
 
+  test("publishes the next calibration turn from the room state clock", () => {
+    const registry = createSessionRegistry({ now: () => 100 });
+
+    registry.claim("https://blackmagic.app/", "host");
+    expect(registry.state("https://blackmagic.app/").calibrationTurn).toBeNull();
+
+    registry.claim("https://blackmagic.app/", "phone-a");
+
+    expect(registry.state("https://blackmagic.app/").calibrationTurn).toEqual({
+      emitterId: "host",
+      sequence: 0,
+      slotStartsAtHostEpochMs: 0,
+      pulseEmittedAtHostEpochMs: 3_400,
+      pulseDurationMs: 48,
+    });
+  });
+
   test("tracks active device heartbeats with sensor and timing summaries", () => {
     const registry = createSessionRegistry({ now: () => 10_000 });
 

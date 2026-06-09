@@ -25,7 +25,6 @@ import {
 } from "@/lib/calibration/playback";
 import {
   selectObservablePulse,
-  selectUpcomingCalibrationTurn,
 } from "@/lib/calibration/session";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
@@ -123,10 +122,7 @@ export function BlackmagicApp() {
         return;
       }
 
-      const turn = selectUpcomingCalibrationTurn(
-        roomState.devices.map((device) => device.deviceId),
-        hostEpochNowMs,
-      );
+      const turn = roomState.calibrationTurn;
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
