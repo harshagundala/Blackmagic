@@ -89,6 +89,29 @@ describe("acoustic room ranging", () => {
     expect(deriveAcousticRanges(devices)[0].confidence).toBeGreaterThan(0.45);
   });
 
+  test("rejects contradictory two-sample reciprocal ranges instead of averaging them", () => {
+    const devices = reciprocalDevices({
+      hostPulses: [
+        pulse("host-pulse-1", 10_000),
+        pulse("host-pulse-2", 30_000),
+      ],
+      phonePulses: [
+        pulse("phone-pulse-1", 15_000),
+        pulse("phone-pulse-2", 35_000),
+      ],
+      hostObservations: [
+        ...hostExchangeObservations("1", 100_000, 420, 24_000),
+        ...hostExchangeObservations("2", 300_000, 1_900, 24_000),
+      ],
+      phoneObservations: [
+        ...phoneExchangeObservations("1", 200_000, 420, 24_000),
+        ...phoneExchangeObservations("2", 400_000, 1_900, 24_000),
+      ],
+    });
+
+    expect(deriveAcousticRanges(devices)).toEqual([]);
+  });
+
   test("can use scheduled sample-domain emission anchors until self-chirp detections arrive", () => {
     const timeOfFlightSamples = 280;
     const turnaroundSamples = 36_000;

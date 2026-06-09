@@ -339,20 +339,11 @@ function aggregateRanges(
     groups.set(key, group);
   }
 
-  return [...groups.values()].map((group) => {
-    const sorted = [...group.ranges].sort((a, b) => a.meters - b.meters);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const deviations = sorted
-      .map((item) => Math.abs(item.meters - median.meters))
-      .sort((a, b) => a - b);
-    const medianDeviation = deviations[Math.floor(deviations.length / 2)] ?? 0;
-    const threshold = Math.max(0.5, medianDeviation * 3);
-    const inliers = group.ranges.filter(
-      (item) =>
-        item.confidence >= 0.2 &&
-        Math.abs(item.meters - median.meters) <= threshold,
-    );
-    const kept = inliers.length > 0 ? inliers : group.ranges;
+  return [...groups.values()].flatMap((group) => {
+    const kept = consensusRanges(group.ranges);
+    if (kept.length === 0) {
+      return [];
+    }
     const weightSum = kept.reduce(
       (sum, item) => sum + Math.max(0.001, item.confidence),
       0,
@@ -398,6 +389,46 @@ function aggregateRanges(
       observedAtHostEpochMs: latest.observedAtHostEpochMs,
     };
   });
+}
+
+function consensusRanges(ranges: RawAcousticRange[]) {
+  const candidates = ranges.filter((range) => range.confidence >= 0.2);
+  if (candidates.length <= 1) {
+    return candidates;
+  }
+
+  const sorted = [...candidates].sort((a, b) => a.meters - b.meters);
+  const tolerance = rangeConsensusTolerance(sorted);
+
+  if (sorted.length === 2) {
+    return sorted[1].meters - sorted[0].meters <= tolerance ? sorted : [];
+  }
+
+  const centerMeters = median(sorted.map((range) => range.meters));
+  const deviations = sorted
+    .map((item) => Math.abs(item.meters - centerMeters))
+    .sort((a, b) => a - b);
+  const medianDeviation = median(deviations);
+  const threshold = Math.max(tolerance, medianDeviation * 3);
+
+  return sorted.filter(
+    (item) => Math.abs(item.meters - centerMeters) <= threshold,
+  );
+}
+
+function rangeConsensusTolerance(ranges: RawAcousticRange[]) {
+  const uncertaintyMeters =
+    ranges.reduce((sum, range) => sum + range.distanceUncertaintyMeters, 0) /
+    ranges.length;
+  return Math.max(0.85, uncertaintyMeters * 3);
+}
+
+function median(values: number[]) {
+  const middle = Math.floor(values.length / 2);
+  if (values.length % 2 === 1) {
+    return values[middle];
+  }
+  return (values[middle - 1] + values[middle]) / 2;
 }
 
 function canonicalPair(
