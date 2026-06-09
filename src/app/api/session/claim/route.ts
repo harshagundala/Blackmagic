@@ -1,4 +1,4 @@
-import { getSessionRegistry } from "@/lib/session/server-registry";
+import { getSessionStore } from "@/lib/session/server-registry";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
@@ -10,6 +10,6 @@ export async function POST(request: Request) {
     return Response.json({ error: "missing_device_or_url" }, { status: 400 });
   }
 
-  const claim = getSessionRegistry().claim(body.url, body.deviceId);
+  const claim = await getSessionStore().claim(body.url, body.deviceId);
   return Response.json(claim);
 }

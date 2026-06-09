@@ -45,7 +45,7 @@ export type SessionRegistryOptions = {
   staleAfterMs?: number;
 };
 
-const DEFAULT_STALE_AFTER_MS = 12_000;
+export const DEFAULT_STALE_AFTER_MS = 12_000;
 
 export function createSessionRegistry(options: SessionRegistryOptions = {}) {
   const sessions = new Map<string, SessionRecord>();
@@ -188,7 +188,7 @@ export function normalizeSessionKey(url: string) {
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "") || "/"}`;
 }
 
-function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
+export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
   return {
     mic: heartbeat.mic,
     micLevel: clampNumber(heartbeat.micLevel, 0, 1),

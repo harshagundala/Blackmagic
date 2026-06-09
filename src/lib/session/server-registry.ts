@@ -1,10 +1,11 @@
-import { createSessionRegistry, type SessionRegistry } from "./registry";
+import { createSessionStoreFromEnvironment, type SessionStore } from "./store";
 
 const globalForBlackmagic = globalThis as typeof globalThis & {
-  __blackmagicSessionRegistry?: SessionRegistry;
+  __blackmagicSessionStore?: SessionStore;
 };
 
-export function getSessionRegistry() {
-  globalForBlackmagic.__blackmagicSessionRegistry ??= createSessionRegistry();
-  return globalForBlackmagic.__blackmagicSessionRegistry;
+export function getSessionStore() {
+  globalForBlackmagic.__blackmagicSessionStore ??=
+    createSessionStoreFromEnvironment();
+  return globalForBlackmagic.__blackmagicSessionStore;
 }

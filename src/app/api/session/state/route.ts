@@ -1,4 +1,4 @@
-import { getSessionRegistry } from "@/lib/session/server-registry";
+import { getSessionStore } from "@/lib/session/server-registry";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -8,5 +8,5 @@ export async function GET(request: Request) {
     return Response.json({ error: "missing_url" }, { status: 400 });
   }
 
-  return Response.json(getSessionRegistry().state(sessionUrl));
+  return Response.json(await getSessionStore().state(sessionUrl));
 }

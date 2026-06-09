@@ -1,4 +1,4 @@
-import { getSessionRegistry } from "@/lib/session/server-registry";
+import { getSessionStore } from "@/lib/session/server-registry";
 import type { DeviceHeartbeat } from "@/lib/session/registry";
 
 export async function POST(request: Request) {
@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "missing_device_or_url" }, { status: 400 });
   }
 
-  const state = getSessionRegistry().heartbeat(
+  const state = await getSessionStore().heartbeat(
     body.url,
     body.deviceId,
     body.heartbeat,

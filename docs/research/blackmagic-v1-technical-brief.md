@@ -29,13 +29,15 @@ Vercel hosts the Next.js app, HTTPS sensor permission surface, URL session route
 
 The current repository keeps that provider seam explicit through `src/lib/realtime/contracts.ts` and `/api/realtime/config`. Without provider credentials the app runs in demo mode and exercises the same calibration/positioning code paths.
 
-The deployed V1 now also exposes providerless polling endpoints:
+The deployed V1 now also exposes polling endpoints:
 
 - `/api/session/claim`: first device at a URL becomes host; subsequent devices become phones.
 - `/api/session/heartbeat`: publishes low-rate sensor, clock quality, and audio-frame timestamp summaries.
 - `/api/session/state`: reads active room devices and prunes stale phones.
 
-This is intentionally a stepping stone. The API contract is useful, but production rooms should move to durable realtime transport so room state is not tied to a single serverless runtime.
+The room API is backed by a `SessionStore` abstraction. With `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, it stores host claims and device heartbeats in Upstash Redis over REST, which matches Vercel Marketplace's current Redis path. Without those variables, it falls back to an in-memory store for local development and demos.
+
+This is intentionally a stepping stone. Durable Redis-backed polling makes room state independent of a single serverless runtime, but production rooms should still move to realtime pub/sub transport so nearby phones receive presence, timing, and calibration updates with lower latency.
 
 ## Timestamp Reconciliation
 
