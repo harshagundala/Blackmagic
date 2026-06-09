@@ -9,6 +9,13 @@ export type VoiceActivityEvent = {
   clockOffsetMs: number;
   clockUncertaintyMs: number;
   clockQuality?: number | null;
+  clockMaxErrorMs?: number | null;
+  clockBestRoundTripMs?: number | null;
+  clockJitterMs?: number | null;
+  clockSamplesUsed?: number | null;
+  clockOutliersRejected?: number | null;
+  clockOffsetStabilityMs?: number | null;
+  timingConfidence?: number | null;
 };
 
 export type AudioEventDevice = {
@@ -26,6 +33,14 @@ export type ReconciledAudioEventObservation = {
   audioLevel: number;
   confidence: number;
   clockUncertaintyMs: number;
+  clockQuality?: number | null;
+  clockMaxErrorMs?: number | null;
+  clockBestRoundTripMs?: number | null;
+  clockJitterMs?: number | null;
+  clockSamplesUsed?: number | null;
+  clockOutliersRejected?: number | null;
+  clockOffsetStabilityMs?: number | null;
+  timingConfidence?: number | null;
 };
 
 export type ReconciledAudioEvent = {
@@ -37,6 +52,8 @@ export type ReconciledAudioEvent = {
   arrivalLeaderDeviceId: string;
   observedDeviceIds: string[];
   observations: ReconciledAudioEventObservation[];
+  timestampUncertaintyMs: number;
+  timingConfidence: number;
   confidence: number;
 };
 
@@ -97,6 +114,14 @@ function reconcileCluster(
       audioLevel: event.audioLevel,
       confidence: event.confidence,
       clockUncertaintyMs: event.clockUncertaintyMs,
+      clockQuality: event.clockQuality ?? null,
+      clockMaxErrorMs: event.clockMaxErrorMs ?? null,
+      clockBestRoundTripMs: event.clockBestRoundTripMs ?? null,
+      clockJitterMs: event.clockJitterMs ?? null,
+      clockSamplesUsed: event.clockSamplesUsed ?? null,
+      clockOutliersRejected: event.clockOutliersRejected ?? null,
+      clockOffsetStabilityMs: event.clockOffsetStabilityMs ?? null,
+      timingConfidence: event.timingConfidence ?? null,
     }))
     .sort(
       (a, b) =>
@@ -121,7 +146,17 @@ function reconcileCluster(
       (total, observation) => total + observation.clockUncertaintyMs,
       0,
     ) / observations.length;
+  const timestampUncertaintyMs = Math.max(
+    ...observations.map((observation) => observation.clockUncertaintyMs),
+  );
+  const meanTimingConfidence =
+    observations.reduce(
+      (total, observation) =>
+        total + observationTimingConfidence(observation),
+      0,
+    ) / observations.length;
   const timingScore = 1 / (1 + (timeSpreadMs + meanUncertaintyMs) / 160);
+  const timingQualityScore = 0.65 + meanTimingConfidence * 0.35;
 
   return {
     id: `voice:${Math.round(startedAtHostEpochMs)}:${observations[0].eventId}`,
@@ -132,8 +167,32 @@ function reconcileCluster(
     arrivalLeaderDeviceId: observations[0].deviceId,
     observedDeviceIds: observations.map((observation) => observation.deviceId),
     observations,
-    confidence: round(Math.max(0, Math.min(1, meanConfidence * timingScore))),
+    timestampUncertaintyMs: round(timestampUncertaintyMs),
+    timingConfidence: round(meanTimingConfidence * timingScore),
+    confidence: round(
+      Math.max(0, Math.min(1, meanConfidence * timingScore * timingQualityScore)),
+    ),
   };
+}
+
+function observationTimingConfidence(
+  observation: ReconciledAudioEventObservation,
+) {
+  if (
+    typeof observation.timingConfidence === "number" &&
+    Number.isFinite(observation.timingConfidence)
+  ) {
+    return Math.max(0, Math.min(1, observation.timingConfidence));
+  }
+
+  if (
+    typeof observation.clockQuality === "number" &&
+    Number.isFinite(observation.clockQuality)
+  ) {
+    return Math.max(0, Math.min(1, observation.clockQuality));
+  }
+
+  return 1 / (1 + Math.max(0, observation.clockUncertaintyMs) / 24);
 }
 
 function uniqueVoiceEvents(device: AudioEventDevice) {

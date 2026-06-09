@@ -50,6 +50,7 @@ export type AudioFrameTimestampInput = {
 export type AudioFrameTimestamp = AudioFrameTimestampInput & {
   audioElapsedMs: number;
   hostEstimatedEpochMs: number;
+  timingConfidence: number;
 };
 
 export type AudioSampleTimestampInput = Omit<
@@ -176,6 +177,13 @@ export function audioSampleTimestamp(
     performanceNowMs,
     clockOffsetMs: input.clockOffsetMs,
     clockUncertaintyMs: input.clockUncertaintyMs,
+    clockQuality: input.clockQuality,
+    clockMaxErrorMs: input.clockMaxErrorMs,
+    clockBestRoundTripMs: input.clockBestRoundTripMs,
+    clockJitterMs: input.clockJitterMs,
+    clockSamplesUsed: input.clockSamplesUsed,
+    clockOutliersRejected: input.clockOutliersRejected,
+    clockOffsetStabilityMs: input.clockOffsetStabilityMs,
   });
 }
 
@@ -190,7 +198,49 @@ export function audioFrameTimestamp(
     ...input,
     audioElapsedMs: round(audioElapsedMs),
     hostEstimatedEpochMs: round(clientEstimatedEpochMs + input.clockOffsetMs),
+    timingConfidence: timestampConfidence(input),
   };
+}
+
+export function timestampConfidence(
+  input: Pick<
+    AudioFrameTimestampInput,
+    | "clockUncertaintyMs"
+    | "clockQuality"
+    | "clockMaxErrorMs"
+    | "clockBestRoundTripMs"
+    | "clockJitterMs"
+    | "clockSamplesUsed"
+    | "clockOffsetStabilityMs"
+  >,
+) {
+  const uncertaintyMs = Math.max(
+    0,
+    finiteOr(input.clockUncertaintyMs, Number.POSITIVE_INFINITY),
+    finiteOr(input.clockMaxErrorMs, 0),
+  );
+  const uncertaintyScore = 1 / (1 + uncertaintyMs / 18);
+  const qualityScore = clamp(finiteOr(input.clockQuality, 0.5), 0, 1);
+  const samplesUsed = finiteOr(input.clockSamplesUsed, 0);
+  const sampleScore = clamp(samplesUsed / 6, 0.12, 1);
+  const roundTripScore =
+    1 / (1 + Math.max(0, finiteOr(input.clockBestRoundTripMs, 60)) / 80);
+  const stabilityMs = Math.max(
+    0,
+    finiteOr(input.clockJitterMs, 4),
+    finiteOr(input.clockOffsetStabilityMs, 4),
+  );
+  const stabilityScore = 1 / (1 + stabilityMs / 8);
+  const baseScore =
+    uncertaintyScore * 0.52 +
+    qualityScore * 0.22 +
+    sampleScore * 0.1 +
+    roundTripScore * 0.08 +
+    stabilityScore * 0.08;
+  const evidencePenalty =
+    sampleScore * (0.55 + roundTripScore * 0.45) * (0.45 + stabilityScore * 0.55);
+
+  return round(clamp(baseScore * evidencePenalty, 0, 1));
 }
 
 function median(values: number[]) {
@@ -212,4 +262,12 @@ function rms(values: number[]) {
 
 function round(value: number) {
   return Number(value.toFixed(3));
+}
+
+function finiteOr(value: number | null | undefined, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }

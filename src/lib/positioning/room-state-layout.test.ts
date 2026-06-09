@@ -132,6 +132,7 @@ describe("room state constellation", () => {
               audioLevel: 0.09,
               confidence: 0.86,
               clockUncertaintyMs: 3,
+              timingConfidence: 0.82,
             },
             {
               deviceId: "phone-a",
@@ -142,8 +143,11 @@ describe("room state constellation", () => {
               audioLevel: 0.07,
               confidence: 0.78,
               clockUncertaintyMs: 4,
+              timingConfidence: 0.78,
             },
           ],
+          timestampUncertaintyMs: 4,
+          timingConfidence: 0.8,
           confidence: 0.76,
         },
       ],
@@ -200,6 +204,38 @@ describe("room state constellation", () => {
     expect(fit?.y).toBeCloseTo(actualSource.y, 1);
     expect(fit?.residualMs).toBeLessThan(1.5);
     expect(fit?.confidence).toBeGreaterThan(0.7);
+  });
+
+  test("downweights TDOA source hints when capture clocks are weak", () => {
+    const devices = [
+      constellationDevice({ deviceId: "host", role: "host", x: 0, y: 0 }),
+      constellationDevice({ deviceId: "phone-a", x: 2, y: 0 }),
+      constellationDevice({ deviceId: "phone-b", x: 0, y: 2 }),
+    ];
+    const strong = voiceEventFromSource({
+      devices,
+      source: { x: -0.55, y: -0.4 },
+      eventId: "voice:strong-clock",
+      emittedAtHostEpochMs: 50_000,
+    });
+    const weak = {
+      ...strong,
+      id: "voice:weak-clock",
+      timingConfidence: 0.18,
+      observations: strong.observations.map((observation) => ({
+        ...observation,
+        eventId: observation.eventId.replace("strong", "weak"),
+        timingConfidence: 0.12,
+      })),
+    };
+
+    const strongFit = fitAudioSourceByTdoa(strong, devices, 50_500);
+    const weakFit = fitAudioSourceByTdoa(weak, devices, 50_500);
+
+    expect(strongFit?.confidence).toBeGreaterThan(0.7);
+    expect(weakFit?.confidence).toBeLessThan(
+      (strongFit?.confidence ?? 0) - 0.2,
+    );
   });
 });
 
@@ -269,6 +305,14 @@ function voiceEventFromSource({
         audioLevel: 0.08,
         confidence: 0.9,
         clockUncertaintyMs: 1,
+        clockQuality: 0.98,
+        clockMaxErrorMs: 1.2,
+        clockBestRoundTripMs: 3,
+        clockJitterMs: 0.2,
+        clockSamplesUsed: 10,
+        clockOutliersRejected: 0,
+        clockOffsetStabilityMs: 0.2,
+        timingConfidence: 0.91,
       };
     })
     .sort((a, b) => a.detectedAtHostEpochMs - b.detectedAtHostEpochMs);
@@ -289,6 +333,8 @@ function voiceEventFromSource({
     arrivalLeaderDeviceId: observations[0].deviceId,
     observedDeviceIds: observations.map((observation) => observation.deviceId),
     observations,
+    timestampUncertaintyMs: 1,
+    timingConfidence: 0.91,
     confidence: 0.86,
   };
 }

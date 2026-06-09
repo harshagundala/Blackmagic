@@ -67,6 +67,13 @@ export function detectVoiceActivityEvent({
     clockOffsetMs: frame.clockOffsetMs,
     clockUncertaintyMs: frame.clockUncertaintyMs,
     clockQuality: frame.clockQuality ?? null,
+    clockMaxErrorMs: frame.clockMaxErrorMs ?? null,
+    clockBestRoundTripMs: frame.clockBestRoundTripMs ?? null,
+    clockJitterMs: frame.clockJitterMs ?? null,
+    clockSamplesUsed: frame.clockSamplesUsed ?? null,
+    clockOutliersRejected: frame.clockOutliersRejected ?? null,
+    clockOffsetStabilityMs: frame.clockOffsetStabilityMs ?? null,
+    timingConfidence: frame.timingConfidence,
   };
 
   return {

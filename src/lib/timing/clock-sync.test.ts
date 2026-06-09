@@ -97,12 +97,56 @@ describe("clock sync metadata", () => {
       clientPerfOriginEpochMs: 1_700_000_000_000,
       clockOffsetMs: 101.4,
       clockUncertaintyMs: 8,
+      clockQuality: 0.91,
+      clockMaxErrorMs: 8,
+      clockBestRoundTripMs: 16,
+      clockJitterMs: 0.7,
+      clockSamplesUsed: 7,
+      clockOutliersRejected: 2,
+      clockOffsetStabilityMs: 0.6,
     });
 
     expect(stamp.audioContextTimeSeconds).toBeCloseTo(10.005, 6);
     expect(stamp.performanceNowMs).toBeCloseTo(1_995, 3);
     expect(stamp.audioElapsedMs).toBeCloseTo(10_005, 3);
     expect(stamp.hostEstimatedEpochMs).toBeCloseTo(1_700_000_002_096.4, 3);
+    expect(stamp.clockQuality).toBe(0.91);
+    expect(stamp.clockMaxErrorMs).toBe(8);
+    expect(stamp.clockBestRoundTripMs).toBe(16);
+    expect(stamp.clockJitterMs).toBe(0.7);
+    expect(stamp.clockSamplesUsed).toBe(7);
+    expect(stamp.clockOutliersRejected).toBe(2);
+    expect(stamp.clockOffsetStabilityMs).toBe(0.6);
+    expect(stamp.timingConfidence).toBeGreaterThan(0.55);
+  });
+
+  test("scores timestamp confidence from clock uncertainty and stability", () => {
+    const precise = audioFrameTimestamp({
+      audioContextTimeSeconds: 4,
+      sampleIndex: 192_000,
+      sampleRate: 48_000,
+      clientPerfOriginEpochMs: 1_700_000_000_000,
+      performanceNowMs: 3_000,
+      clockOffsetMs: 2,
+      clockUncertaintyMs: 2,
+      clockQuality: 0.98,
+      clockBestRoundTripMs: 4,
+      clockJitterMs: 0.2,
+      clockSamplesUsed: 10,
+      clockOffsetStabilityMs: 0.2,
+    });
+    const fuzzy = audioFrameTimestamp({
+      ...precise,
+      clockUncertaintyMs: 42,
+      clockQuality: 0.42,
+      clockBestRoundTripMs: 160,
+      clockJitterMs: 12,
+      clockSamplesUsed: 1,
+      clockOffsetStabilityMs: 14,
+    });
+
+    expect(precise.timingConfidence).toBeGreaterThan(0.7);
+    expect(fuzzy.timingConfidence).toBeLessThan(0.12);
   });
 
   test("keeps a bounded low-latency exchange history for realtime sync", () => {

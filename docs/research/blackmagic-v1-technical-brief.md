@@ -59,7 +59,8 @@ Localization cannot depend on `Date.now()`, WebSocket delivery time, or server r
 - local `performance.now()`;
 - host-estimated epoch time for the audio frame;
 - current host-clock offset estimate;
-- clock uncertainty / round-trip confidence.
+- clock uncertainty / round-trip confidence;
+- a compact timing confidence score derived from clock uncertainty, best round trip, jitter, offset stability, and accepted sample count.
 
 The clock model should run continuously using low-RTT echo exchanges, but the sample index remains the strongest timestamp inside a device recording. Network clock sync is a real-time alignment prior; offline or near-real-time reconciliation should refine alignment by cross-correlating the actual audio history.
 
@@ -68,6 +69,8 @@ The deployed V1 now keeps a bounded, low-latency exchange history instead of tru
 The clock model now rejects offset outliers separately from high-RTT samples. This matters because a network exchange can look fast while still being asymmetric enough to imply the wrong device clock offset. Audio-frame timestamps also carry the clock model lineage used to create them: quality, max error, best round trip, jitter, accepted sample count, rejected outlier count, and offset stability. Downstream reconciliation can therefore decide whether a captured audio event is precise enough for localization instead of treating every timestamp as equally trustworthy.
 
 For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential.
+
+The timestamp path now carries that clock lineage through historical sample mapping, voice activity events, room storage, reconciled audio-event observations, and the TDOA source fitter. Each speech edge keeps the timing confidence attached to the audio frame that produced it; each reconciled event exposes `timestampUncertaintyMs` and aggregate `timingConfidence`; and precise TDOA fits are downweighted when the underlying capture clocks are weak. Network delivery can still lag, but late packets no longer erase when the sound actually hit each microphone.
 
 The first detector is now a normalized matched filter over a rolling local audio window. The observer synthesizes the expected pulse template from the advertised start frequency, end frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 

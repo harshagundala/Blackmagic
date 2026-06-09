@@ -72,6 +72,13 @@ describe("session registry", () => {
         clockOffsetMs: 2,
         clockUncertaintyMs: 6,
         clockQuality: 0.92,
+        clockMaxErrorMs: 7.2,
+        clockBestRoundTripMs: 12,
+        clockJitterMs: 1.2,
+        clockSamplesUsed: 5,
+        clockOutliersRejected: 1,
+        clockOffsetStabilityMs: 0.9,
+        timingConfidence: 0.74,
       },
     });
 
@@ -107,6 +114,10 @@ describe("session registry", () => {
           id: "voice-phone-a",
           sampleIndex: 489_600,
           detectedAtHostEpochMs: 10_250,
+          clockBestRoundTripMs: 12,
+          clockSamplesUsed: 5,
+          clockOutliersRejected: 1,
+          timingConfidence: 0.74,
         }),
       }),
     ]);

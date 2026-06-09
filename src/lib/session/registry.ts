@@ -1,4 +1,7 @@
-import type { AudioFrameTimestamp } from "@/lib/timing/clock-sync";
+import {
+  timestampConfidence,
+  type AudioFrameTimestamp,
+} from "../timing/clock-sync";
 import {
   deriveReconciledAudioEvents,
   type ReconciledAudioEvent,
@@ -362,6 +365,7 @@ function sanitizeAudioFrame(
   const clockSamplesUsed = integerAtLeast(frame.clockSamplesUsed, 0);
   const clockOutliersRejected = integerAtLeast(frame.clockOutliersRejected, 0);
   const clockOffsetStabilityMs = nonNegativeNumber(frame.clockOffsetStabilityMs);
+  const timingConfidence = clampNumber(frame.timingConfidence, 0, 1);
   const audioElapsedMs = finiteNumber(frame.audioElapsedMs);
   const hostEstimatedEpochMs = finiteNumber(frame.hostEstimatedEpochMs);
 
@@ -395,6 +399,17 @@ function sanitizeAudioFrame(
     clockSamplesUsed,
     clockOutliersRejected,
     clockOffsetStabilityMs,
+    timingConfidence:
+      timingConfidence ??
+      timestampConfidence({
+        clockUncertaintyMs,
+        clockQuality,
+        clockMaxErrorMs,
+        clockBestRoundTripMs,
+        clockJitterMs,
+        clockSamplesUsed,
+        clockOffsetStabilityMs,
+      }),
     audioElapsedMs,
     hostEstimatedEpochMs,
   };
@@ -480,6 +495,13 @@ function sanitizeVoiceActivityEvent(
   const clockOffsetMs = finiteNumber(event.clockOffsetMs);
   const clockUncertaintyMs = nonNegativeNumber(event.clockUncertaintyMs);
   const clockQuality = clampNumber(event.clockQuality, 0, 1);
+  const clockMaxErrorMs = nonNegativeNumber(event.clockMaxErrorMs);
+  const clockBestRoundTripMs = nonNegativeNumber(event.clockBestRoundTripMs);
+  const clockJitterMs = nonNegativeNumber(event.clockJitterMs);
+  const clockSamplesUsed = integerAtLeast(event.clockSamplesUsed, 0);
+  const clockOutliersRejected = integerAtLeast(event.clockOutliersRejected, 0);
+  const clockOffsetStabilityMs = nonNegativeNumber(event.clockOffsetStabilityMs);
+  const eventTimingConfidence = clampNumber(event.timingConfidence, 0, 1);
 
   if (
     typeof event.id !== "string" ||
@@ -509,6 +531,23 @@ function sanitizeVoiceActivityEvent(
     clockOffsetMs,
     clockUncertaintyMs,
     clockQuality,
+    clockMaxErrorMs,
+    clockBestRoundTripMs,
+    clockJitterMs,
+    clockSamplesUsed,
+    clockOutliersRejected,
+    clockOffsetStabilityMs,
+    timingConfidence:
+      eventTimingConfidence ??
+      timestampConfidence({
+        clockUncertaintyMs,
+        clockQuality,
+        clockMaxErrorMs,
+        clockBestRoundTripMs,
+        clockJitterMs,
+        clockSamplesUsed,
+        clockOffsetStabilityMs,
+      }),
   };
 }
 

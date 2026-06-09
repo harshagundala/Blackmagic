@@ -27,9 +27,17 @@ describe("voice activity gate", () => {
         audioLevel: 0.075,
         confidence: expect.any(Number),
         clockUncertaintyMs: 4,
+        clockMaxErrorMs: 4,
+        clockBestRoundTripMs: 8,
+        clockJitterMs: 0.5,
+        clockSamplesUsed: 8,
+        clockOutliersRejected: 1,
+        clockOffsetStabilityMs: 0.5,
+        timingConfidence: expect.any(Number),
       }),
     );
     expect(result.event?.confidence).toBeGreaterThan(0.7);
+    expect(result.event?.timingConfidence).toBeGreaterThan(0.7);
     expect(result.gate.open).toBe(true);
   });
 
@@ -81,6 +89,7 @@ function audioFrame(
     clockSamplesUsed: 8,
     clockOutliersRejected: 1,
     clockOffsetStabilityMs: 0.5,
+    timingConfidence: 0.86,
     audioElapsedMs: 12_500,
     hostEstimatedEpochMs: 1_780_000_100_000,
     ...overrides,
