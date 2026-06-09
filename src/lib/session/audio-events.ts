@@ -16,6 +16,7 @@ export type VoiceActivityEvent = {
   clockOutliersRejected?: number | null;
   clockOffsetStabilityMs?: number | null;
   timingConfidence?: number | null;
+  motionStability?: number | null;
 };
 
 export type AudioEventDevice = {
@@ -41,6 +42,7 @@ export type ReconciledAudioEventObservation = {
   clockOutliersRejected?: number | null;
   clockOffsetStabilityMs?: number | null;
   timingConfidence?: number | null;
+  motionStability?: number | null;
 };
 
 export type ReconciledAudioEvent = {
@@ -122,6 +124,7 @@ function reconcileCluster(
       clockOutliersRejected: event.clockOutliersRejected ?? null,
       clockOffsetStabilityMs: event.clockOffsetStabilityMs ?? null,
       timingConfidence: event.timingConfidence ?? null,
+      motionStability: event.motionStability ?? null,
     }))
     .sort(
       (a, b) =>

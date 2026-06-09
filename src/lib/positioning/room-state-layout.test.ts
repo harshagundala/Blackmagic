@@ -237,6 +237,37 @@ describe("room state constellation", () => {
       (strongFit?.confidence ?? 0) - 0.2,
     );
   });
+
+  test("downweights TDOA source hints when an observing phone is moving", () => {
+    const devices = [
+      constellationDevice({ deviceId: "host", role: "host", x: 0, y: 0 }),
+      constellationDevice({ deviceId: "phone-a", x: 2, y: 0 }),
+      constellationDevice({ deviceId: "phone-b", x: 0, y: 2 }),
+    ];
+    const stable = voiceEventFromSource({
+      devices,
+      source: { x: -0.35, y: -0.6 },
+      eventId: "voice:stable-motion",
+      emittedAtHostEpochMs: 60_000,
+    });
+    const moving = {
+      ...stable,
+      id: "voice:moving-motion",
+      observations: stable.observations.map((observation) => ({
+        ...observation,
+        motionStability:
+          observation.deviceId === "phone-a" ? 0.12 : observation.motionStability,
+      })),
+    };
+
+    const stableFit = fitAudioSourceByTdoa(stable, devices, 60_500);
+    const movingFit = fitAudioSourceByTdoa(moving, devices, 60_500);
+
+    expect(stableFit?.confidence).toBeGreaterThan(0.7);
+    expect(movingFit?.confidence).toBeLessThan(
+      (stableFit?.confidence ?? 0) - 0.12,
+    );
+  });
 });
 
 function acousticRange(
@@ -313,6 +344,7 @@ function voiceEventFromSource({
         clockOutliersRejected: 0,
         clockOffsetStabilityMs: 0.2,
         timingConfidence: 0.91,
+        motionStability: 0.92,
       };
     })
     .sort((a, b) => a.detectedAtHostEpochMs - b.detectedAtHostEpochMs);

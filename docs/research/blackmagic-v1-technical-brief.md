@@ -22,6 +22,8 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 - MDN `getUserMedia()` privacy and secure-context requirements: https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia
 - MDN media constraint best-effort behavior: https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints/echoCancellation
 - MDN DeviceOrientation permission model: https://developer.mozilla.org/en-US/docs/Web/API/DeviceOrientationEvent/requestPermission_static
+- MDN DeviceMotion event interval / acceleration / rotation-rate model: https://developer.mozilla.org/en-US/docs/Web/API/DeviceMotionEvent/interval
+- MDN Geolocation coordinates and accuracy fields: https://developer.mozilla.org/en-US/docs/Web/API/GeolocationCoordinates
 - W3C High Resolution Time monotonic clock and `performance.timeOrigin`: https://w3c.github.io/hr-time/
 - Web Audio API `AudioContext.getOutputTimestamp()` context/performance-time bridge: https://webaudio.github.io/web-audio-api/#dom-audiocontext-getoutputtimestamp
 - AudioWorklet `currentFrame` sample-frame counter: https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletGlobalScope/currentFrame
@@ -71,6 +73,14 @@ The clock model now rejects offset outliers separately from high-RTT samples. Th
 For historical audio events, the app maps `sampleIndex / sampleRate` into the host timeline through a Web Audio `contextTime` plus `performanceTime` anchor. That means a detector can report "the pulse peaked 240 samples before the latest frame" and preserve the 5 ms offset in the host-estimated timestamp. At room scale, that 5 ms is about 1.7 m of sound travel, so this metadata is essential.
 
 The timestamp path now carries that clock lineage through historical sample mapping, voice activity events, room storage, reconciled audio-event observations, and the TDOA source fitter. Each speech edge keeps the timing confidence attached to the audio frame that produced it; each reconciled event exposes `timestampUncertaintyMs` and aggregate `timingConfidence`; and precise TDOA fits are downweighted when the underlying capture clocks are weak. Network delivery can still lag, but late packets no longer erase when the sound actually hit each microphone.
+
+## Sensor Fusion
+
+The browser sensor layer now preserves quantitative motion, heading, and location metadata instead of just `active` or `blocked` flags. Device motion contributes acceleration axes, acceleration-with-gravity axes, rotation-rate axes, event interval, and a derived `motionStability` score. The score treats low dynamic acceleration and low rotation as stable; when only gravity-inclusive acceleration is available, it subtracts Earth gravity to estimate dynamic movement. That gives localization a simple real-time guardrail: an audio event from a phone being moved gets lower confidence than the same event from a still phone.
+
+Orientation contributes heading, beta, gamma, and whether the reading is absolute. Geolocation contributes latitude, longitude, altitude, speed, heading, timestamp, and accuracy fields. GPS is intentionally treated as weak room context because same-room accuracy is usually too coarse, but preserving the accuracy metadata lets downstream fusion decide whether a reading is useful for coarse venue anchoring or should be ignored.
+
+Motion stability now travels with voice events and reconciled audio observations, then downweights TDOA source hints. This is deliberately conservative: sensor data improves trust scoring before it tries to move points directly.
 
 The first detector is now a normalized matched filter over a rolling local audio window. The observer synthesizes the expected pulse template from the advertised start frequency, end frequency, duration, and sample rate, scans the recent sample window, and requires both a minimum correlation score and a peak-ratio guard before converting the detected sample index into host time. This is still simpler than a full GCC-PHAT pipeline, but it is a major step beyond raw mic-level thresholding because the observation is tied to the actual matched sample offset.
 

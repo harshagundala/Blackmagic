@@ -69,6 +69,27 @@ describe("voice activity gate", () => {
     expect(closed.gate.open).toBe(false);
     expect(second.event).not.toBeNull();
   });
+
+  test("carries motion stability into voice event confidence", () => {
+    const stable = detectVoiceActivityEvent({
+      gate: { open: false, lastEventHostEpochMs: null },
+      micLevel: 0.08,
+      frame: audioFrame({ hostEstimatedEpochMs: 20_000 }),
+      motionStability: 0.95,
+    });
+    const moving = detectVoiceActivityEvent({
+      gate: { open: false, lastEventHostEpochMs: null },
+      micLevel: 0.08,
+      frame: audioFrame({ hostEstimatedEpochMs: 21_000 }),
+      motionStability: 0.18,
+    });
+
+    expect(stable.event?.motionStability).toBe(0.95);
+    expect(moving.event?.motionStability).toBe(0.18);
+    expect(moving.event?.confidence).toBeLessThan(
+      (stable.event?.confidence ?? 0) - 0.1,
+    );
+  });
 });
 
 function audioFrame(

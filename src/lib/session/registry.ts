@@ -58,8 +58,34 @@ export type DeviceHeartbeat = {
   voiceEvent?: VoiceActivityEvent | null;
   voiceEvents?: VoiceActivityEvent[] | null;
   motion?: SensorState;
+  motionAccelerationX?: number | null;
+  motionAccelerationY?: number | null;
+  motionAccelerationZ?: number | null;
+  motionAccelerationIncludingGravityX?: number | null;
+  motionAccelerationIncludingGravityY?: number | null;
+  motionAccelerationIncludingGravityZ?: number | null;
+  motionAccelerationMagnitude?: number | null;
+  motionRotationAlpha?: number | null;
+  motionRotationBeta?: number | null;
+  motionRotationGamma?: number | null;
+  motionRotationRateDegPerSec?: number | null;
+  motionIntervalMs?: number | null;
+  motionCapturedAtClientPerfMs?: number | null;
+  motionStability?: number | null;
   heading?: SensorState;
+  headingDegrees?: number | null;
+  orientationBetaDegrees?: number | null;
+  orientationGammaDegrees?: number | null;
+  orientationAbsolute?: boolean | null;
   location?: SensorState;
+  locationLatitude?: number | null;
+  locationLongitude?: number | null;
+  locationAccuracyMeters?: number | null;
+  locationAltitudeMeters?: number | null;
+  locationAltitudeAccuracyMeters?: number | null;
+  locationHeadingDegrees?: number | null;
+  locationSpeedMetersPerSecond?: number | null;
+  locationCapturedAtEpochMs?: number | null;
 };
 
 export type RoomDevice = SessionClaim & DeviceHeartbeat;
@@ -258,8 +284,52 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     voiceEvent: sanitizeVoiceActivityEvent(heartbeat.voiceEvent),
     voiceEvents: null,
     motion: heartbeat.motion,
+    motionAccelerationX: finiteNumber(heartbeat.motionAccelerationX),
+    motionAccelerationY: finiteNumber(heartbeat.motionAccelerationY),
+    motionAccelerationZ: finiteNumber(heartbeat.motionAccelerationZ),
+    motionAccelerationIncludingGravityX: finiteNumber(
+      heartbeat.motionAccelerationIncludingGravityX,
+    ),
+    motionAccelerationIncludingGravityY: finiteNumber(
+      heartbeat.motionAccelerationIncludingGravityY,
+    ),
+    motionAccelerationIncludingGravityZ: finiteNumber(
+      heartbeat.motionAccelerationIncludingGravityZ,
+    ),
+    motionAccelerationMagnitude: nonNegativeNumber(
+      heartbeat.motionAccelerationMagnitude,
+    ),
+    motionRotationAlpha: finiteNumber(heartbeat.motionRotationAlpha),
+    motionRotationBeta: finiteNumber(heartbeat.motionRotationBeta),
+    motionRotationGamma: finiteNumber(heartbeat.motionRotationGamma),
+    motionRotationRateDegPerSec: nonNegativeNumber(
+      heartbeat.motionRotationRateDegPerSec,
+    ),
+    motionIntervalMs: nonNegativeNumber(heartbeat.motionIntervalMs),
+    motionCapturedAtClientPerfMs: nonNegativeNumber(
+      heartbeat.motionCapturedAtClientPerfMs,
+    ),
+    motionStability: clampNumber(heartbeat.motionStability, 0, 1),
     heading: heartbeat.heading,
+    headingDegrees: normalizedDegrees(heartbeat.headingDegrees),
+    orientationBetaDegrees: finiteNumber(heartbeat.orientationBetaDegrees),
+    orientationGammaDegrees: finiteNumber(heartbeat.orientationGammaDegrees),
+    orientationAbsolute: booleanOrNull(heartbeat.orientationAbsolute),
     location: heartbeat.location,
+    locationLatitude: boundedNumber(heartbeat.locationLatitude, -90, 90),
+    locationLongitude: boundedNumber(heartbeat.locationLongitude, -180, 180),
+    locationAccuracyMeters: nonNegativeNumber(heartbeat.locationAccuracyMeters),
+    locationAltitudeMeters: finiteNumber(heartbeat.locationAltitudeMeters),
+    locationAltitudeAccuracyMeters: nonNegativeNumber(
+      heartbeat.locationAltitudeAccuracyMeters,
+    ),
+    locationHeadingDegrees: normalizedDegrees(heartbeat.locationHeadingDegrees),
+    locationSpeedMetersPerSecond: nonNegativeNumber(
+      heartbeat.locationSpeedMetersPerSecond,
+    ),
+    locationCapturedAtEpochMs: nonNegativeNumber(
+      heartbeat.locationCapturedAtEpochMs,
+    ),
   };
 }
 
@@ -502,6 +572,7 @@ function sanitizeVoiceActivityEvent(
   const clockOutliersRejected = integerAtLeast(event.clockOutliersRejected, 0);
   const clockOffsetStabilityMs = nonNegativeNumber(event.clockOffsetStabilityMs);
   const eventTimingConfidence = clampNumber(event.timingConfidence, 0, 1);
+  const motionStability = clampNumber(event.motionStability, 0, 1);
 
   if (
     typeof event.id !== "string" ||
@@ -548,6 +619,7 @@ function sanitizeVoiceActivityEvent(
         clockSamplesUsed,
         clockOffsetStabilityMs,
       }),
+    motionStability,
   };
 }
 
@@ -575,6 +647,32 @@ function nonNegativeNumber(value: number | null | undefined) {
 function integerAtLeast(value: number | null | undefined, min: number) {
   const finite = finiteNumber(value);
   return finite === null ? null : Math.max(min, Math.round(finite));
+}
+
+function boundedNumber(
+  value: number | null | undefined,
+  min: number,
+  max: number,
+) {
+  const finite = finiteNumber(value);
+  if (finite === null || finite < min || finite > max) {
+    return null;
+  }
+
+  return finite;
+}
+
+function normalizedDegrees(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  if (finite === null) {
+    return null;
+  }
+
+  return ((finite % 360) + 360) % 360;
+}
+
+function booleanOrNull(value: boolean | null | undefined) {
+  return typeof value === "boolean" ? value : null;
 }
 
 function compareDevices(a: RoomDevice, b: RoomDevice) {

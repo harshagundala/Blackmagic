@@ -121,6 +121,46 @@ describe("audio event reconciliation", () => {
       }),
     );
   });
+
+  test("preserves motion stability beside each audio observation", () => {
+    const events = deriveReconciledAudioEvents([
+      {
+        deviceId: "host",
+        voiceEvents: [
+          {
+            ...voiceEvent({
+              id: "host-motion",
+              detectedAtHostEpochMs: 40_000,
+            }),
+            motionStability: 0.93,
+          },
+        ],
+      },
+      {
+        deviceId: "phone-a",
+        voiceEvents: [
+          {
+            ...voiceEvent({
+              id: "phone-motion",
+              detectedAtHostEpochMs: 40_006,
+            }),
+            motionStability: 0.21,
+          },
+        ],
+      },
+    ]);
+
+    expect(events[0].observations).toEqual([
+      expect.objectContaining({
+        deviceId: "host",
+        motionStability: 0.93,
+      }),
+      expect.objectContaining({
+        deviceId: "phone-a",
+        motionStability: 0.21,
+      }),
+    ]);
+  });
 });
 
 function voiceEvent(

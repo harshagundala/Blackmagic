@@ -10,6 +10,7 @@ export type VoiceActivityDetectionInput = {
   gate: VoiceActivityGate;
   micLevel: number;
   frame: AudioFrameTimestamp | null;
+  motionStability?: number | null;
   openLevel?: number;
   closeLevel?: number;
   minEventSpacingMs?: number;
@@ -28,6 +29,7 @@ export function detectVoiceActivityEvent({
   gate,
   micLevel,
   frame,
+  motionStability,
   openLevel = DEFAULT_OPEN_LEVEL,
   closeLevel = DEFAULT_CLOSE_LEVEL,
   minEventSpacingMs = DEFAULT_MIN_EVENT_SPACING_MS,
@@ -63,7 +65,7 @@ export function detectVoiceActivityEvent({
     sampleIndex: frame.sampleIndex,
     sampleRate: frame.sampleRate,
     audioLevel: round(micLevel),
-    confidence: voiceConfidence(micLevel, frame.clockUncertaintyMs),
+    confidence: voiceConfidence(micLevel, frame.clockUncertaintyMs, motionStability),
     clockOffsetMs: frame.clockOffsetMs,
     clockUncertaintyMs: frame.clockUncertaintyMs,
     clockQuality: frame.clockQuality ?? null,
@@ -74,6 +76,7 @@ export function detectVoiceActivityEvent({
     clockOutliersRejected: frame.clockOutliersRejected ?? null,
     clockOffsetStabilityMs: frame.clockOffsetStabilityMs ?? null,
     timingConfidence: frame.timingConfidence,
+    motionStability: motionStability ?? null,
   };
 
   return {
@@ -85,10 +88,18 @@ export function detectVoiceActivityEvent({
   };
 }
 
-function voiceConfidence(micLevel: number, clockUncertaintyMs: number) {
+function voiceConfidence(
+  micLevel: number,
+  clockUncertaintyMs: number,
+  motionStability: number | null | undefined,
+) {
   const levelScore = Math.max(0, Math.min(1, micLevel / 0.08));
   const timingScore = 1 / (1 + Math.max(0, clockUncertaintyMs) / 24);
-  return round(Math.max(0.05, Math.min(1, levelScore * timingScore)));
+  const motionScore =
+    typeof motionStability === "number" && Number.isFinite(motionStability)
+      ? 0.62 + Math.max(0, Math.min(1, motionStability)) * 0.38
+      : 1;
+  return round(Math.max(0.05, Math.min(1, levelScore * timingScore * motionScore)));
 }
 
 function round(value: number) {

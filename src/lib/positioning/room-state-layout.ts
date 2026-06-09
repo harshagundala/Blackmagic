@@ -155,6 +155,7 @@ export function fitAudioSourceByTdoa(
   const residualScore = 1 / (1 + fit.residualMs / 12);
   const observerScore = Math.min(1, 0.54 + observations.length * 0.16);
   const timingScore = audioEventTimingConfidence(event);
+  const motionScore = audioEventMotionStability(event);
 
   return {
     eventId: event.id,
@@ -163,7 +164,14 @@ export function fitAudioSourceByTdoa(
     confidence: round(
       Math.max(
         0.05,
-        Math.min(1, event.confidence * residualScore * observerScore * timingScore),
+        Math.min(
+          1,
+          event.confidence *
+            residualScore *
+            observerScore *
+            timingScore *
+            motionScore,
+        ),
       ),
     ),
     ageMs: Math.max(0, round(roomUpdatedAtMs - event.centerHostEpochMs)),
@@ -272,8 +280,15 @@ function tdoaResidualMs(
     const timingScore =
       observationTimingConfidence(observation) *
       observationTimingConfidence(leader);
+    const motionScore =
+      observationMotionStability(observation) *
+      observationMotionStability(leader);
     const weight =
-      (observation.confidence * leader.confidence * event.confidence * timingScore) /
+      (observation.confidence *
+        leader.confidence *
+        event.confidence *
+        timingScore *
+        motionScore) /
       (1 + uncertaintyMs / 8);
     weightedSquares += (predictedMs - observedMs) ** 2 * weight;
     totalWeight += weight;
@@ -350,6 +365,19 @@ function audioEventTimingConfidence(event: ReconciledAudioEvent) {
   return Math.sqrt(Math.max(0.02, eventScore * meanObservationScore));
 }
 
+function audioEventMotionStability(event: ReconciledAudioEvent) {
+  if (event.observations.length === 0) {
+    return 1;
+  }
+
+  return (
+    event.observations.reduce(
+      (total, observation) => total + observationMotionStability(observation),
+      0,
+    ) / event.observations.length
+  );
+}
+
 function observationTimingConfidence(
   observation: ReconciledAudioEvent["observations"][number],
 ) {
@@ -361,6 +389,19 @@ function observationTimingConfidence(
   }
 
   return 1 / (1 + Math.max(0, observation.clockUncertaintyMs) / 24);
+}
+
+function observationMotionStability(
+  observation: ReconciledAudioEvent["observations"][number],
+) {
+  if (
+    typeof observation.motionStability === "number" &&
+    Number.isFinite(observation.motionStability)
+  ) {
+    return clamp(observation.motionStability, 0, 1);
+  }
+
+  return 1;
 }
 
 function round(value: number) {

@@ -167,6 +167,60 @@ describe("session registry", () => {
     ]);
   });
 
+  test("preserves quantitative motion heading and location metadata", () => {
+    const registry = createSessionRegistry({ now: () => 30_000 });
+
+    registry.claim("https://blackmagic.app/", "host");
+    const heartbeat = {
+      motion: "active",
+      motionAccelerationMagnitude: 0.42,
+      motionRotationRateDegPerSec: 3.5,
+      motionIntervalMs: 16.7,
+      motionStability: 0.88,
+      heading: "active",
+      headingDegrees: 281.4,
+      orientationBetaDegrees: -12.5,
+      orientationGammaDegrees: 4.25,
+      orientationAbsolute: true,
+      location: "active",
+      locationLatitude: 37.8715,
+      locationLongitude: -122.273,
+      locationAccuracyMeters: 8.4,
+      locationAltitudeMeters: 51.2,
+      locationAltitudeAccuracyMeters: 12.5,
+      locationHeadingDegrees: 279,
+      locationSpeedMetersPerSecond: 0.12,
+      locationCapturedAtEpochMs: 1_780_996_000_000,
+    };
+
+    const state = registry.heartbeat(
+      "https://blackmagic.app/",
+      "host",
+      heartbeat,
+    );
+
+    expect(state.devices[0]).toEqual(
+      expect.objectContaining({
+        motionAccelerationMagnitude: 0.42,
+        motionRotationRateDegPerSec: 3.5,
+        motionIntervalMs: 16.7,
+        motionStability: 0.88,
+        headingDegrees: 281.4,
+        orientationBetaDegrees: -12.5,
+        orientationGammaDegrees: 4.25,
+        orientationAbsolute: true,
+        locationLatitude: 37.8715,
+        locationLongitude: -122.273,
+        locationAccuracyMeters: 8.4,
+        locationAltitudeMeters: 51.2,
+        locationAltitudeAccuracyMeters: 12.5,
+        locationHeadingDegrees: 279,
+        locationSpeedMetersPerSecond: 0.12,
+        locationCapturedAtEpochMs: 1_780_996_000_000,
+      }),
+    );
+  });
+
   test("keeps bounded acoustic pulse and observation histories across heartbeats", () => {
     let now = 1_000;
     const registry = createSessionRegistry({ now: () => now });

@@ -32,10 +32,15 @@ import {
 } from "@/lib/acoustics/voice-activity";
 import type { AcousticPulse } from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
+import {
+  idleMotionMetadata,
+  motionMetadataFromReading,
+  type MotionSensorMetadata,
+} from "@/lib/sensors/fusion";
 
 type SensorState = "idle" | "active" | "blocked";
 
-export type SensorSnapshot = {
+export type SensorSnapshot = MotionSensorMetadata & {
   mic: SensorState;
   motion: SensorState;
   heading: SensorState;
@@ -46,11 +51,22 @@ export type SensorSnapshot = {
   audioWindow: AudioPulseWindow | null;
   voiceEvent: VoiceActivityEvent | null;
   headingDegrees: number | null;
+  orientationBetaDegrees: number | null;
+  orientationGammaDegrees: number | null;
+  orientationAbsolute: boolean | null;
+  locationLatitude: number | null;
+  locationLongitude: number | null;
   locationAccuracyMeters: number | null;
+  locationAltitudeMeters: number | null;
+  locationAltitudeAccuracyMeters: number | null;
+  locationHeadingDegrees: number | null;
+  locationSpeedMetersPerSecond: number | null;
+  locationCapturedAtEpochMs: number | null;
   clock: ClockModel | null;
 };
 
 const idleSnapshot: SensorSnapshot = {
+  ...idleMotionMetadata,
   mic: "idle",
   motion: "idle",
   heading: "idle",
@@ -61,7 +77,17 @@ const idleSnapshot: SensorSnapshot = {
   audioWindow: null,
   voiceEvent: null,
   headingDegrees: null,
+  orientationBetaDegrees: null,
+  orientationGammaDegrees: null,
+  orientationAbsolute: null,
+  locationLatitude: null,
+  locationLongitude: null,
   locationAccuracyMeters: null,
+  locationAltitudeMeters: null,
+  locationAltitudeAccuracyMeters: null,
+  locationHeadingDegrees: null,
+  locationSpeedMetersPerSecond: null,
+  locationCapturedAtEpochMs: null,
   clock: null,
 };
 
@@ -85,9 +111,11 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const streamingMatcherRef = useRef<StreamingPulseMatcher | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
+  const locationWatchRef = useRef<number | null>(null);
   const clockSyncRunRef = useRef(0);
   const motionActiveRef = useRef(false);
   const headingActiveRef = useRef(false);
+  const motionMetadataRef = useRef<MotionSensorMetadata>(idleMotionMetadata);
   const clockExchangesRef = useRef<ClockExchange[]>([]);
   const clockModelRef = useRef<ClockModel | null>(null);
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
@@ -115,6 +143,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       window.clearInterval(clockTimerRef.current);
       clockTimerRef.current = null;
     }
+    if (locationWatchRef.current !== null && "geolocation" in navigator) {
+      navigator.geolocation.clearWatch(locationWatchRef.current);
+      locationWatchRef.current = null;
+    }
     clockSyncRunRef.current += 1;
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -130,6 +162,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     window.removeEventListener("devicemotion", handleMotion);
     motionActiveRef.current = false;
     headingActiveRef.current = false;
+    motionMetadataRef.current = idleMotionMetadata;
     clockExchangesRef.current = [];
     clockModelRef.current = null;
     activePulseRef.current = null;
@@ -256,6 +289,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
           gate: voiceGateRef.current,
           micLevel,
           frame: timing.audioFrame,
+          motionStability: motionMetadataRef.current.motionStability,
         });
         voiceGateRef.current = voiceActivity.gate;
         setSnapshot((current) => ({
@@ -279,12 +313,19 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     }
 
     if ("geolocation" in navigator) {
-      navigator.geolocation.getCurrentPosition(
+      locationWatchRef.current = navigator.geolocation.watchPosition(
         (position) => {
           setSnapshot((current) => ({
             ...current,
             location: "active",
+            locationLatitude: position.coords.latitude,
+            locationLongitude: position.coords.longitude,
             locationAccuracyMeters: position.coords.accuracy,
+            locationAltitudeMeters: position.coords.altitude,
+            locationAltitudeAccuracyMeters: position.coords.altitudeAccuracy,
+            locationHeadingDegrees: position.coords.heading,
+            locationSpeedMetersPerSecond: position.coords.speed,
+            locationCapturedAtEpochMs: position.timestamp,
           }));
         },
         () => {
@@ -293,7 +334,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
             location: "blocked",
           }));
         },
-        { enableHighAccuracy: false, maximumAge: 60_000, timeout: 4_000 },
+        { enableHighAccuracy: true, maximumAge: 15_000, timeout: 5_000 },
       );
     }
   }, []);
@@ -307,29 +348,50 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
 
   function handleOrientation(event: DeviceOrientationEvent) {
     headingActiveRef.current = true;
+    const webkitHeading = (
+      event as DeviceOrientationEvent & { webkitCompassHeading?: number }
+    ).webkitCompassHeading;
     setSnapshot((current) => ({
       ...current,
       heading: "active",
-      headingDegrees: event.alpha ?? current.headingDegrees,
+      headingDegrees: webkitHeading ?? event.alpha ?? current.headingDegrees,
+      orientationBetaDegrees: event.beta ?? current.orientationBetaDegrees,
+      orientationGammaDegrees: event.gamma ?? current.orientationGammaDegrees,
+      orientationAbsolute: event.absolute ?? current.orientationAbsolute,
     }));
   }
 
-  function handleMotion() {
+  function handleMotion(event: DeviceMotionEvent) {
     motionActiveRef.current = true;
+    const metadata = motionMetadataFromReading({
+      acceleration: event.acceleration,
+      accelerationIncludingGravity: event.accelerationIncludingGravity,
+      rotationRate: event.rotationRate,
+      intervalMs: event.interval,
+      capturedAtClientPerfMs: performance.now(),
+    });
+    motionMetadataRef.current = metadata;
     setSnapshot((current) => ({
       ...current,
       motion: "active",
+      ...metadata,
     }));
   }
 }
 
 async function requestMotionPermission() {
-  const orientation = DeviceOrientationEvent as unknown as PermissionEventConstructor;
-  const motion = DeviceMotionEvent as unknown as PermissionEventConstructor;
+  const orientation =
+    typeof DeviceOrientationEvent === "undefined"
+      ? null
+      : (DeviceOrientationEvent as unknown as PermissionEventConstructor);
+  const motion =
+    typeof DeviceMotionEvent === "undefined"
+      ? null
+      : (DeviceMotionEvent as unknown as PermissionEventConstructor);
 
   await Promise.allSettled([
-    orientation.requestPermission?.(),
-    motion.requestPermission?.(),
+    orientation?.requestPermission?.(),
+    motion?.requestPermission?.(),
   ]);
 }
 
