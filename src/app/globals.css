@@ -63,6 +63,38 @@ button {
   }
 }
 
+@keyframes liquid-field {
+  0%,
+  100% {
+    border-radius: 44% 56% 48% 52%;
+    transform: translate(-50%, -50%) scale(0.96) rotate(-2deg);
+  }
+  50% {
+    border-radius: 56% 44% 54% 46%;
+    transform: translate(-50%, -50%) scale(1.04) rotate(2deg);
+  }
+}
+
+@keyframes liquid-drift {
+  0%,
+  100% {
+    border-radius: 46% 54% 51% 49%;
+  }
+  50% {
+    border-radius: 54% 46% 45% 55%;
+  }
+}
+
+@keyframes liquid-pulse {
+  0%,
+  100% {
+    border-radius: 44% 56% 48% 52%;
+  }
+  50% {
+    border-radius: 56% 44% 54% 46%;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

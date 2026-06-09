@@ -1,6 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from "react";
+import {
+  estimateClockOffset,
+  robustClockModel,
+  type ClockExchange,
+  type ClockModel,
+} from "@/lib/timing/clock-sync";
 
 type SensorState = "idle" | "active" | "blocked";
 
@@ -13,6 +27,7 @@ export type SensorSnapshot = {
   sampleRate: number | null;
   headingDegrees: number | null;
   locationAccuracyMeters: number | null;
+  clock: ClockModel | null;
 };
 
 const idleSnapshot: SensorSnapshot = {
@@ -24,6 +39,7 @@ const idleSnapshot: SensorSnapshot = {
   sampleRate: null,
   headingDegrees: null,
   locationAccuracyMeters: null,
+  clock: null,
 };
 
 type PermissionEventConstructor = {
@@ -35,13 +51,19 @@ export function useSensorSuite() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationRef = useRef<number | null>(null);
+  const clockTimerRef = useRef<number | null>(null);
   const motionActiveRef = useRef(false);
   const headingActiveRef = useRef(false);
+  const clockExchangesRef = useRef<ClockExchange[]>([]);
 
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
       cancelAnimationFrame(animationRef.current);
       animationRef.current = null;
+    }
+    if (clockTimerRef.current !== null) {
+      window.clearInterval(clockTimerRef.current);
+      clockTimerRef.current = null;
     }
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -52,11 +74,17 @@ export function useSensorSuite() {
     window.removeEventListener("devicemotion", handleMotion);
     motionActiveRef.current = false;
     headingActiveRef.current = false;
+    clockExchangesRef.current = [];
     setSnapshot(idleSnapshot);
   }, []);
 
   const start = useCallback(async () => {
     await requestMotionPermission();
+    await syncClock(setSnapshot, clockExchangesRef);
+    clockTimerRef.current = window.setInterval(
+      () => void syncClock(setSnapshot, clockExchangesRef),
+      2_000,
+    );
     window.addEventListener("deviceorientation", handleOrientation);
     window.addEventListener("devicemotion", handleMotion);
 
@@ -160,6 +188,44 @@ async function requestMotionPermission() {
     orientation.requestPermission?.(),
     motion.requestPermission?.(),
   ]);
+}
+
+async function syncClock(
+  setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
+  exchangesRef: MutableRefObject<ClockExchange[]>,
+) {
+  try {
+    const clientPerfOriginEpochMs = Date.now() - performance.now();
+    const clientSendPerfMs = performance.now();
+    const response = await fetch("/api/time/echo", { method: "POST" });
+    const clientReceivePerfMs = performance.now();
+    const server = (await response.json()) as {
+      serverReceiveEpochMs: number;
+      serverSendEpochMs: number;
+    };
+
+    const exchange: ClockExchange = {
+      clientPerfOriginEpochMs,
+      clientSendPerfMs,
+      serverReceiveEpochMs: server.serverReceiveEpochMs,
+      serverSendEpochMs: server.serverSendEpochMs,
+      clientReceivePerfMs,
+    };
+    const estimate = estimateClockOffset(exchange);
+    exchangesRef.current = [...exchangesRef.current, exchange]
+      .slice(-12)
+      .filter((item) => estimateClockOffset(item).roundTripMs < 750);
+    const clock = robustClockModel(exchangesRef.current);
+
+    setSnapshot((current) => ({
+      ...current,
+      clock,
+    }));
+
+    return estimate;
+  } catch {
+    return null;
+  }
 }
 
 declare global {

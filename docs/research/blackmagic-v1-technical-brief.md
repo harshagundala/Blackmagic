@@ -10,6 +10,7 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 - Robust repeated measurements: median range selection, confidence weighting, and outlier rejection.
 - Weighted 2D stress minimization for the relative phone constellation.
 - Motion/orientation/geolocation as weak UX and confidence signals, not primary geometry.
+- Sample-domain timestamp metadata for every audio frame/event, with network clock sync used only as a confidence-scored host-time prior.
 
 ## Research Anchors
 
@@ -27,3 +28,17 @@ Blackmagic V1 should feel like passive magic, but the measurement primitive shou
 Vercel hosts the Next.js app, HTTPS sensor permission surface, QR/session routes, and short-lived provider token endpoints. It should not be the persistent WebSocket server. Production realtime should use Ably by default, with WebRTC data/audio channels for peer media and TURN for reliable NAT traversal.
 
 The current repository keeps that provider seam explicit through `src/lib/realtime/contracts.ts` and `/api/realtime/config`. Without provider credentials the app runs in demo mode and exercises the same calibration/positioning code paths.
+
+## Timestamp Reconciliation
+
+Localization cannot depend on `Date.now()`, WebSocket delivery time, or server receive time. Audio metadata must carry:
+
+- device id;
+- audio sample index;
+- sample rate;
+- `AudioContext.currentTime`;
+- local `performance.now()`;
+- current host-clock offset estimate;
+- clock uncertainty / round-trip confidence.
+
+The clock model should run continuously using low-RTT echo exchanges, but the sample index remains the strongest timestamp inside a device recording. Network clock sync is a real-time alignment prior; offline or near-real-time reconciliation should refine alignment by cross-correlating the actual audio history.

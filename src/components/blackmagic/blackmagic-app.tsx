@@ -1,224 +1,153 @@
 "use client";
 
-import { Radio, ScanLine, Share2, Sparkles, Square, Waves } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
-import {
-  createPairwiseCalibrationPlan,
-  summarizePairwiseMeasurements,
-  type PairwiseMeasurement,
-} from "@/lib/calibration/session";
-import { estimateConstellation, type PairwiseDistance } from "@/lib/positioning/layout";
-import { demoMeasurements, initialPhones, qrCells } from "@/lib/blackmagic/demo-room";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSensorSuite } from "@/hooks/use-sensor-suite";
-import { ConstellationCanvas } from "./constellation-canvas";
-import { ControlDock } from "./control-dock";
-import { SensorGlyphRail } from "./sensor-glyph-rail";
+import type { SessionRole } from "@/lib/session/registry";
 
-type AppPhase = "idle" | "listening" | "syncing" | "calibrating" | "ready";
+type Phase = "arriving" | "waiting" | "listening";
 
-const statusCopy: Record<AppPhase, string> = {
-  idle: "tap",
-  listening: "listening",
-  syncing: "syncing",
-  calibrating: "calibrating",
-  ready: "locked",
+type SessionClaimResponse = {
+  role: SessionRole;
+  sessionKey: string;
 };
 
 export function BlackmagicApp() {
-  const [phase, setPhase] = useState<AppPhase>("idle");
-  const reactId = useId();
-  const roomId = useMemo(() => stableRoomId(reactId), [reactId]);
-  const [showInvite, setShowInvite] = useState(true);
-  const [measurements, setMeasurements] = useState<PairwiseMeasurement[]>([]);
-  const [activeDistance, setActiveDistance] = useState<PairwiseDistance | null>(null);
-  const [tick, setTick] = useState(0);
   const sensors = useSensorSuite();
-
-  const participantIds = useMemo(() => initialPhones.map((phone) => phone.id), []);
-  const calibrationPlan = useMemo(
-    () =>
-      createPairwiseCalibrationPlan(participantIds, {
-        chirpsPerPair: 3,
-        slotDurationMs: 360,
-        guardMs: 140,
-      }),
-    [participantIds],
-  );
-  const ranges = useMemo(() => summarizePairwiseMeasurements(measurements), [measurements]);
-  const layout = useMemo(
-    () =>
-      estimateConstellation(participantIds, ranges, {
-        anchorId: "host",
-        iterations: 1_000,
-      }),
-    [participantIds, ranges],
-  );
-
-  const calibrate = useCallback(() => {
-    setMeasurements([]);
-    setActiveDistance(null);
-    setPhase("calibrating");
-
-    demoMeasurements.forEach((measurement, index) => {
-      window.setTimeout(() => {
-        setMeasurements((current) => [...current, measurement]);
-        setActiveDistance({
-          from: measurement.from,
-          to: measurement.to,
-          meters: measurement.meters,
-          weight: measurement.confidence,
-        });
-        if (index === demoMeasurements.length - 1) {
-          window.setTimeout(() => {
-            setPhase("ready");
-            setActiveDistance(null);
-          }, 420);
-        }
-      }, index * 420);
-    });
-  }, []);
-
-  const begin = useCallback(async () => {
-    setPhase("listening");
-    await sensors.start();
-    setPhase("syncing");
-    window.setTimeout(calibrate, 520);
-  }, [calibrate, sensors]);
-
-  const stop = useCallback(() => {
-    sensors.stop();
-    setPhase("idle");
-    setMeasurements([]);
-    setActiveDistance(null);
-  }, [sensors]);
+  const [phase, setPhase] = useState<Phase>("arriving");
+  const [role, setRole] = useState<SessionRole | null>(null);
+  const deviceId = useMemo(() => getOrCreateDeviceId(), []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setTick((value) => value + 1), 1_200);
-    return () => window.clearInterval(timer);
-  }, []);
+    let cancelled = false;
 
-  const qr = useMemo(() => qrCells(roomId), [roomId]);
-  const progress = calibrationPlan.slots.length
-    ? Math.min(1, measurements.length / calibrationPlan.slots.length)
-    : 0;
+    async function claim() {
+      const response = await fetch("/api/session/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          deviceId,
+          url: window.location.href,
+        }),
+      });
+      const data = (await response.json()) as SessionClaimResponse;
+      if (!cancelled) {
+        setRole(data.role);
+        setPhase("waiting");
+      }
+    }
+
+    void claim();
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId]);
+
+  const begin = useCallback(async () => {
+    if (phase === "listening") {
+      return;
+    }
+
+    setPhase("listening");
+    await sensors.start();
+  }, [phase, sensors]);
+
+  const label = phase === "arriving" ? "" : role === "host" ? "host" : "nearby";
+  const pulse = phase === "listening" ? Math.min(1, Math.max(0.18, sensors.snapshot.micLevel * 24)) : 0.28;
 
   return (
-    <main className="relative min-h-dvh overflow-hidden bg-white text-[#06070a]">
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-[40dvh] bg-[radial-gradient(circle_at_50%_0%,rgba(2,8,23,0.16),transparent_58%)]" />
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[46dvh] bg-[linear-gradient(180deg,transparent,rgba(0,122,255,0.08))]" />
-      <div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(76vw,76vh)] w-[min(76vw,76vh)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(0,122,255,0.12),rgba(255,255,255,0)_62%)] blur-2xl" />
+    <main
+      aria-label="Blackmagic session"
+      className="relative min-h-dvh cursor-default overflow-hidden bg-[#f7f9fc] text-[#05060a]"
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          void begin();
+        }
+      }}
+      onPointerDown={() => void begin()}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,#ffffff_0%,#eef7ff_58%,#fbfdff_100%)]" />
+      <div className="absolute inset-0 opacity-80 [background:radial-gradient(120%_84%_at_50%_-16%,rgba(255,255,255,0.98)_0%,rgba(255,255,255,0.52)_34%,rgba(129,202,255,0.20)_58%,rgba(255,255,255,0)_82%)]" />
+      <div className="absolute inset-x-[-20%] top-[18dvh] h-[58dvh] blur-3xl [background:linear-gradient(105deg,rgba(255,255,255,0)_0%,rgba(161,213,255,0.34)_32%,rgba(255,255,255,0.66)_52%,rgba(190,225,255,0.24)_70%,rgba(255,255,255,0)_100%)]" />
+      <div className="absolute inset-x-[-35%] bottom-[-18dvh] h-[46dvh] blur-3xl [background:linear-gradient(90deg,rgba(0,122,255,0)_0%,rgba(0,122,255,0.16)_42%,rgba(255,255,255,0.78)_56%,rgba(0,122,255,0.12)_76%,rgba(0,122,255,0)_100%)]" />
 
-      <div className="relative grid min-h-dvh grid-rows-[1fr_auto] px-4 pb-[max(18px,env(safe-area-inset-bottom))] pt-[max(18px,env(safe-area-inset-top))] sm:px-8 lg:grid-cols-[104px_1fr_104px] lg:grid-rows-1 lg:px-8 lg:py-8">
-        <aside
-          className={`absolute right-4 top-[max(18px,env(safe-area-inset-top))] z-20 origin-top-right transition duration-500 lg:static lg:col-start-1 lg:flex lg:h-full lg:origin-center lg:flex-col lg:items-center lg:justify-center lg:border-r lg:border-black/5 ${
-            showInvite ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0"
-          }`}
-          aria-hidden={!showInvite}
-        >
-          <span className="mb-24 hidden h-8 w-8 rounded-full bg-[#05070a] shadow-[0_12px_30px_rgba(3,10,28,0.26)] lg:block" />
-          <div className="rounded-[28px] border border-black/10 bg-white/70 p-3 shadow-[0_22px_70px_rgba(3,10,28,0.16)] backdrop-blur-2xl">
-            <div className="grid grid-cols-7 gap-1 rounded-[18px] bg-white p-2">
-              {qr.map((cell, index) => (
-                <span
-                  className={`h-2 w-2 rounded-[2px] ${cell ? "bg-[#05070a]" : "bg-transparent"}`}
-                  key={`${roomId}-${index}`}
-                />
-              ))}
-            </div>
-            <div className="mx-auto mt-3 flex w-12 items-center justify-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-[#05070a]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-[#007aff]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-[#33d6ff]" />
-            </div>
-          </div>
-          <div className="mt-8 hidden flex-col items-center gap-5 lg:flex">
-            {initialPhones.map((phone) => (
-              <span
-                className={`h-4 w-4 rounded-full shadow-[0_10px_24px_rgba(0,122,255,0.28)] ${
-                  phone.role === "host" ? "bg-[#05070a]" : "bg-[#007aff]"
-                }`}
-                key={phone.id}
-              />
-            ))}
-            <span className="h-4 w-4 rounded-full border border-black/15 bg-white" />
-          </div>
-        </aside>
-
-        <section className="relative flex min-h-0 items-center justify-center lg:col-start-2">
-          <ConstellationCanvas
-            activeDistance={activeDistance}
-            layout={layout}
-            phones={initialPhones}
-            phase={phase}
-            progress={progress}
-            sensorLevel={sensors.snapshot.micLevel}
-            tick={tick}
-          />
-
-          <div className="absolute left-1/2 top-[8dvh] -translate-x-1/2 text-center">
-            <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-black/42">
-              {statusCopy[phase]}
-            </p>
-          </div>
-
-          <SensorGlyphRail snapshot={sensors.snapshot} />
-        </section>
-
-        <div className="fixed inset-x-0 bottom-[max(16px,env(safe-area-inset-bottom))] z-30 flex justify-center px-4">
-          <ControlDock
-            controls={[
-              {
-                icon: <Radio aria-hidden size={20} strokeWidth={1.9} />,
-                label: "Start sensors",
-                onClick: begin,
-                selected: phase !== "idle",
-              },
-              {
-                icon: <Share2 aria-hidden size={20} strokeWidth={1.9} />,
-                label: "Show invite",
-                onClick: () => setShowInvite((value) => !value),
-                selected: showInvite,
-              },
-              {
-                icon: <ScanLine aria-hidden size={20} strokeWidth={1.9} />,
-                label: "Calibrate",
-                onClick: calibrate,
-                selected: phase === "calibrating",
-              },
-              {
-                icon: phase === "ready" ? (
-                  <Sparkles aria-hidden size={20} strokeWidth={1.9} />
-                ) : (
-                  <Waves aria-hidden size={20} strokeWidth={1.9} />
-                ),
-                label: "Signal",
-                onClick: calibrate,
-                selected: phase === "ready",
-              },
-              {
-                icon: <Square aria-hidden size={18} strokeWidth={2.2} />,
-                label: "Stop",
-                onClick: stop,
-              },
-            ]}
-          />
-        </div>
+      <div className="absolute inset-0 overflow-hidden">
+        <div
+          className="absolute left-1/2 top-1/2 h-[68dvh] max-h-[720px] min-h-[420px] w-[68dvh] min-w-[420px] max-w-[720px] -translate-x-1/2 -translate-y-1/2 rounded-[45%] border border-white/55 bg-white/14 shadow-[inset_0_0_90px_rgba(255,255,255,0.82),0_40px_160px_rgba(56,146,255,0.18)] backdrop-blur-3xl"
+          style={{
+            animation: "liquid-field 7s ease-in-out infinite",
+            opacity: 0.86 + pulse * 0.08,
+          }}
+        />
+        <div
+          className="absolute left-1/2 top-1/2 h-[44dvh] max-h-[520px] min-h-[280px] w-[44dvh] min-w-[280px] max-w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-[42%] border border-white/65 bg-white/22 shadow-[inset_0_1px_30px_rgba(255,255,255,0.88),0_20px_90px_rgba(0,122,255,0.12)] backdrop-blur-2xl"
+          style={{
+            animation: "liquid-drift 9s ease-in-out infinite",
+            transform: `translate(-50%, -50%) scale(${0.96 + pulse * 0.06})`,
+          }}
+        />
       </div>
+
+      <section className="relative z-10 flex min-h-dvh flex-col items-center justify-between px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-[max(34px,env(safe-area-inset-top))] text-center">
+        <div className="h-20" />
+
+        <div className="flex flex-col items-center">
+          <div className="relative grid h-36 w-36 place-items-center sm:h-44 sm:w-44">
+            <span className="absolute inset-0 rounded-[42%] bg-white/20 shadow-[inset_0_0_28px_rgba(255,255,255,0.92),0_22px_80px_rgba(16,98,180,0.20)] backdrop-blur-2xl" />
+            <span
+              className="absolute h-24 w-24 rounded-[44%] border border-white/70 bg-white/26 shadow-[inset_0_0_18px_rgba(255,255,255,0.95),0_10px_60px_rgba(0,122,255,0.18)]"
+              style={{
+                animation: "liquid-pulse 4.8s ease-in-out infinite reverse",
+                transform: `scale(${0.82 + pulse * 0.26})`,
+              }}
+            />
+            <span className="relative h-5 w-5 rounded-full bg-[#05060a] shadow-[0_0_34px_rgba(0,0,0,0.28)]" />
+          </div>
+
+          <p className="mt-8 min-h-5 font-mono text-[11px] uppercase tracking-[0.42em] text-black/40">
+            {label}
+          </p>
+        </div>
+
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-10">
+            {phase === "listening" ? (
+              <div className="flex h-10 items-center gap-1.5" aria-hidden>
+                {Array.from({ length: 7 }).map((_, index) => (
+                  <span
+                    className="w-1 rounded-full bg-[#007aff]/55"
+                    key={index}
+                    style={{
+                      height: `${8 + Math.sin(index + pulse * 7) * 5 + pulse * 28}px`,
+                      transition: "height 160ms ease",
+                    }}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <p className="max-w-56 text-[12px] font-medium leading-5 tracking-[0.04em] text-black/28">
+            {phase === "listening" ? "listening" : ""}
+          </p>
+        </div>
+      </section>
     </main>
   );
 }
 
-function stableRoomId(seed: string) {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  let value = 0;
-  for (let index = 0; index < seed.length; index += 1) {
-    value = (value * 33 + seed.charCodeAt(index)) >>> 0;
+function getOrCreateDeviceId() {
+  if (typeof window === "undefined") {
+    return "server";
   }
 
-  for (let index = 0; index < 6; index += 1) {
-    value = (value * 1_664_525 + 1_013_904_223) >>> 0;
-    code += alphabet[value % alphabet.length];
+  const key = "blackmagic.device";
+  const existing = window.localStorage.getItem(key);
+  if (existing) {
+    return existing;
   }
-  return code;
+
+  const next = crypto.randomUUID();
+  window.localStorage.setItem(key, next);
+  return next;
 }
