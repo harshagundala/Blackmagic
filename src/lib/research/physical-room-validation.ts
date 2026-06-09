@@ -4,6 +4,7 @@ import {
 } from "../positioning/room-state-layout";
 import {
   captureProcessingState,
+  type CaptureProcessingState,
   type RoomDevice,
   type RoomState,
 } from "../session/registry";
@@ -38,6 +39,27 @@ export type PhysicalRoomValidationMetrics = {
   bestSourceConfidence: number | null;
 };
 
+export type PhysicalRoomValidationDeviceDiagnostic = {
+  deviceId: string;
+  role: RoomDevice["role"];
+  mic: RoomDevice["mic"] | null;
+  localized: boolean;
+  distanceMeters: number | null;
+  layoutConfidence: number;
+  captureStatus: CaptureProcessingState;
+  audioCaptureReady: boolean;
+  audioContextState: RoomDevice["audioContextState"] | null;
+  sampleRate: number | null;
+  audioTimestampPresent: boolean;
+  audioTimestampReady: boolean;
+  audioTimestampErrorMs: number | null;
+  audioTimingConfidence: number | null;
+  clockMaxErrorMs: number | null;
+  clockQuality: number | null;
+  motionStability: number | null;
+  blockers: string[];
+};
+
 export type PhysicalRoomValidationReport = {
   status: PhysicalRoomValidationStatus;
   phoneLayout: PhysicalRoomValidationSection;
@@ -45,6 +67,7 @@ export type PhysicalRoomValidationReport = {
   audioTimestamps: PhysicalRoomValidationSection;
   spokenSource: PhysicalRoomValidationSection;
   metrics: PhysicalRoomValidationMetrics;
+  devices: PhysicalRoomValidationDeviceDiagnostic[];
   blockers: string[];
 };
 
@@ -63,6 +86,7 @@ export function validatePhysicalRoomLocalization(
   const audioCapture = audioCaptureSection(metrics);
   const audioTimestamps = audioTimestampsSection(metrics);
   const spokenSource = spokenSourceSection(metrics);
+  const devices = deviceDiagnostics(roomState, constellation);
   const sections = [phoneLayout, audioCapture, audioTimestamps, spokenSource];
   const blockers = unique([
     ...phoneLayout.blockers,
@@ -78,8 +102,124 @@ export function validatePhysicalRoomLocalization(
     audioTimestamps,
     spokenSource,
     metrics,
+    devices,
     blockers,
   };
+}
+
+function deviceDiagnostics(
+  roomState: RoomState,
+  constellation: RoomConstellation,
+): PhysicalRoomValidationDeviceDiagnostic[] {
+  const layoutDevices = new Map(
+    constellation.devices.map((device) => [device.deviceId, device]),
+  );
+
+  return roomState.devices.map((device) => {
+    const layoutDevice = layoutDevices.get(device.deviceId);
+    const capture = audioCaptureState(device);
+    const timestamp = audioTimestampState(device);
+    const captureStatus = captureProcessingState(device.captureProcessing);
+    const blockers = deviceBlockers({
+      device,
+      capture,
+      captureStatus,
+      timestamp,
+      localized: layoutDevice?.localized ?? false,
+    });
+
+    return {
+      deviceId: device.deviceId,
+      role: device.role,
+      mic: device.mic ?? null,
+      localized: layoutDevice?.localized ?? false,
+      distanceMeters: roundOrNull(layoutDevice?.distanceMeters),
+      layoutConfidence: round(layoutDevice?.confidence ?? 0),
+      captureStatus,
+      audioCaptureReady: capture.ready,
+      audioContextState: device.audioContextState ?? null,
+      sampleRate: firstFinite(device.audioFrame?.sampleRate, device.sampleRate),
+      audioTimestampPresent: timestamp.present,
+      audioTimestampReady: timestamp.ready,
+      audioTimestampErrorMs: roundOrNull(timestamp.errorMs),
+      audioTimingConfidence: roundOrNull(timestamp.timingConfidence),
+      clockMaxErrorMs: roundOrNull(
+        firstFinite(
+          device.audioFrame?.clockMaxErrorMs,
+          device.clockMaxErrorMs,
+          device.audioFrame?.clockUncertaintyMs,
+          device.clockUncertaintyMs,
+        ),
+      ),
+      clockQuality: roundOrNull(
+        firstFinite(device.audioFrame?.clockQuality, device.clockQuality),
+      ),
+      motionStability: roundOrNull(clampNumber(device.motionStability, 0, 1)),
+      blockers,
+    };
+  });
+}
+
+function deviceBlockers({
+  device,
+  capture,
+  captureStatus,
+  timestamp,
+  localized,
+}: {
+  device: RoomDevice;
+  capture: ReturnType<typeof audioCaptureState>;
+  captureStatus: CaptureProcessingState;
+  timestamp: ReturnType<typeof audioTimestampState>;
+  localized: boolean;
+}) {
+  const blockers: string[] = [];
+
+  if (device.mic !== "active") {
+    blockers.push("mic_not_active");
+  }
+  if (captureStatus === "missing") {
+    blockers.push("audio_capture_missing");
+  }
+  if (captureStatus === "unverified") {
+    blockers.push("audio_capture_unverified");
+  }
+  if (captureStatus === "filtered") {
+    blockers.push("filtered_audio_capture");
+  }
+  if (!capture.contextRunning) {
+    blockers.push("audio_context_not_running");
+  }
+  if (!timestamp.present) {
+    blockers.push("audio_timestamp_missing");
+  } else {
+    if (
+      timestamp.errorMs !== null &&
+      timestamp.errorMs > MAX_READY_AUDIO_TIMESTAMP_ERROR_MS
+    ) {
+      blockers.push("audio_timestamp_error_high");
+    }
+    if (
+      timestamp.timingConfidence !== null &&
+      timestamp.timingConfidence < MIN_READY_AUDIO_TIMING_CONFIDENCE
+    ) {
+      blockers.push("audio_timestamp_confidence_low");
+    }
+    if (
+      !timestamp.ready &&
+      timestamp.errorMs !== null &&
+      timestamp.errorMs <= MAX_READY_AUDIO_TIMESTAMP_ERROR_MS &&
+      timestamp.timingConfidence !== null &&
+      timestamp.timingConfidence >= MIN_READY_AUDIO_TIMING_CONFIDENCE
+    ) {
+      blockers.push("audio_timestamps_not_ready");
+    }
+  }
+  if (!localized) {
+    blockers.push("not_localized");
+  }
+
+  return blockers;
 }
 
 function validationMetrics(
@@ -373,4 +513,9 @@ function clampNumber(
 
 function round(value: number) {
   return Number(value.toFixed(3));
+}
+
+function roundOrNull(value: number | null | undefined) {
+  const finite = finiteNumber(value);
+  return finite === null ? null : round(finite);
 }
