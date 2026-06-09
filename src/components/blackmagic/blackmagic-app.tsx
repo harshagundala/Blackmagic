@@ -20,6 +20,10 @@ import {
   createScheduledAcousticPulse,
 } from "@/lib/calibration/pulse";
 import {
+  acousticObservationPublishKey,
+  shouldPublishAcousticObservation,
+} from "@/lib/calibration/observation-publishing";
+import {
   createPulseToneScheduler,
   type PulseToneScheduler,
 } from "@/lib/calibration/playback";
@@ -52,7 +56,7 @@ export function BlackmagicApp() {
   const calibrationRef = useRef<CalibrationHeartbeat>({});
   const publishedPulseIdRef = useRef("");
   const observablePulseRef = useRef<AcousticPulse | null>(null);
-  const observedPulseIdRef = useRef("");
+  const publishedObservationRef = useRef<AcousticObservation | null>(null);
   const flushedCalibrationEventRef = useRef("");
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
   const constellation = useMemo(
@@ -193,20 +197,29 @@ export function BlackmagicApp() {
         : maybeCreateObservation(
             pulse,
             sensors.snapshot,
-            observedPulseIdRef.current,
+            publishedObservationRef.current?.pulseId ?? "",
           );
 
-    if (!observation || observation.pulseId === observedPulseIdRef.current) {
+    if (!observation) {
       return;
     }
 
-    observedPulseIdRef.current = observation.pulseId;
+    if (
+      !shouldPublishAcousticObservation(publishedObservationRef.current, observation)
+    ) {
+      return;
+    }
+
+    publishedObservationRef.current = observation;
     calibrationRef.current = {
       acousticPulse: calibrationRef.current.acousticPulse ?? null,
       acousticObservation: observation,
     };
     flushCalibrationEvent(
-      calibrationEventKey("observation", observation.pulseId),
+      calibrationEventKey(
+        "observation",
+        acousticObservationPublishKey(observation),
+      ),
     );
   }, [flushCalibrationEvent, phase, sensors.snapshot]);
 

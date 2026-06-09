@@ -80,6 +80,36 @@ describe("matched pulse detector", () => {
     expect(detection?.confidence).toBeGreaterThan(0.8);
   });
 
+  test("prefers the louder matching chirp when two candidates have similar normalized correlation", () => {
+    const template = synthesizePulseTemplate({
+      frequencyHz: 1_600,
+      endFrequencyHz: 3_400,
+      durationMs: 18,
+      sampleRate: 48_000,
+    });
+    const samples = new Float32Array(3_400);
+    for (let index = 0; index < template.length; index += 1) {
+      samples[640 + index] += template[index] * 0.16;
+    }
+    add(samples, 1_640, template);
+
+    const detection = detectPulse(samples, template, {
+      minScore: 0.42,
+      minPeakRatio: 2.4,
+      searchStartSample: 500,
+      searchEndSample: 1_900,
+    });
+
+    expect(detection).toEqual(
+      expect.objectContaining({
+        startSample: 1_640,
+        score: expect.any(Number),
+      }),
+    );
+    expect(detection?.score).toBeGreaterThan(0.98);
+    expect(detection?.peakRatio).toBeGreaterThan(2.4);
+  });
+
   test("rejects uncorrelated low-energy windows", () => {
     const template = synthesizeTonePulse({
       frequencyHz: 2_000,

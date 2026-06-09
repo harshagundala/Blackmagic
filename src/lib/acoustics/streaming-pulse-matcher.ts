@@ -30,7 +30,7 @@ export type StreamingPulseDetection = {
 export class StreamingPulseMatcher {
   private readonly buffer: RollingSampleBuffer;
   private trackedPulse: TrackedPulse | null = null;
-  private emittedPulseId = "";
+  private emittedDetection: StreamingPulseDetection | null = null;
 
   constructor(private readonly options: StreamingPulseMatcherOptions) {
     this.buffer = new RollingSampleBuffer(options.historySamples);
@@ -43,7 +43,7 @@ export class StreamingPulseMatcher {
     }
 
     if (this.trackedPulse?.id !== pulse.id) {
-      this.emittedPulseId = "";
+      this.emittedDetection = null;
     }
     this.trackedPulse = pulse;
   }
@@ -63,12 +63,12 @@ export class StreamingPulseMatcher {
   clear() {
     this.buffer.clear();
     this.trackedPulse = null;
-    this.emittedPulseId = "";
+    this.emittedDetection = null;
   }
 
   private detect(): StreamingPulseDetection | null {
     const pulse = this.trackedPulse;
-    if (!pulse || pulse.id === this.emittedPulseId) {
+    if (!pulse) {
       return null;
     }
 
@@ -107,11 +107,36 @@ export class StreamingPulseMatcher {
       return null;
     }
 
-    this.emittedPulseId = pulse.id;
-    return {
+    const nextDetection = {
       pulseId: pulse.id,
       startSampleIndex: window.startSampleIndex + detection.startSample,
       detection,
     };
+    if (!shouldEmitDetection(this.emittedDetection, nextDetection)) {
+      return null;
+    }
+
+    this.emittedDetection = nextDetection;
+    return nextDetection;
   }
+}
+
+function shouldEmitDetection(
+  previous: StreamingPulseDetection | null,
+  next: StreamingPulseDetection,
+) {
+  if (!previous || previous.pulseId !== next.pulseId) {
+    return true;
+  }
+
+  if (previous.startSampleIndex === next.startSampleIndex) {
+    return false;
+  }
+
+  const amplitudeGain =
+    next.detection.amplitude / Math.max(0.001, previous.detection.amplitude);
+  const confidenceGain =
+    next.detection.confidence - previous.detection.confidence;
+
+  return amplitudeGain >= 1.6 || confidenceGain >= 0.18;
 }

@@ -23,6 +23,8 @@ export type PulseDetection = {
   rms: number;
 };
 
+const SCORE_TIE_EPSILON = 0.015;
+
 export function synthesizeTonePulse({
   frequencyHz,
   durationMs,
@@ -89,29 +91,39 @@ export function detectPulse(
 
   let bestStart = start;
   let bestScore = Number.NEGATIVE_INFINITY;
+  let bestStrength = Number.NEGATIVE_INFINITY;
 
   for (let offset = start; offset <= end; offset += 1) {
     const score = normalizedTemplateScore(samples, template, offset, templateEnergy);
-    if (score > bestScore) {
+    const strength = score * rmsAt(samples, offset, template.length);
+    if (
+      score > bestScore + SCORE_TIE_EPSILON ||
+      (Math.abs(score - bestScore) <= SCORE_TIE_EPSILON &&
+        strength > bestStrength)
+    ) {
       bestScore = score;
+      bestStrength = strength;
       bestStart = offset;
     }
   }
 
   const exclusionRadius = Math.max(1, Math.floor(template.length / 2));
-  let secondBestScore = 0;
+  let secondBestStrength = 0;
   for (let offset = start; offset <= end; offset += 1) {
     if (Math.abs(offset - bestStart) <= exclusionRadius) {
       continue;
     }
-    secondBestScore = Math.max(
-      secondBestScore,
-      normalizedTemplateScore(samples, template, offset, templateEnergy),
+    const score = normalizedTemplateScore(samples, template, offset, templateEnergy);
+    secondBestStrength = Math.max(
+      secondBestStrength,
+      score * rmsAt(samples, offset, template.length),
     );
   }
 
   const peakRatio =
-    secondBestScore <= 0 ? Number.POSITIVE_INFINITY : bestScore / secondBestScore;
+    secondBestStrength <= 0
+      ? Number.POSITIVE_INFINITY
+      : bestStrength / secondBestStrength;
   if (bestScore < minScore || peakRatio < minPeakRatio) {
     return null;
   }
@@ -159,6 +171,10 @@ function energy(samples: Float32Array | number[], start: number, length: number)
     sum += samples[index] * samples[index];
   }
   return sum;
+}
+
+function rmsAt(samples: Float32Array | number[], start: number, length: number) {
+  return Math.sqrt(energy(samples, start, length) / length);
 }
 
 function maxAbs(samples: Float32Array | number[]) {

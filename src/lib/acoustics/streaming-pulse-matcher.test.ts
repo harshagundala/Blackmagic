@@ -5,9 +5,14 @@ import {
 } from "./streaming-pulse-matcher";
 import { synthesizePulseTemplate } from "./pulse-detector";
 
-function add(samples: Float32Array, offset: number, template: Float32Array) {
+function add(
+  samples: Float32Array,
+  offset: number,
+  template: Float32Array,
+  gain = 0.7,
+) {
   for (let index = 0; index < template.length; index += 1) {
-    samples[offset + index] += template[index] * 0.7;
+    samples[offset + index] += template[index] * gain;
   }
 }
 
@@ -77,10 +82,62 @@ describe("streaming pulse matcher", () => {
     const matcher = new StreamingPulseMatcher({ sampleRate, historySamples: 1_500 });
     matcher.track(pulse);
 
-    const first = matcher.append(frame(samples, 0, 1_200), 0);
-    const second = matcher.append(frame(samples, 1_200, 256), 1_200);
+    const first = matcher.append(frame(samples, 0, 1_400), 0);
+    const second = matcher.append(frame(samples, 1_400, 256), 1_400);
 
-    expect(first?.pulseId).toBe("pulse-b");
+    expect(first).toEqual(
+      expect.objectContaining({
+        pulseId: "pulse-b",
+        startSampleIndex: 640,
+      }),
+    );
     expect(second).toBeNull();
+  });
+
+  test("upgrades a weak same-pulse hit when a stronger candidate arrives before the search horizon closes", () => {
+    const sampleRate = 48_000;
+    const pulse: TrackedPulse = {
+      id: "pulse-c",
+      frequencyHz: 1_800,
+      endFrequencyHz: 3_200,
+      durationMs: 12,
+      expectedStartSampleIndex: 512,
+      maxLateSamples: 1_280,
+    };
+    const template = synthesizePulseTemplate({
+      frequencyHz: pulse.frequencyHz,
+      endFrequencyHz: pulse.endFrequencyHz,
+      durationMs: pulse.durationMs,
+      sampleRate,
+    });
+    const samples = new Float32Array(2_600);
+    add(samples, 640, template, 0.18);
+    add(samples, 1_260, template, 0.72);
+    const matcher = new StreamingPulseMatcher({
+      sampleRate,
+      historySamples: 2_048,
+      minScore: 0.42,
+      minPeakRatio: 2.4,
+    });
+    matcher.track(pulse);
+
+    const first = matcher.append(frame(samples, 0, 1_220), 0);
+    const upgraded = matcher.append(frame(samples, 1_220, 940), 1_220);
+
+    expect(first).toEqual(
+      expect.objectContaining({
+        pulseId: "pulse-c",
+        startSampleIndex: 640,
+      }),
+    );
+    expect(upgraded).toEqual(
+      expect.objectContaining({
+        pulseId: "pulse-c",
+        startSampleIndex: 1_260,
+      }),
+    );
+    expect(upgraded?.detection.amplitude).toBeGreaterThan(
+      (first?.detection.amplitude ?? 0) * 2,
+    );
   });
 });
