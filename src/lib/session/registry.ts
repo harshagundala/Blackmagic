@@ -12,6 +12,10 @@ import {
   type LiveCalibrationTurn,
 } from "../calibration/session";
 import { deriveAcousticRanges, type AcousticRange } from "./ranging";
+import {
+  deriveRoomTimeSync,
+  type RoomTimeSyncState,
+} from "./timing-health";
 
 export type SessionRole = "host" | "phone";
 
@@ -103,6 +107,7 @@ export type RoomState = {
   hostDeviceId: string;
   devices: RoomDevice[];
   calibrationTurn: LiveCalibrationTurn | null;
+  timeSync: RoomTimeSyncState;
   ranges: AcousticRange[];
   audioEvents: ReconciledAudioEvent[];
   updatedAt: number;
@@ -215,6 +220,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
           hostDeviceId: "",
           devices: [],
           calibrationTurn: null,
+          timeSync: deriveRoomTimeSync([]),
           ranges: [],
           audioEvents: [],
           updatedAt: timestamp,
@@ -229,6 +235,7 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
         hostDeviceId: record.hostDeviceId,
         devices,
         calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
+        timeSync: deriveRoomTimeSync(devices),
         ranges: deriveAcousticRanges(devices),
         audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,

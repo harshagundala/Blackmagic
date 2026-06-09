@@ -101,6 +101,42 @@ describe("session stores", () => {
     );
   });
 
+  test("redis store exposes room time sync health from persisted heartbeats", async () => {
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => 20_000 });
+
+    await store.heartbeat("https://blackmagic.app/", "host", {
+      clockQuality: 0.97,
+      clockUncertaintyMs: 2,
+      clockMaxErrorMs: 3,
+      clockBestRoundTripMs: 10,
+      clockJitterMs: 0.6,
+      clockSamplesUsed: 9,
+      clockOffsetStabilityMs: 0.5,
+    });
+    await store.heartbeat("https://blackmagic.app/", "phone", {
+      clockQuality: 0.9,
+      clockUncertaintyMs: 4,
+      clockMaxErrorMs: 5,
+      clockBestRoundTripMs: 20,
+      clockJitterMs: 1.5,
+      clockSamplesUsed: 6,
+      clockOffsetStabilityMs: 1.4,
+    });
+
+    await expect(store.state("https://blackmagic.app/")).resolves.toEqual(
+      expect.objectContaining({
+        timeSync: expect.objectContaining({
+          status: "ready",
+          synchronizedDeviceIds: ["host", "phone"],
+          localizationDeviceIds: ["host", "phone"],
+          medianMaxErrorMs: 4,
+          worstLocalizationErrorMs: 5,
+        }),
+      }),
+    );
+  });
+
   test("redis store releases a stale host across store instances", async () => {
     let now = 1_000;
     const redis = new FakeRedisSessionClient();

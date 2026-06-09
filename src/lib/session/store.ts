@@ -12,6 +12,7 @@ import {
 } from "./registry";
 import { deriveReconciledAudioEvents } from "./audio-events";
 import { deriveAcousticRanges } from "./ranging";
+import { deriveRoomTimeSync } from "./timing-health";
 
 export type SessionStore = {
   kind: "memory" | "redis";
@@ -153,6 +154,7 @@ export function createRedisSessionStore(
         hostDeviceId: devices.length === 0 ? "" : hostDeviceId,
         devices,
         calibrationTurn: selectRoomCalibrationTurn(devices, timestamp),
+        timeSync: deriveRoomTimeSync(devices),
         ranges: deriveAcousticRanges(devices),
         audioEvents: deriveReconciledAudioEvents(devices),
         updatedAt: timestamp,

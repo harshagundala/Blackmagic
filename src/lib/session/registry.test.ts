@@ -34,6 +34,67 @@ describe("session registry", () => {
     });
   });
 
+  test("summarizes room time sync health for localization gating", () => {
+    const registry = createSessionRegistry({ now: () => 10_000 });
+
+    registry.heartbeat("https://blackmagic.app/", "host", {
+      clockQuality: 0.96,
+      clockUncertaintyMs: 3,
+      clockMaxErrorMs: 4,
+      clockBestRoundTripMs: 14,
+      clockJitterMs: 0.8,
+      clockSamplesUsed: 8,
+      clockOffsetStabilityMs: 0.7,
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-a", {
+      clockQuality: 0.91,
+      clockUncertaintyMs: 4,
+      clockMaxErrorMs: 5,
+      clockBestRoundTripMs: 18,
+      clockJitterMs: 1.2,
+      clockSamplesUsed: 7,
+      clockOffsetStabilityMs: 1,
+    });
+    registry.heartbeat("https://blackmagic.app/", "phone-b", {
+      clockQuality: 0.28,
+      clockUncertaintyMs: 55,
+      clockMaxErrorMs: 80,
+      clockBestRoundTripMs: 260,
+      clockJitterMs: 18,
+      clockSamplesUsed: 2,
+      clockOffsetStabilityMs: 20,
+    });
+
+    const state = registry.state("https://blackmagic.app/");
+
+    expect(state.timeSync).toEqual(
+      expect.objectContaining({
+        status: "ready",
+        synchronizedDeviceIds: ["host", "phone-a"],
+        localizationDeviceIds: ["host", "phone-a"],
+        medianMaxErrorMs: 5,
+        worstLocalizationErrorMs: 5,
+      }),
+    );
+    expect(state.timeSync.devices).toEqual([
+      expect.objectContaining({
+        deviceId: "host",
+        localizationReady: true,
+        synchronized: true,
+      }),
+      expect.objectContaining({
+        deviceId: "phone-a",
+        localizationReady: true,
+        synchronized: true,
+      }),
+      expect.objectContaining({
+        deviceId: "phone-b",
+        localizationReady: false,
+        synchronized: false,
+      }),
+    ]);
+  });
+
   test("tracks active device heartbeats with sensor and timing summaries", () => {
     const registry = createSessionRegistry({ now: () => 10_000 });
 
