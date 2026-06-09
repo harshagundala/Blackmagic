@@ -40,6 +40,8 @@ export type DeviceHeartbeat = {
   clockBestRoundTripMs?: number | null;
   clockJitterMs?: number | null;
   clockSamplesUsed?: number | null;
+  clockOutliersRejected?: number | null;
+  clockOffsetStabilityMs?: number | null;
   audioFrame?: AudioFrameTimestamp | null;
   acousticPulse?: AcousticPulse | null;
   acousticPulses?: AcousticPulse[] | null;
@@ -231,6 +233,8 @@ export function sanitizeHeartbeat(heartbeat: DeviceHeartbeat): DeviceHeartbeat {
     clockBestRoundTripMs: nonNegativeNumber(heartbeat.clockBestRoundTripMs),
     clockJitterMs: nonNegativeNumber(heartbeat.clockJitterMs),
     clockSamplesUsed: integerAtLeast(heartbeat.clockSamplesUsed, 0),
+    clockOutliersRejected: integerAtLeast(heartbeat.clockOutliersRejected, 0),
+    clockOffsetStabilityMs: nonNegativeNumber(heartbeat.clockOffsetStabilityMs),
     audioFrame: sanitizeAudioFrame(heartbeat.audioFrame),
     acousticPulse: sanitizeAcousticPulse(heartbeat.acousticPulse),
     acousticPulses: null,
@@ -325,6 +329,13 @@ function sanitizeAudioFrame(
   const performanceNowMs = finiteNumber(frame.performanceNowMs);
   const clockOffsetMs = finiteNumber(frame.clockOffsetMs);
   const clockUncertaintyMs = finiteNumber(frame.clockUncertaintyMs);
+  const clockQuality = clampNumber(frame.clockQuality, 0, 1);
+  const clockMaxErrorMs = nonNegativeNumber(frame.clockMaxErrorMs);
+  const clockBestRoundTripMs = nonNegativeNumber(frame.clockBestRoundTripMs);
+  const clockJitterMs = nonNegativeNumber(frame.clockJitterMs);
+  const clockSamplesUsed = integerAtLeast(frame.clockSamplesUsed, 0);
+  const clockOutliersRejected = integerAtLeast(frame.clockOutliersRejected, 0);
+  const clockOffsetStabilityMs = nonNegativeNumber(frame.clockOffsetStabilityMs);
   const audioElapsedMs = finiteNumber(frame.audioElapsedMs);
   const hostEstimatedEpochMs = finiteNumber(frame.hostEstimatedEpochMs);
 
@@ -351,6 +362,13 @@ function sanitizeAudioFrame(
     performanceNowMs,
     clockOffsetMs,
     clockUncertaintyMs,
+    clockQuality,
+    clockMaxErrorMs,
+    clockBestRoundTripMs,
+    clockJitterMs,
+    clockSamplesUsed,
+    clockOutliersRejected,
+    clockOffsetStabilityMs,
     audioElapsedMs,
     hostEstimatedEpochMs,
   };

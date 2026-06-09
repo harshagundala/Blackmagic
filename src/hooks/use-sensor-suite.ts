@@ -559,6 +559,13 @@ function timestampAudioFrame(
     clientPerfOriginEpochMs: performance.timeOrigin || Date.now() - performance.now(),
     clockOffsetMs: clock.offsetMs,
     clockUncertaintyMs: clock.uncertaintyMs,
+    clockQuality: clock.quality,
+    clockMaxErrorMs: clock.maxErrorMs,
+    clockBestRoundTripMs: clock.bestRoundTripMs,
+    clockJitterMs: clock.jitterMs,
+    clockSamplesUsed: clock.samplesUsed,
+    clockOutliersRejected: clock.outliersRejected,
+    clockOffsetStabilityMs: clock.offsetStabilityMs,
   });
 }
 

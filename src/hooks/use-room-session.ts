@@ -116,6 +116,8 @@ export function useRoomSession({
             clockBestRoundTripMs: snapshot.clock?.bestRoundTripMs ?? null,
             clockJitterMs: snapshot.clock?.jitterMs ?? null,
             clockSamplesUsed: snapshot.clock?.samplesUsed ?? null,
+            clockOutliersRejected: snapshot.clock?.outliersRejected ?? null,
+            clockOffsetStabilityMs: snapshot.clock?.offsetStabilityMs ?? null,
             audioFrame: snapshot.audioFrame,
             acousticPulse: calibration.acousticPulse ?? null,
             acousticObservation: calibration.acousticObservation ?? null,

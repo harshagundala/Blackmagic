@@ -44,6 +44,24 @@ describe("clock sync metadata", () => {
     expect(model.samplesUsed).toBe(3);
   });
 
+  test("rejects offset outliers even when they have attractive round trips", () => {
+    const exchanges: ClockExchange[] = [
+      makeExchange(100, 52),
+      makeExchange(101, 48),
+      makeExchange(99, 50),
+      makeExchange(178, 18),
+      makeExchange(181, 20),
+    ];
+
+    const model = robustClockModel(exchanges);
+
+    expect(model.offsetMs).toBeCloseTo(100, 1);
+    expect(model.samplesUsed).toBe(3);
+    expect(model.outliersRejected).toBe(2);
+    expect(model.offsetStabilityMs).toBeLessThan(1);
+    expect(model.quality).toBeGreaterThan(0.7);
+  });
+
   test("timestamps audio by sample index and preserves host-aligned estimate", () => {
     const stamp = audioFrameTimestamp({
       audioContextTimeSeconds: 10,
@@ -53,11 +71,21 @@ describe("clock sync metadata", () => {
       performanceNowMs: 2_000,
       clockOffsetMs: 101.4,
       clockUncertaintyMs: 8,
+      clockQuality: 0.91,
+      clockMaxErrorMs: 8,
+      clockBestRoundTripMs: 16,
+      clockJitterMs: 0.7,
+      clockSamplesUsed: 7,
+      clockOutliersRejected: 2,
+      clockOffsetStabilityMs: 0.6,
     });
 
     expect(stamp.audioElapsedMs).toBeCloseTo(10_010, 3);
     expect(stamp.hostEstimatedEpochMs).toBeCloseTo(1_700_000_002_101.4, 3);
     expect(stamp.clockUncertaintyMs).toBe(8);
+    expect(stamp.clockQuality).toBe(0.91);
+    expect(stamp.clockSamplesUsed).toBe(7);
+    expect(stamp.clockOutliersRejected).toBe(2);
   });
 
   test("maps historical audio samples through an audio/performance anchor", () => {

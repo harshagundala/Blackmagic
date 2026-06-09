@@ -22,9 +22,12 @@ export type ClockModel = {
   uncertaintyMs: number;
   maxErrorMs: number;
   bestRoundTripMs: number;
+  worstAcceptedRoundTripMs: number;
   jitterMs: number;
+  offsetStabilityMs: number;
   quality: number;
   samplesUsed: number;
+  outliersRejected: number;
 };
 
 export type AudioFrameTimestampInput = {
@@ -35,6 +38,13 @@ export type AudioFrameTimestampInput = {
   performanceNowMs: number;
   clockOffsetMs: number;
   clockUncertaintyMs: number;
+  clockQuality?: number | null;
+  clockMaxErrorMs?: number | null;
+  clockBestRoundTripMs?: number | null;
+  clockJitterMs?: number | null;
+  clockSamplesUsed?: number | null;
+  clockOutliersRejected?: number | null;
+  clockOffsetStabilityMs?: number | null;
 };
 
 export type AudioFrameTimestamp = AudioFrameTimestampInput & {
@@ -98,19 +108,40 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
       uncertaintyMs: Number.POSITIVE_INFINITY,
       maxErrorMs: Number.POSITIVE_INFINITY,
       bestRoundTripMs: Number.POSITIVE_INFINITY,
+      worstAcceptedRoundTripMs: Number.POSITIVE_INFINITY,
       jitterMs: Number.POSITIVE_INFINITY,
+      offsetStabilityMs: Number.POSITIVE_INFINITY,
       quality: 0,
       samplesUsed: 0,
+      outliersRejected: 0,
     };
   }
 
+  const offsetMedian = median(
+    estimates.map((estimate) => estimate.offsetMs).sort((a, b) => a - b),
+  );
+  const deviations = estimates
+    .map((estimate) => Math.abs(estimate.offsetMs - offsetMedian))
+    .sort((a, b) => a - b);
+  const medianDeviation = median(deviations);
+  const offsetOutlierThresholdMs = Math.max(6, medianDeviation * 3);
+  const offsetFiltered = estimates.filter(
+    (estimate) =>
+      Math.abs(estimate.offsetMs - offsetMedian) <= offsetOutlierThresholdMs,
+  );
+  const outliersRejected = estimates.length - offsetFiltered.length;
   const keepCount = Math.max(1, Math.ceil(estimates.length * 0.75));
-  const kept = estimates.slice(0, keepCount);
+  const kept = (offsetFiltered.length > 0 ? offsetFiltered : estimates)
+    .sort((a, b) => a.roundTripMs - b.roundTripMs)
+    .slice(0, keepCount);
   const offsets = kept.map((estimate) => estimate.offsetMs).sort((a, b) => a - b);
   const offsetMs = median(offsets);
   const jitterMs = rms(offsets.map((offset) => offset - offsetMs));
   const bestUncertainty = Math.min(...kept.map((estimate) => estimate.uncertaintyMs));
   const bestRoundTripMs = Math.min(...kept.map((estimate) => estimate.roundTripMs));
+  const worstAcceptedRoundTripMs = Math.max(
+    ...kept.map((estimate) => estimate.roundTripMs),
+  );
   const maxErrorMs = round(bestUncertainty + jitterMs);
   const uncertaintyMs = maxErrorMs;
   const quality = round(Math.max(0, Math.min(1, 1 - maxErrorMs / 100)));
@@ -120,9 +151,12 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
     uncertaintyMs,
     maxErrorMs,
     bestRoundTripMs,
+    worstAcceptedRoundTripMs,
     jitterMs: round(jitterMs),
+    offsetStabilityMs: round(jitterMs),
     quality,
     samplesUsed: kept.length,
+    outliersRejected,
   };
 }
 
