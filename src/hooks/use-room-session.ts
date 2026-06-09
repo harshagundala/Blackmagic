@@ -7,6 +7,10 @@ import type {
   RoomState,
   SessionRole,
 } from "@/lib/session/registry";
+import {
+  acknowledgedVoiceEventId,
+  createDeviceHeartbeatPayload,
+} from "@/lib/session/heartbeat-payload";
 import { IDLE_ROOM_POLL_INTERVAL_MS } from "@/lib/session/polling";
 
 type SessionClaimResponse = {
@@ -49,6 +53,7 @@ export function useRoomSession({
   );
   const urlRef = useRef("");
   const roomRevisionRef = useRef(0);
+  const publishedVoiceEventIdRef = useRef("");
 
   useEffect(() => {
     urlRef.current = window.location.href;
@@ -183,62 +188,19 @@ export function useRoomSession({
         return false;
       }
 
+      const heartbeatPayload = createDeviceHeartbeatPayload({
+        snapshot,
+        calibration,
+        lastPublishedVoiceEventId: publishedVoiceEventIdRef.current,
+      });
+
       const response = await fetch("/api/session/heartbeat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           deviceId,
           url: urlRef.current,
-          heartbeat: {
-            mic: snapshot.mic,
-            micLevel: snapshot.micLevel,
-            sampleRate: snapshot.sampleRate,
-            clockQuality: snapshot.clock?.quality ?? null,
-            clockOffsetMs: snapshot.clock?.offsetMs ?? null,
-            clockUncertaintyMs: snapshot.clock?.uncertaintyMs ?? null,
-            clockMaxErrorMs: snapshot.clock?.maxErrorMs ?? null,
-            clockBestRoundTripMs: snapshot.clock?.bestRoundTripMs ?? null,
-            clockJitterMs: snapshot.clock?.jitterMs ?? null,
-            clockSamplesUsed: snapshot.clock?.samplesUsed ?? null,
-            clockOutliersRejected: snapshot.clock?.outliersRejected ?? null,
-            clockOffsetStabilityMs: snapshot.clock?.offsetStabilityMs ?? null,
-            audioFrame: snapshot.audioFrame,
-            voiceEvent: snapshot.voiceEvent,
-            acousticPulse: calibration.acousticPulse ?? null,
-            acousticObservation: calibration.acousticObservation ?? null,
-            motion: snapshot.motion,
-            motionAccelerationX: snapshot.motionAccelerationX,
-            motionAccelerationY: snapshot.motionAccelerationY,
-            motionAccelerationZ: snapshot.motionAccelerationZ,
-            motionAccelerationIncludingGravityX:
-              snapshot.motionAccelerationIncludingGravityX,
-            motionAccelerationIncludingGravityY:
-              snapshot.motionAccelerationIncludingGravityY,
-            motionAccelerationIncludingGravityZ:
-              snapshot.motionAccelerationIncludingGravityZ,
-            motionAccelerationMagnitude: snapshot.motionAccelerationMagnitude,
-            motionRotationAlpha: snapshot.motionRotationAlpha,
-            motionRotationBeta: snapshot.motionRotationBeta,
-            motionRotationGamma: snapshot.motionRotationGamma,
-            motionRotationRateDegPerSec: snapshot.motionRotationRateDegPerSec,
-            motionIntervalMs: snapshot.motionIntervalMs,
-            motionCapturedAtClientPerfMs: snapshot.motionCapturedAtClientPerfMs,
-            motionStability: snapshot.motionStability,
-            heading: snapshot.heading,
-            headingDegrees: snapshot.headingDegrees,
-            orientationBetaDegrees: snapshot.orientationBetaDegrees,
-            orientationGammaDegrees: snapshot.orientationGammaDegrees,
-            orientationAbsolute: snapshot.orientationAbsolute,
-            location: snapshot.location,
-            locationLatitude: snapshot.locationLatitude,
-            locationLongitude: snapshot.locationLongitude,
-            locationAccuracyMeters: snapshot.locationAccuracyMeters,
-            locationAltitudeMeters: snapshot.locationAltitudeMeters,
-            locationAltitudeAccuracyMeters: snapshot.locationAltitudeAccuracyMeters,
-            locationHeadingDegrees: snapshot.locationHeadingDegrees,
-            locationSpeedMetersPerSecond: snapshot.locationSpeedMetersPerSecond,
-            locationCapturedAtEpochMs: snapshot.locationCapturedAtEpochMs,
-          },
+          heartbeat: heartbeatPayload,
         }),
       }).catch(() => null);
       if (response?.ok) {
@@ -247,6 +209,10 @@ export function useRoomSession({
           .catch(() => null)) as RoomState | null;
         if (state) {
           applyRoomState(state);
+          publishedVoiceEventIdRef.current = acknowledgedVoiceEventId(
+            heartbeatPayload,
+            publishedVoiceEventIdRef.current,
+          );
           return true;
         }
       }

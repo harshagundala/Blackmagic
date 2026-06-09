@@ -93,6 +93,7 @@ function phoneLayoutSection(
   metrics: PhysicalRoomValidationMetrics,
 ): PhysicalRoomValidationSection {
   const blockers: string[] = [];
+  let degraded = false;
   if (metrics.deviceCount < 2) {
     blockers.push("insufficient_devices");
   }
@@ -107,10 +108,11 @@ function phoneLayoutSection(
   }
   if (metrics.layoutStressMeters > MAX_READY_LAYOUT_STRESS_METERS) {
     blockers.push("layout_stress_high");
+    degraded = true;
   }
 
   return {
-    status: blockers.length === 0 ? "ready" : "warming",
+    status: degraded ? "degraded" : blockers.length === 0 ? "ready" : "warming",
     blockers,
   };
 }
@@ -119,6 +121,7 @@ function spokenSourceSection(
   metrics: PhysicalRoomValidationMetrics,
 ): PhysicalRoomValidationSection {
   const blockers: string[] = [];
+  let degraded = false;
   if (metrics.deviceCount < 3) {
     blockers.push("insufficient_tdoa_devices");
   }
@@ -130,16 +133,18 @@ function spokenSourceSection(
     metrics.bestSourceResidualMs > MAX_READY_SOURCE_RESIDUAL_MS
   ) {
     blockers.push("source_residual_high");
+    degraded = true;
   }
   if (
     metrics.bestSourceConfidence !== null &&
     metrics.bestSourceConfidence < MIN_READY_SOURCE_CONFIDENCE
   ) {
     blockers.push("source_confidence_low");
+    degraded = true;
   }
 
   return {
-    status: blockers.length === 0 ? "ready" : "warming",
+    status: degraded ? "degraded" : blockers.length === 0 ? "ready" : "warming",
     blockers,
   };
 }
