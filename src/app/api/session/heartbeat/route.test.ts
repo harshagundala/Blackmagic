@@ -59,6 +59,26 @@ describe("session heartbeat route", () => {
     expect(body.devices[0].voiceEvents?.[0]?.audioSnippet).toBeNull();
     expect(body.audioEvents[0].observations[0].audioSnippet).toBeNull();
   });
+
+  test("rejects non-web session urls before touching the store", async () => {
+    heartbeat.mockResolvedValue(roomStateWithSnippet());
+
+    const response = await POST(
+      new Request("https://blackmagic.app/api/session/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({
+          deviceId: "host",
+          url: "javascript:alert(1)",
+          heartbeat: {},
+        }),
+      }),
+    );
+    const body = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(body).toEqual({ error: "invalid_url" });
+    expect(heartbeat).not.toHaveBeenCalled();
+  });
 });
 
 function roomStateWithSnippet(): RoomState {

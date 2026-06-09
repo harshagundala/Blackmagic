@@ -401,7 +401,17 @@ function pruneStaleClaims(
 }
 
 export function normalizeSessionKey(url: string) {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("invalid_session_url");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("invalid_session_url");
+  }
+
   parsed.hash = "";
   parsed.search = "";
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "") || "/"}`;

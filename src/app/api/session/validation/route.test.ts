@@ -27,6 +27,21 @@ describe("session validation route", () => {
     expect(state).not.toHaveBeenCalled();
   });
 
+  test("rejects invalid session urls before reading room state", async () => {
+    state.mockResolvedValue(emptyRoomState());
+
+    const response = await GET(
+      new Request(
+        "https://blackmagic.app/api/session/validation?url=mailto%3Aroom%40example.com",
+      ),
+    );
+    const body = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(body).toEqual({ error: "invalid_url" });
+    expect(state).not.toHaveBeenCalled();
+  });
+
   test("returns a physical-room validation report for the live room state", async () => {
     const simulation = simulateAcousticRoom({
       roomUrl: "https://blackmagic.app/live-validation",
@@ -69,3 +84,26 @@ describe("session validation route", () => {
     expect(body.validation.blockers).toEqual([]);
   });
 });
+
+function emptyRoomState() {
+  return {
+    sessionKey: "https://blackmagic.app/",
+    hostDeviceId: "",
+    revision: 0,
+    changedAt: 0,
+    updatedAt: 1_000,
+    calibrationTurn: null,
+    timeSync: {
+      status: "solo" as const,
+      synchronizedDeviceIds: [],
+      localizationDeviceIds: [],
+      roomConfidence: 0,
+      medianMaxErrorMs: null,
+      worstLocalizationErrorMs: null,
+      devices: [],
+    },
+    ranges: [],
+    devices: [],
+    audioEvents: [],
+  };
+}

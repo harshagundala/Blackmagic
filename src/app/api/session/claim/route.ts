@@ -1,4 +1,8 @@
 import { getSessionStore } from "@/lib/session/server-registry";
+import {
+  invalidSessionUrlResponse,
+  parseSessionUrl,
+} from "../../../../lib/session/session-url";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
@@ -10,6 +14,11 @@ export async function POST(request: Request) {
     return Response.json({ error: "missing_device_or_url" }, { status: 400 });
   }
 
-  const claim = await getSessionStore().claim(body.url, body.deviceId);
+  const sessionUrl = parseSessionUrl(body.url);
+  if (!sessionUrl) {
+    return invalidSessionUrlResponse();
+  }
+
+  const claim = await getSessionStore().claim(sessionUrl, body.deviceId);
   return Response.json(claim);
 }

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { createSessionRegistry, type DeviceHeartbeat } from "./registry";
+import {
+  createSessionRegistry,
+  normalizeSessionKey,
+  type DeviceHeartbeat,
+} from "./registry";
 
 describe("session registry", () => {
   test("makes the first device at a URL the host", () => {
@@ -15,6 +19,18 @@ describe("session registry", () => {
 
     expect(registry.claim("https://blackmagic.app/", "a").role).toBe("host");
     expect(registry.claim("https://blackmagic.app/alpha", "b").role).toBe("host");
+  });
+
+  test("normalizes only absolute web session urls", () => {
+    expect(normalizeSessionKey("https://blackmagic.app/lab?utm=1#join")).toBe(
+      "https://blackmagic.app/lab",
+    );
+    expect(() => normalizeSessionKey("not-a-url")).toThrow(
+      "invalid_session_url",
+    );
+    expect(() => normalizeSessionKey("javascript:alert(1)")).toThrow(
+      "invalid_session_url",
+    );
   });
 
   test("tracks mutation revisions separately from read timestamps", () => {

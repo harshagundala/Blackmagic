@@ -1,5 +1,9 @@
 import { compactRoomStateForTransport } from "@/lib/session/registry";
 import { getSessionStore } from "@/lib/session/server-registry";
+import {
+  invalidSessionUrlResponse,
+  parseSessionUrl,
+} from "../../../../lib/session/session-url";
 import { waitForRoomStateRevision } from "@/lib/session/wait";
 
 const MAX_WAIT_MS = 8_000;
@@ -15,6 +19,11 @@ export async function GET(request: Request) {
     return Response.json({ error: "missing_url" }, { status: 400 });
   }
 
+  const parsedSessionUrl = parseSessionUrl(sessionUrl);
+  if (!parsedSessionUrl) {
+    return invalidSessionUrlResponse();
+  }
+
   const afterRevision = nonNegativeNumber(url.searchParams.get("revision")) ?? 0;
   const timeoutMs = Math.min(
     MAX_WAIT_MS,
@@ -23,7 +32,7 @@ export async function GET(request: Request) {
 
   return Response.json(
     compactRoomStateForTransport(
-      await waitForRoomStateRevision(getSessionStore(), sessionUrl, {
+      await waitForRoomStateRevision(getSessionStore(), parsedSessionUrl, {
         afterRevision,
         timeoutMs,
       }),
