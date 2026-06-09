@@ -206,6 +206,10 @@ export function BlackmagicApp() {
     constellation?.devices.filter(
       (device) => device.deviceId !== roomState?.hostDeviceId,
     ) ?? [];
+  const sourceHints =
+    constellation?.audioSources
+      .filter((source) => source.ageMs <= 6_000)
+      .slice(-3) ?? [];
 
   return (
     <main
@@ -262,6 +266,27 @@ export function BlackmagicApp() {
                 transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.82 + confidence * 0.36})`,
                 opacity: 0.28 + confidence * 0.42 + index * 0.025,
                 transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 300ms ease",
+              }}
+            />
+          );
+        })}
+        {sourceHints.map((source, index) => {
+          const x = clamp(source.x * 84, -210, 210);
+          const y = clamp(source.y * 84, -210, 210);
+          const freshness = 1 - clamp(source.ageMs / 6_000, 0, 1);
+          const strength = clamp(source.confidence, 0.18, 1) * freshness;
+
+          return (
+            <span
+              aria-hidden
+              className="absolute left-1/2 top-1/2 h-24 w-24 rounded-full bg-[#007aff]/20 blur-xl"
+              key={source.eventId}
+              style={{
+                animation: "source-bloom 1.9s ease-out infinite",
+                animationDelay: `${index * 120}ms`,
+                opacity: 0.12 + strength * 0.5,
+                transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(${0.55 + strength * 0.95})`,
+                transition: "transform 700ms cubic-bezier(.2,.8,.2,1), opacity 260ms ease",
               }}
             />
           );

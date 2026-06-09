@@ -95,6 +95,21 @@ button {
   }
 }
 
+@keyframes source-bloom {
+  0% {
+    filter: blur(18px);
+    border-radius: 45% 55% 52% 48%;
+  }
+  50% {
+    filter: blur(24px);
+    border-radius: 58% 42% 46% 54%;
+  }
+  100% {
+    filter: blur(18px);
+    border-radius: 45% 55% 52% 48%;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
