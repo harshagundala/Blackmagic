@@ -2,6 +2,10 @@
 
 Blackmagic is a browser-native research app for turning a cluster of nearby phones into a relative acoustic constellation. V1 focuses on the first believable slice: URL-based host/phone rooms, explicit sensor permission flow, clock-synced sensor heartbeats, and the acoustic primitives needed for pairwise ranging.
 
+## Current Main App: Waveform Plumbing Lab
+
+The main routes currently render `WaveformApp`: every phone shows a live mic waveform for **every** connected phone, all drawn on the shared host-clock timeline. This proves the foundation visibly — capture, direct WebRTC links (host as hub), and sync precision (a clap aligns across rows; per-device `±Xms` badges show clock error against the host). The chirp/localization stack below remains in the tree and re-mounts once the plumbing is trusted.
+
 ## Current V1
 
 - Next.js 16 App Router, React 19, TypeScript, Tailwind CSS.
