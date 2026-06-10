@@ -142,8 +142,14 @@ const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
 // getUserMedia again (no re-prompt), then fall back to processed (default
 // constraint) capture, which uses a different iOS capture path.
 const SILENT_CAPTURE_RMS = 1e-5;
+// Between exact silence and a healthy noise floor sits a dead zone where a
+// broken iOS capture path can leak faint processing noise. Recover from that
+// band too, just on a longer fuse so a genuinely tomb-quiet room does not
+// trigger churn.
+const QUIET_CAPTURE_RMS = 3e-5;
 const HEALTHY_CAPTURE_RMS = 1e-4;
 const SILENT_CAPTURE_REBUILD_MS = 3_000;
+const QUIET_CAPTURE_REBUILD_MS = 9_000;
 const MAX_CAPTURE_RECOVERIES = 5;
 // Envelope series shared with peers: 25 ms buckets, 16 per chunk (400 ms),
 // sent every sensor frame (~220 ms) so one dropped frame costs nothing.
@@ -381,6 +387,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     captureModeRef.current ??= loadStoredCaptureMode();
     const startMode = captureModeRef.current;
 
+    // Apple's AudioSession web API, where exposed, declares capture intent
+    // before the stream exists; a no-op everywhere else.
+    hintAudioSessionPlayAndRecord();
+
     // The microphone request must be the permission prompt issued inside the
     // raw tap-gesture stack, before ANY await: on iOS each permission prompt
     // consumes the gesture's user activation, and getUserMedia called without
@@ -389,12 +399,6 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     const mediaStreamPromise = navigator.mediaDevices.getUserMedia(
       captureConstraintsFor(startMode),
     );
-
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    // Created synchronously inside the user gesture so iOS lets it run.
-    let audioContext = new AudioContextClass();
-    audioContextRef.current = audioContext;
-    await resumeAudioContextIfNeeded(audioContext);
 
     // Clock sync is independent of the microphone: it must run even when
     // capture fails, both for the recovery paths and so a mic-less device
@@ -419,22 +423,14 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       const audioTrack = stream.getAudioTracks()[0] ?? null;
       const trackSettings = audioTrack?.getSettings?.() ?? null;
 
-      // iOS WebKit can run the context at a different hardware rate than the
-      // microphone capture route (44.1 kHz context vs 48 kHz mic). A
-      // mediastream source with mismatched rates produces silence — the mic
-      // looks granted but every sample is zero. Recreate the context at the
-      // track's actual rate when reported (iOS usually does not report it;
-      // the silent-capture watchdog covers that case by observation).
-      const trackSampleRate = finitePositiveNumber(trackSettings?.sampleRate);
-      if (
-        trackSampleRate !== null &&
-        Math.abs(trackSampleRate - audioContext.sampleRate) > 0.5
-      ) {
-        await audioContext.close().catch(() => undefined);
-        audioContext = new AudioContextClass({ sampleRate: trackSampleRate });
-        audioContextRef.current = audioContext;
-      }
-
+      // Canonical iOS ordering: the context is created AFTER the stream, so
+      // WebKit instantiates it at the now-active capture route's hardware
+      // rate (a pre-existing context at a mismatched rate reads silence).
+      // The live capture session lets the context start without a fresh
+      // gesture, and the lifecycle/tap backstops cover the stragglers.
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const audioContext = new AudioContextClass();
+      audioContextRef.current = audioContext;
       await resumeAudioContextIfNeeded(audioContext);
       setSnapshot((current) => ({
         ...current,
@@ -456,7 +452,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       captureSilentSincePerfMsRef.current = null;
       startCaptureReadLoop();
     } catch {
-      void audioContext.close().catch(() => undefined);
+      void audioContextRef.current?.close().catch(() => undefined);
       audioContextRef.current = null;
       // A non-default capture mode that fails to start must not strand the
       // session: retry on the processed pipeline (permission, if granted,
@@ -713,7 +709,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     }
     if (
       (audioContext.state as AudioContextRunState) !== "running" ||
-      micLevel > SILENT_CAPTURE_RMS
+      micLevel > QUIET_CAPTURE_RMS
     ) {
       captureSilentSincePerfMsRef.current = null;
       return;
@@ -721,7 +717,11 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
 
     const now = performance.now();
     captureSilentSincePerfMsRef.current ??= now;
-    if (now - captureSilentSincePerfMsRef.current < SILENT_CAPTURE_REBUILD_MS) {
+    const requiredQuietMs =
+      micLevel <= SILENT_CAPTURE_RMS
+        ? SILENT_CAPTURE_REBUILD_MS
+        : QUIET_CAPTURE_REBUILD_MS;
+    if (now - captureSilentSincePerfMsRef.current < requiredQuietMs) {
       return;
     }
 
@@ -948,10 +948,22 @@ function booleanOrNull(value: unknown) {
   return typeof value === "boolean" ? value : null;
 }
 
-function finitePositiveNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value
-    : null;
+// Apple's AudioSession web API (W3C Audio Session, shipped progressively in
+// WebKit): declaring "play-and-record" before capture tells iOS to configure
+// the audio session for simultaneous capture and playback instead of
+// guessing from usage. Undefined on other engines.
+function hintAudioSessionPlayAndRecord() {
+  const session = (
+    navigator as Navigator & { audioSession?: { type: string } }
+  ).audioSession;
+  if (!session) {
+    return;
+  }
+  try {
+    session.type = "play-and-record";
+  } catch {
+    // Older enum sets: leave the session in automatic mode.
+  }
 }
 
 // iOS reports a non-standard "interrupted" state after audio route changes,
