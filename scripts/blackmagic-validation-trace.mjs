@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const DEFAULT_BASE_URL = "https://blackmagic-rouge.vercel.app";
@@ -29,13 +29,17 @@ process.on("SIGINT", () => {
   stopped = true;
 });
 
-for (let index = 0; index < options.samples && !stopped; index += 1) {
-  const snapshot = await fetchValidationSnapshot(options);
-  snapshots.push(snapshot);
-  process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+if (options.from) {
+  snapshots.push(...(await readTraceSnapshots(options.from)));
+} else {
+  for (let index = 0; index < options.samples && !stopped; index += 1) {
+    const snapshot = await fetchValidationSnapshot(options);
+    snapshots.push(snapshot);
+    process.stdout.write(`${JSON.stringify(snapshot)}\n`);
 
-  if (index < options.samples - 1 && !stopped) {
-    await sleep(options.intervalMs);
+    if (index < options.samples - 1 && !stopped) {
+      await sleep(options.intervalMs);
+    }
   }
 }
 
@@ -51,6 +55,21 @@ if (options.out) {
 const summary = summarize(snapshots, {
   requiredReadyStreakMs: options.readyStreakMs,
 });
+const evidence = createEvidencePacket({
+  baseUrl: options.baseUrl,
+  generatedAtMs: Date.now(),
+  requiredReadyStreakMs: options.readyStreakMs,
+  sessionUrl: options.sessionUrl,
+  snapshots,
+  summary,
+});
+
+if (options.evidenceOut) {
+  const evidencePath = resolve(options.evidenceOut);
+  await mkdir(dirname(evidencePath), { recursive: true });
+  await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+}
+
 process.stderr.write(`${JSON.stringify({ summary }, null, 2)}\n`);
 process.exit(summary.status === "ready" ? 0 : 2);
 
@@ -62,6 +81,8 @@ function parseArgs(args) {
     readyStreakMs: DEFAULT_READY_STREAK_MS,
     sessionUrl: "",
     out: "",
+    from: "",
+    evidenceOut: "",
     help: false,
   };
 
@@ -82,6 +103,12 @@ function parseArgs(args) {
         break;
       case "--out":
         parsed.out = requireValue(args, ++index, arg);
+        break;
+      case "--from":
+        parsed.from = requireValue(args, ++index, arg);
+        break;
+      case "--evidence-out":
+        parsed.evidenceOut = requireValue(args, ++index, arg);
         break;
       case "--help":
       case "-h":
@@ -137,6 +164,21 @@ async function fetchValidationSnapshot({
     updatedAt: body.updatedAt,
     validation: body.validation,
   };
+}
+
+async function readTraceSnapshots(path) {
+  const content = await readFile(resolve(path), "utf8");
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Invalid NDJSON at line ${index + 1}: ${error.message}`);
+      }
+    });
 }
 
 function summarize(snapshots, { requiredReadyStreakMs }) {
@@ -215,6 +257,102 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
     peakTdoaSourceCount: peakMetric(ordered, "tdoaSourceCount"),
     bestSourceResidualMs: bestSourceResidualMs(ordered),
     devices: summarizeDevices(ordered),
+  };
+}
+
+function createEvidencePacket({
+  baseUrl,
+  generatedAtMs,
+  requiredReadyStreakMs,
+  sessionUrl,
+  snapshots,
+  summary,
+}) {
+  const ordered = [...snapshots].sort(
+    (left, right) =>
+      left.capturedAtMs - right.capturedAtMs ||
+      (left.revision ?? 0) - (right.revision ?? 0),
+  );
+  const first = ordered[0] ?? null;
+  const final = ordered[ordered.length - 1] ?? null;
+  const finalMetrics = final?.validation?.metrics ?? null;
+  const finalDeviceCount = finalMetrics?.deviceCount ?? 0;
+  const requiredDevices = 3;
+  const requiredRanges =
+    finalDeviceCount >= 3 ? Math.max(3, finalDeviceCount) : requiredDevices;
+  const requiredDeviceEvidence =
+    finalDeviceCount >= 3 ? finalDeviceCount : requiredDevices;
+  const gates = [
+    {
+      id: "sustained_ready",
+      passed: summary.status === "ready",
+      observed: summary.readyStreakMs,
+      required: requiredReadyStreakMs,
+    },
+    {
+      id: "minimum_devices",
+      passed: summary.peakDeviceCount >= requiredDevices,
+      observed: summary.peakDeviceCount,
+      required: requiredDevices,
+    },
+    {
+      id: "localized_devices",
+      passed: summary.peakLocalizedDeviceCount >= requiredDevices,
+      observed: summary.peakLocalizedDeviceCount,
+      required: requiredDevices,
+    },
+    {
+      id: "acoustic_ranges",
+      passed: summary.peakRangeCount >= requiredRanges,
+      observed: summary.peakRangeCount,
+      required: requiredRanges,
+    },
+    {
+      id: "audio_capture",
+      passed: summary.peakAudioCaptureReadyDeviceCount >= requiredDeviceEvidence,
+      observed: summary.peakAudioCaptureReadyDeviceCount,
+      required: requiredDeviceEvidence,
+    },
+    {
+      id: "audio_timestamps",
+      passed:
+        summary.peakAudioTimestampReadyDeviceCount >= requiredDeviceEvidence,
+      observed: summary.peakAudioTimestampReadyDeviceCount,
+      required: requiredDeviceEvidence,
+    },
+    {
+      id: "tdoa_source",
+      passed: summary.peakTdoaSourceCount >= 1,
+      observed: summary.peakTdoaSourceCount,
+      required: 1,
+    },
+  ];
+
+  return {
+    protocolVersion: 1,
+    generatedAtMs,
+    baseUrl,
+    sessionUrl,
+    sessionKey: final?.sessionKey ?? first?.sessionKey ?? null,
+    requiredReadyStreakMs,
+    passed: gates.every((gate) => gate.passed),
+    sampleWindow: {
+      firstCapturedAtMs: first?.capturedAtMs ?? null,
+      lastCapturedAtMs: final?.capturedAtMs ?? null,
+      durationMs: summary.durationMs,
+      sampleCount: summary.sampleCount,
+    },
+    gates,
+    summary,
+    finalSnapshot: {
+      capturedAtMs: final?.capturedAtMs ?? null,
+      revision: final?.revision ?? null,
+      updatedAtMs: final?.updatedAt ?? null,
+      status: final?.validation?.status ?? "empty",
+      blockers: final ? [...final.validation.blockers] : [],
+      metrics: finalMetrics,
+      devices: final ? [...(final.validation.devices ?? [])] : [],
+    },
   };
 }
 
@@ -364,5 +502,7 @@ Options:
   --interval-ms <ms>        Delay between samples. Default: ${DEFAULT_INTERVAL_MS}
   --ready-streak-ms <ms>    Required final ready streak. Default: ${DEFAULT_READY_STREAK_MS}
   --out <path>              Write NDJSON snapshots to a file.
+  --from <path>             Read NDJSON snapshots instead of polling.
+  --evidence-out <path>     Write a compact JSON trial evidence packet.
 `);
 }

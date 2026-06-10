@@ -1,5 +1,10 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+  createPhysicalRoomTrialEvidence,
   summarizePhysicalRoomValidationTrace,
   type PhysicalRoomValidationSnapshot,
 } from "./validation-trace";
@@ -225,6 +230,231 @@ describe("validation trace", () => {
       }),
     ]);
   });
+
+  test("creates a shareable physical-room trial evidence packet", () => {
+    const snapshots = [
+      snapshot(
+        1_000,
+        "warming",
+        ["insufficient_acoustic_ranges"],
+        {
+          deviceCount: 2,
+          localizedDeviceCount: 0,
+          rangeCount: 0,
+        },
+        [device("host", { role: "host" }), device("phone-a")],
+        1_100,
+      ),
+      snapshot(
+        7_000,
+        "ready",
+        [],
+        {
+          deviceCount: 3,
+          localizedDeviceCount: 3,
+          rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
+          audioTimestampReadyDeviceCount: 3,
+          tdoaSourceCount: 1,
+          worstAudioTimestampErrorMs: 1.1,
+          lowestAudioTimingConfidence: 0.94,
+          bestSourceResidualMs: 1.7,
+        },
+        [
+          device("host", { role: "host", localized: true }),
+          device("phone-a", { localized: true, distanceMeters: 2.18 }),
+          device("phone-b", { localized: true, distanceMeters: 2.04 }),
+        ],
+        7_100,
+      ),
+      snapshot(
+        13_000,
+        "ready",
+        [],
+        {
+          deviceCount: 3,
+          localizedDeviceCount: 3,
+          rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
+          audioTimestampReadyDeviceCount: 3,
+          tdoaSourceCount: 1,
+          worstAudioTimestampErrorMs: 0.9,
+          lowestAudioTimingConfidence: 0.95,
+          bestSourceResidualMs: 1.3,
+        },
+        [
+          device("host", { role: "host", localized: true }),
+          device("phone-a", { localized: true, distanceMeters: 2.19 }),
+          device("phone-b", { localized: true, distanceMeters: 2.02 }),
+        ],
+        13_100,
+      ),
+    ];
+
+    const evidence = createPhysicalRoomTrialEvidence({
+      baseUrl: "https://blackmagic-rouge.vercel.app",
+      generatedAtMs: 14_000,
+      requiredReadyStreakMs: 5_000,
+      sessionUrl: "https://blackmagic-rouge.vercel.app/lab",
+      snapshots,
+    });
+
+    expect(evidence).toEqual(
+      expect.objectContaining({
+        protocolVersion: 1,
+        baseUrl: "https://blackmagic-rouge.vercel.app",
+        generatedAtMs: 14_000,
+        requiredReadyStreakMs: 5_000,
+        sessionUrl: "https://blackmagic-rouge.vercel.app/lab",
+        sessionKey: "https://blackmagic.app/lab",
+        passed: true,
+        sampleWindow: {
+          firstCapturedAtMs: 1_000,
+          lastCapturedAtMs: 13_000,
+          durationMs: 12_000,
+          sampleCount: 3,
+        },
+        finalSnapshot: expect.objectContaining({
+          capturedAtMs: 13_000,
+          revision: 13_000,
+          updatedAtMs: 13_100,
+          status: "ready",
+          blockers: [],
+        }),
+      }),
+    );
+    expect(evidence.gates).toEqual([
+      expect.objectContaining({
+        id: "sustained_ready",
+        passed: true,
+        observed: 6_000,
+        required: 5_000,
+      }),
+      expect.objectContaining({
+        id: "minimum_devices",
+        passed: true,
+        observed: 3,
+        required: 3,
+      }),
+      expect.objectContaining({
+        id: "localized_devices",
+        passed: true,
+        observed: 3,
+        required: 3,
+      }),
+      expect.objectContaining({
+        id: "acoustic_ranges",
+        passed: true,
+        observed: 3,
+        required: 3,
+      }),
+      expect.objectContaining({
+        id: "audio_capture",
+        passed: true,
+        observed: 3,
+        required: 3,
+      }),
+      expect.objectContaining({
+        id: "audio_timestamps",
+        passed: true,
+        observed: 3,
+        required: 3,
+      }),
+      expect.objectContaining({
+        id: "tdoa_source",
+        passed: true,
+        observed: 1,
+        required: 1,
+      }),
+    ]);
+    expect(evidence.summary.devices).toHaveLength(3);
+  });
+
+  test("writes an evidence packet from an existing NDJSON trace", () => {
+    const directory = mkdtempSync(join(tmpdir(), "blackmagic-trace-"));
+    const tracePath = join(directory, "trace.ndjson");
+    const evidencePath = join(directory, "evidence.json");
+    const snapshots = [
+      snapshot(
+        1_000,
+        "ready",
+        [],
+        {
+          deviceCount: 3,
+          localizedDeviceCount: 3,
+          rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
+          audioTimestampReadyDeviceCount: 3,
+          tdoaSourceCount: 1,
+        },
+        [
+          device("host", { role: "host", localized: true }),
+          device("phone-a", { localized: true, distanceMeters: 2.18 }),
+          device("phone-b", { localized: true, distanceMeters: 2.04 }),
+        ],
+      ),
+      snapshot(
+        7_000,
+        "ready",
+        [],
+        {
+          deviceCount: 3,
+          localizedDeviceCount: 3,
+          rangeCount: 3,
+          audioCaptureReadyDeviceCount: 3,
+          audioTimestampReadyDeviceCount: 3,
+          tdoaSourceCount: 1,
+        },
+        [
+          device("host", { role: "host", localized: true }),
+          device("phone-a", { localized: true, distanceMeters: 2.19 }),
+          device("phone-b", { localized: true, distanceMeters: 2.02 }),
+        ],
+      ),
+    ];
+
+    writeFileSync(
+      tracePath,
+      snapshots.map((item) => JSON.stringify(item)).join("\n") + "\n",
+    );
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "scripts/blackmagic-validation-trace.mjs",
+          "https://blackmagic-rouge.vercel.app/lab",
+          "--from",
+          tracePath,
+          "--evidence-out",
+          evidencePath,
+          "--ready-streak-ms",
+          "5000",
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status).toBe(0);
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+        passed: boolean;
+        gates: Array<{ id: string; passed: boolean }>;
+        summary: { devices: Array<{ deviceId: string }> };
+      };
+
+      expect(evidence.passed).toBe(true);
+      expect(evidence.gates.every((gate) => gate.passed)).toBe(true);
+      expect(evidence.summary.devices.map((item) => item.deviceId)).toEqual([
+        "host",
+        "phone-a",
+        "phone-b",
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 function snapshot(
@@ -235,11 +465,13 @@ function snapshot(
     PhysicalRoomValidationSnapshot["validation"]["metrics"]
   > = {},
   devices: PhysicalRoomValidationSnapshot["validation"]["devices"] = [],
+  updatedAt = capturedAtMs,
 ): PhysicalRoomValidationSnapshot {
   return {
     capturedAtMs,
     sessionKey: "https://blackmagic.app/lab",
     revision: capturedAtMs,
+    updatedAt,
     validation: {
       status,
       phoneLayout: {

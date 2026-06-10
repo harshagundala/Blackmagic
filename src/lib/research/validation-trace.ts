@@ -8,6 +8,7 @@ export type PhysicalRoomValidationSnapshot = {
   capturedAtMs: number;
   sessionKey: string;
   revision: number;
+  updatedAt?: number;
   validation: PhysicalRoomValidationReport;
 };
 
@@ -55,6 +56,154 @@ export type PhysicalRoomValidationDeviceTraceSummary = {
   lowestAudioTimingConfidence: number | null;
   lowestMotionStability: number | null;
 };
+
+export type PhysicalRoomTrialEvidenceOptions = {
+  baseUrl: string;
+  generatedAtMs: number;
+  requiredReadyStreakMs?: number;
+  sessionUrl: string;
+  snapshots: PhysicalRoomValidationSnapshot[];
+};
+
+export type PhysicalRoomTrialEvidenceGateId =
+  | "sustained_ready"
+  | "minimum_devices"
+  | "localized_devices"
+  | "acoustic_ranges"
+  | "audio_capture"
+  | "audio_timestamps"
+  | "tdoa_source";
+
+export type PhysicalRoomTrialEvidenceGate = {
+  id: PhysicalRoomTrialEvidenceGateId;
+  passed: boolean;
+  observed: number;
+  required: number;
+};
+
+export type PhysicalRoomTrialEvidence = {
+  protocolVersion: 1;
+  generatedAtMs: number;
+  baseUrl: string;
+  sessionUrl: string;
+  sessionKey: string | null;
+  requiredReadyStreakMs: number;
+  passed: boolean;
+  sampleWindow: {
+    firstCapturedAtMs: number | null;
+    lastCapturedAtMs: number | null;
+    durationMs: number;
+    sampleCount: number;
+  };
+  gates: PhysicalRoomTrialEvidenceGate[];
+  summary: PhysicalRoomValidationTraceSummary;
+  finalSnapshot: {
+    capturedAtMs: number | null;
+    revision: number | null;
+    updatedAtMs: number | null;
+    status: PhysicalRoomValidationStatus | "empty";
+    blockers: string[];
+    metrics: PhysicalRoomValidationReport["metrics"] | null;
+    devices: PhysicalRoomValidationDeviceDiagnostic[];
+  };
+};
+
+export function createPhysicalRoomTrialEvidence({
+  baseUrl,
+  generatedAtMs,
+  requiredReadyStreakMs = 0,
+  sessionUrl,
+  snapshots,
+}: PhysicalRoomTrialEvidenceOptions): PhysicalRoomTrialEvidence {
+  const ordered = [...snapshots].sort(
+    (a, b) => a.capturedAtMs - b.capturedAtMs || a.revision - b.revision,
+  );
+  const summary = summarizePhysicalRoomValidationTrace(ordered, {
+    requiredReadyStreakMs,
+  });
+  const first = ordered[0] ?? null;
+  const final = ordered[ordered.length - 1] ?? null;
+  const finalMetrics = final?.validation.metrics ?? null;
+  const finalDeviceCount = finalMetrics?.deviceCount ?? 0;
+  const requiredDevices = 3;
+  const requiredRanges =
+    finalDeviceCount >= 3 ? Math.max(3, finalDeviceCount) : requiredDevices;
+  const requiredDeviceEvidence =
+    finalDeviceCount >= 3 ? finalDeviceCount : requiredDevices;
+  const gates: PhysicalRoomTrialEvidenceGate[] = [
+    {
+      id: "sustained_ready",
+      passed: summary.status === "ready",
+      observed: summary.readyStreakMs,
+      required: requiredReadyStreakMs,
+    },
+    {
+      id: "minimum_devices",
+      passed: summary.peakDeviceCount >= requiredDevices,
+      observed: summary.peakDeviceCount,
+      required: requiredDevices,
+    },
+    {
+      id: "localized_devices",
+      passed: summary.peakLocalizedDeviceCount >= requiredDevices,
+      observed: summary.peakLocalizedDeviceCount,
+      required: requiredDevices,
+    },
+    {
+      id: "acoustic_ranges",
+      passed: summary.peakRangeCount >= requiredRanges,
+      observed: summary.peakRangeCount,
+      required: requiredRanges,
+    },
+    {
+      id: "audio_capture",
+      passed:
+        summary.peakAudioCaptureReadyDeviceCount >= requiredDeviceEvidence,
+      observed: summary.peakAudioCaptureReadyDeviceCount,
+      required: requiredDeviceEvidence,
+    },
+    {
+      id: "audio_timestamps",
+      passed:
+        summary.peakAudioTimestampReadyDeviceCount >= requiredDeviceEvidence,
+      observed: summary.peakAudioTimestampReadyDeviceCount,
+      required: requiredDeviceEvidence,
+    },
+    {
+      id: "tdoa_source",
+      passed: summary.peakTdoaSourceCount >= 1,
+      observed: summary.peakTdoaSourceCount,
+      required: 1,
+    },
+  ];
+
+  return {
+    protocolVersion: 1,
+    generatedAtMs,
+    baseUrl,
+    sessionUrl,
+    sessionKey: final?.sessionKey ?? first?.sessionKey ?? null,
+    requiredReadyStreakMs,
+    passed: gates.every((gate) => gate.passed),
+    sampleWindow: {
+      firstCapturedAtMs: first?.capturedAtMs ?? null,
+      lastCapturedAtMs: final?.capturedAtMs ?? null,
+      durationMs: summary.durationMs,
+      sampleCount: summary.sampleCount,
+    },
+    gates,
+    summary,
+    finalSnapshot: {
+      capturedAtMs: final?.capturedAtMs ?? null,
+      revision: final?.revision ?? null,
+      updatedAtMs: final?.updatedAt ?? null,
+      status: final?.validation.status ?? "empty",
+      blockers: final ? [...final.validation.blockers] : [],
+      metrics: finalMetrics,
+      devices: final ? [...(final.validation.devices ?? [])] : [],
+    },
+  };
+}
 
 export function summarizePhysicalRoomValidationTrace(
   snapshots: PhysicalRoomValidationSnapshot[],
