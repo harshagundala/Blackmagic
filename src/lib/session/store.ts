@@ -17,6 +17,11 @@ import { deriveRoomTimeSync } from "./timing-health";
 export type SessionStore = {
   kind: "memory" | "redis";
   claim(url: string, deviceId: string): Promise<SessionClaim>;
+  heartbeatReceipt?(
+    url: string,
+    deviceId: string,
+    heartbeat?: DeviceHeartbeat,
+  ): Promise<SessionHeartbeatReceipt>;
   heartbeat(
     url: string,
     deviceId: string,
@@ -24,6 +29,11 @@ export type SessionStore = {
   ): Promise<RoomState>;
   state(url: string): Promise<RoomState>;
   revision?(url: string): Promise<number>;
+};
+
+export type SessionHeartbeatReceipt = SessionClaim & {
+  revision: number;
+  changedAt: number;
 };
 
 export type RedisHashResponse = Record<string, string> | string[] | null;
@@ -63,6 +73,16 @@ export function createMemorySessionStore(options: SessionStoreOptions = {}) {
     async claim(url: string, deviceId: string) {
       return registry.claim(url, deviceId);
     },
+    async heartbeatReceipt(
+      url: string,
+      deviceId: string,
+      heartbeat: DeviceHeartbeat = {},
+    ) {
+      return heartbeatReceiptFromRoomState(
+        registry.heartbeat(url, deviceId, heartbeat),
+        deviceId,
+      );
+    },
     async heartbeat(
       url: string,
       deviceId: string,
@@ -88,6 +108,38 @@ export function createRedisSessionStore(
   const ttlSeconds =
     options.ttlSeconds ?? Math.max(60, Math.ceil((staleAfterMs * 4) / 1_000));
 
+  async function writeHeartbeatReceipt(
+    url: string,
+    deviceId: string,
+    heartbeat: DeviceHeartbeat,
+  ): Promise<SessionHeartbeatReceipt> {
+    const sessionKey = normalizeSessionKey(url);
+    const keys = redisSessionKeys(sessionKey);
+    const timestamp = now();
+
+    await pruneRedisSession(redis, keys, timestamp, staleAfterMs, ttlSeconds);
+    const hostDeviceId = await readOrClaimRedisHost(redis, keys, deviceId);
+    const previous = parseDevice(await redis.hget(keys.devices, deviceId));
+    const mergedHeartbeat = mergeHeartbeat(previous, heartbeat);
+    const device: RoomDevice = {
+      ...previous,
+      deviceId,
+      joinedAt: previous?.joinedAt ?? timestamp,
+      sessionKey,
+      ...mergedHeartbeat,
+      lastSeenAt: timestamp,
+      role: hostDeviceId === deviceId ? "host" : "phone",
+    };
+
+    await writeRedisDevice(redis, keys, device);
+    const version = await touchRedisSession(redis, keys, timestamp, ttlSeconds);
+    return {
+      ...claimFromDevice(device),
+      revision: version.revision,
+      changedAt: version.changedAt,
+    };
+  }
+
   return {
     kind: "redis" as const,
     async claim(url: string, deviceId: string) {
@@ -96,20 +148,8 @@ export function createRedisSessionStore(
       const timestamp = now();
 
       await pruneRedisSession(redis, keys, timestamp, staleAfterMs, ttlSeconds);
-      let hostDeviceId = await redis.get(keys.host);
+      const hostDeviceId = await readOrClaimRedisHost(redis, keys, deviceId);
       const previous = parseDevice(await redis.hget(keys.devices, deviceId));
-
-      if (!hostDeviceId) {
-        // Atomic claim: only SETNX can install a host. Never plain-SET as a
-        // fallback — that's how two racing devices both became host. If the
-        // key expires between SETNX and GET, retry rather than clobber.
-        for (let attempt = 0; attempt < 3 && !hostDeviceId; attempt += 1) {
-          const claimedHost = await redis.setnx(keys.host, deviceId);
-          hostDeviceId =
-            claimedHost === 1 ? deviceId : await redis.get(keys.host);
-        }
-        hostDeviceId ??= deviceId;
-      }
 
       const device: RoomDevice = {
         ...previous,
@@ -124,27 +164,19 @@ export function createRedisSessionStore(
 
       return claimFromDevice(device);
     },
+    async heartbeatReceipt(
+      url: string,
+      deviceId: string,
+      heartbeat: DeviceHeartbeat = {},
+    ) {
+      return writeHeartbeatReceipt(url, deviceId, heartbeat);
+    },
     async heartbeat(
       url: string,
       deviceId: string,
       heartbeat: DeviceHeartbeat = {},
     ) {
-      const claim = await this.claim(url, deviceId);
-      const keys = redisSessionKeys(claim.sessionKey);
-      const previous = parseDevice(await redis.hget(keys.devices, deviceId));
-      const hostDeviceId = (await redis.get(keys.host)) ?? claim.deviceId;
-      const mergedHeartbeat = mergeHeartbeat(previous, heartbeat);
-      const timestamp = now();
-      const device: RoomDevice = {
-        ...previous,
-        ...claim,
-        ...mergedHeartbeat,
-        lastSeenAt: timestamp,
-        role: hostDeviceId === deviceId ? "host" : "phone",
-      };
-
-      await writeRedisDevice(redis, keys, device);
-      await touchRedisSession(redis, keys, timestamp, ttlSeconds);
+      await writeHeartbeatReceipt(url, deviceId, heartbeat);
       return this.state(url);
     },
     async state(url: string) {
@@ -210,6 +242,24 @@ export function createResilientSessionStore(
       return run(
         () => primary.claim(url, deviceId),
         () => fallback.claim(url, deviceId),
+      );
+    },
+    heartbeatReceipt(
+      url: string,
+      deviceId: string,
+      heartbeat: DeviceHeartbeat = {},
+    ) {
+      return run(
+        () =>
+          primary.heartbeatReceipt?.(url, deviceId, heartbeat) ??
+          primary
+            .heartbeat(url, deviceId, heartbeat)
+            .then((state) => heartbeatReceiptFromRoomState(state, deviceId)),
+        () =>
+          fallback.heartbeatReceipt?.(url, deviceId, heartbeat) ??
+          fallback
+            .heartbeat(url, deviceId, heartbeat)
+            .then((state) => heartbeatReceiptFromRoomState(state, deviceId)),
       );
     },
     heartbeat(url: string, deviceId: string, heartbeat: DeviceHeartbeat = {}) {
@@ -362,6 +412,27 @@ function redisSessionKeys(sessionKey: string) {
   };
 }
 
+async function readOrClaimRedisHost(
+  redis: RedisSessionClient,
+  keys: ReturnType<typeof redisSessionKeys>,
+  deviceId: string,
+) {
+  let hostDeviceId = await redis.get(keys.host);
+  if (hostDeviceId) {
+    return hostDeviceId;
+  }
+
+  // Atomic claim: only SETNX can install a host. Never plain-SET as a
+  // fallback — that's how two racing devices both became host. If the key
+  // expires between SETNX and GET, retry rather than clobber.
+  for (let attempt = 0; attempt < 3 && !hostDeviceId; attempt += 1) {
+    const claimedHost = await redis.setnx(keys.host, deviceId);
+    hostDeviceId = claimedHost === 1 ? deviceId : await redis.get(keys.host);
+  }
+
+  return hostDeviceId ?? deviceId;
+}
+
 async function pruneRedisSession(
   redis: RedisSessionClient,
   keys: ReturnType<typeof redisSessionKeys>,
@@ -511,9 +582,13 @@ async function touchRedisSession(
   timestamp: number,
   ttlSeconds: number,
 ) {
-  await redis.incr(keys.revision);
+  const revision = await redis.incr(keys.revision);
   await redis.set(keys.changedAt, String(timestamp));
   await refreshRedisSessionTtl(redis, keys, ttlSeconds);
+  return {
+    revision,
+    changedAt: timestamp,
+  };
 }
 
 async function readRedisVersion(
@@ -556,6 +631,24 @@ function claimFromDevice(device: RoomDevice): SessionClaim {
     lastSeenAt: device.lastSeenAt,
     role: device.role,
     sessionKey: device.sessionKey,
+  };
+}
+
+function heartbeatReceiptFromRoomState(
+  state: RoomState,
+  deviceId: string,
+): SessionHeartbeatReceipt {
+  const device = state.devices.find(
+    (candidate) => candidate.deviceId === deviceId,
+  );
+  if (!device) {
+    throw new Error("heartbeat_device_missing");
+  }
+
+  return {
+    ...claimFromDevice(device),
+    revision: state.revision,
+    changedAt: state.changedAt,
   };
 }
 

@@ -108,6 +108,60 @@ describe("session stores", () => {
     expect(heartbeatState.changedAt).toBe(250);
   });
 
+  test("redis heartbeat touches an existing room once", async () => {
+    let now = 100;
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => now });
+
+    await store.claim("https://blackmagic.app/", "host");
+    const before = await store.state("https://blackmagic.app/");
+
+    now = 250;
+    redis.resetCalls();
+    const after = await store.heartbeat("https://blackmagic.app/", "host", {
+      mic: "active",
+      micLevel: 0.2,
+    });
+
+    expect(after.revision).toBe(before.revision + 1);
+    expect(redis.calls.filter((call) => call.startsWith("incr:"))).toHaveLength(
+      1,
+    );
+    expect(redis.calls.filter((call) => call.startsWith("hset:"))).toHaveLength(
+      1,
+    );
+  });
+
+  test("redis heartbeat receipt avoids full room hydration", async () => {
+    let now = 100;
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => now });
+
+    await store.claim("https://blackmagic.app/", "host");
+    now = 250;
+    redis.resetCalls();
+
+    await expect(
+      store.heartbeatReceipt("https://blackmagic.app/", "host", {
+        mic: "active",
+        micLevel: 0.2,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        deviceId: "host",
+        role: "host",
+        revision: expect.any(Number),
+        changedAt: 250,
+      }),
+    );
+    expect(
+      redis.calls.filter((call) => call.startsWith("hgetall:")),
+    ).toHaveLength(1);
+    expect(redis.calls.filter((call) => call.startsWith("incr:"))).toHaveLength(
+      1,
+    );
+  });
+
   test("redis store reads revisions without hydrating room state", async () => {
     const redis = new FakeRedisSessionClient();
     const store = createRedisSessionStore(redis, { now: () => 100 });

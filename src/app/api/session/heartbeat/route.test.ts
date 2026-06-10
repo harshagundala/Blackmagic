@@ -4,10 +4,12 @@ import type { RoomState } from "@/lib/session/registry";
 import type { SessionStore } from "@/lib/session/store";
 
 const heartbeat = vi.fn<SessionStore["heartbeat"]>();
+const heartbeatReceipt = vi.fn<NonNullable<SessionStore["heartbeatReceipt"]>>();
 
 vi.mock("@/lib/session/server-registry", () => ({
   getSessionStore: () => ({
     heartbeat,
+    heartbeatReceipt,
   }),
 }));
 
@@ -37,6 +39,7 @@ vi.mock("@/lib/session/registry", () => ({
 describe("session heartbeat route", () => {
   beforeEach(() => {
     heartbeat.mockReset();
+    heartbeatReceipt.mockReset();
   });
 
   test("strips raw audio snippets from heartbeat room-state responses", async () => {
@@ -77,6 +80,45 @@ describe("session heartbeat route", () => {
 
     expect(response.status).toBe(400);
     expect(body).toEqual({ error: "invalid_url" });
+    expect(heartbeat).not.toHaveBeenCalled();
+  });
+
+  test("returns a heartbeat receipt without hydrating full room state when requested", async () => {
+    heartbeatReceipt.mockResolvedValue({
+      deviceId: "host",
+      joinedAt: 1_000,
+      lastSeenAt: 1_500,
+      role: "host",
+      sessionKey: "https://blackmagic.app/",
+      revision: 7,
+      changedAt: 1_500,
+    });
+
+    const response = await POST(
+      new Request("https://blackmagic.app/api/session/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({
+          deviceId: "host",
+          url: "https://blackmagic.app/",
+          responseMode: "ack",
+          heartbeat: { mic: "active" },
+        }),
+      }),
+    );
+    const body = (await response.json()) as {
+      deviceId: string;
+      revision: number;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual(
+      expect.objectContaining({ deviceId: "host", revision: 7 }),
+    );
+    expect(heartbeatReceipt).toHaveBeenCalledWith(
+      "https://blackmagic.app/",
+      "host",
+      { mic: "active" },
+    );
     expect(heartbeat).not.toHaveBeenCalled();
   });
 });

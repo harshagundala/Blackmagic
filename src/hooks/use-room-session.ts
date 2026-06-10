@@ -48,9 +48,8 @@ export function useRoomSession({
   const [role, setRole] = useState<SessionRole | null>(null);
   const [sessionKey, setSessionKey] = useState("");
   const [roomState, setRoomState] = useState<RoomState | null>(null);
-  const [connection, setConnection] = useState<RoomConnectionState>(
-    "connecting",
-  );
+  const [connection, setConnection] =
+    useState<RoomConnectionState>("connecting");
   const urlRef = useRef("");
   const roomRevisionRef = useRef(0);
   const publishedVoiceEventIdRef = useRef("");
@@ -131,10 +130,13 @@ export function useRoomSession({
         controller = new AbortController();
 
         try {
-          const response = await fetch(`/api/session/wait?${params.toString()}`, {
-            cache: "no-store",
-            signal: controller.signal,
-          });
+          const response = await fetch(
+            `/api/session/wait?${params.toString()}`,
+            {
+              cache: "no-store",
+              signal: controller.signal,
+            },
+          );
           if (response.ok) {
             applyRoomState((await response.json()) as RoomState);
             failureCount = 0;
@@ -200,21 +202,25 @@ export function useRoomSession({
         body: JSON.stringify({
           deviceId,
           url: urlRef.current,
+          responseMode: "ack",
           heartbeat: heartbeatPayload,
         }),
       }).catch(() => null);
       if (response?.ok) {
-        const state = (await response
-          .json()
-          .catch(() => null)) as RoomState | null;
-        if (state) {
-          applyRoomState(state);
+        const payload = (await response.json().catch(() => null)) as unknown;
+        if (isRoomState(payload)) {
+          applyRoomState(payload);
           publishedVoiceEventIdRef.current = acknowledgedVoiceEventId(
             heartbeatPayload,
             publishedVoiceEventIdRef.current,
           );
           return true;
         }
+        publishedVoiceEventIdRef.current = acknowledgedVoiceEventId(
+          heartbeatPayload,
+          publishedVoiceEventIdRef.current,
+        );
+        return true;
       }
       return false;
     },
@@ -233,6 +239,16 @@ export function useRoomSession({
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isRoomState(value: unknown): value is RoomState {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as Partial<RoomState>).devices) &&
+    Array.isArray((value as Partial<RoomState>).ranges) &&
+    typeof (value as Partial<RoomState>).revision === "number"
+  );
 }
 
 function getOrCreateDeviceId() {

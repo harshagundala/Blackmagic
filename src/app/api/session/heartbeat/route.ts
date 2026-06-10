@@ -13,6 +13,7 @@ export async function POST(request: Request) {
     deviceId?: string;
     url?: string;
     heartbeat?: DeviceHeartbeat;
+    responseMode?: "ack" | "state";
   } | null;
 
   if (!body?.deviceId || !body?.url) {
@@ -24,7 +25,14 @@ export async function POST(request: Request) {
     return invalidSessionUrlResponse();
   }
 
-  const state = await getSessionStore().heartbeat(
+  const store = getSessionStore();
+  if (body.responseMode === "ack" && store.heartbeatReceipt) {
+    return Response.json(
+      await store.heartbeatReceipt(sessionUrl, body.deviceId, body.heartbeat),
+    );
+  }
+
+  const state = await store.heartbeat(
     sessionUrl,
     body.deviceId,
     body.heartbeat,
