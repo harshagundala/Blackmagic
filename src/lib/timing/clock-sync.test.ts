@@ -3,9 +3,11 @@ import {
   audioFrameTimestamp,
   audioSampleTimestamp,
   estimateClockOffset,
+  identityClockModel,
   projectClockModel,
   retainClockExchanges,
   robustClockModel,
+  selectClockModel,
   type ClockExchange,
 } from "./clock-sync";
 
@@ -224,6 +226,71 @@ describe("clock sync metadata", () => {
       99,
       102,
     ]);
+  });
+});
+
+describe("clock model selection", () => {
+  test("the host clock is the identity model with near-zero error", () => {
+    const model = selectClockModel({
+      authority: "self",
+      peerExchanges: [makeExchange(120, 8)],
+      serverExchanges: [makeExchange(90, 60)],
+      nowPerfMs: 1_500,
+    });
+
+    expect(model.offsetMs).toBe(0);
+    expect(model.maxErrorMs).toBeLessThan(1);
+    expect(model.quality).toBe(1);
+    expect(model.samplesUsed).toBeGreaterThanOrEqual(4);
+  });
+
+  test("peer exchanges against the host outrank the HTTP server path", () => {
+    const peerExchanges = [
+      makeExchange(250, 8),
+      makeExchange(251, 10),
+      makeExchange(250, 12),
+    ];
+    const serverExchanges = [makeExchange(90, 80), makeExchange(92, 90)];
+
+    const model = selectClockModel({
+      authority: "external",
+      peerExchanges,
+      serverExchanges,
+      nowPerfMs: 12_000,
+    });
+
+    expect(model.offsetMs).toBeCloseTo(250, 0);
+    expect(model.bestRoundTripMs).toBe(8);
+  });
+
+  test("holds the peer domain even when probes go quiet — never jumps back to the server domain", () => {
+    const model = selectClockModel({
+      authority: "external",
+      peerExchanges: [makeExchange(250, 8)],
+      serverExchanges: [makeExchange(90, 80), makeExchange(92, 90)],
+      nowPerfMs: 60_000,
+    });
+
+    expect(model.offsetMs).toBeCloseTo(250, 0);
+  });
+
+  test("uses the server prior before any peer probe has landed", () => {
+    const model = selectClockModel({
+      authority: "external",
+      peerExchanges: [],
+      serverExchanges: [makeExchange(90, 80), makeExchange(92, 90)],
+      nowPerfMs: 5_000,
+    });
+
+    expect(model.offsetMs).toBeCloseTo(91, 0);
+  });
+
+  test("identity model keeps projecting with tight bounds", () => {
+    const model = identityClockModel(2_000);
+    const projected = projectClockModel(model, 4_000);
+
+    expect(projected.offsetMs).toBe(0);
+    expect(projected.maxErrorMs).toBeLessThan(1);
   });
 });
 

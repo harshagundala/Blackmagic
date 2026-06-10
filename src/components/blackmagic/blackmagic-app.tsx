@@ -33,14 +33,25 @@ import {
 import { selectTrackedPulse } from "@/lib/calibration/session";
 import type { PhonePoint } from "@/lib/positioning/layout";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
+import {
+  createEdgeEvidence,
+  deriveEdgeRanges,
+  mergeAcousticRanges,
+  recordEdgeObservation,
+  recordEdgePulse,
+} from "@/lib/realtime/edge-reconciliation";
 import { projectClockModel } from "@/lib/timing/clock-sync";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
+import type { AcousticRange } from "@/lib/session/ranging";
 import type {
   AcousticObservation,
   AcousticPulse,
   DeviceHeartbeat,
 } from "@/lib/session/registry";
-import { captureProcessingState } from "@/lib/session/registry";
+import {
+  captureProcessingState,
+  selectRoomCalibrationTurn,
+} from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
 
@@ -62,6 +73,8 @@ export function BlackmagicApp() {
   });
   const sensors = useSensorSuite();
   const trackSensorPulse = sensors.trackPulse;
+  const offerClockExchange = sensors.offerClockExchange;
+  const setClockAuthority = sensors.setClockAuthority;
   const snapshotRef = useRef(sensors.snapshot);
   const calibrationRef = useRef<CalibrationHeartbeat>({});
   const publishedPulseIdRef = useRef("");
@@ -70,12 +83,61 @@ export function BlackmagicApp() {
   const flushedCalibrationEventRef = useRef("");
   const flushedVoiceEventRef = useRef("");
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
+  // Chirp evidence collected over the realtime channels; every device runs
+  // the same reconciliation locally so ranges appear without waiting on the
+  // server round trip. Derived ranges live in state so render never touches
+  // the mutable evidence store.
+  const edgeEvidenceRef = useRef(createEdgeEvidence());
+  const [edgeRanges, setEdgeRanges] = useState<AcousticRange[]>([]);
+  const refreshEdgeRanges = useCallback(() => {
+    const next = deriveEdgeRanges(edgeEvidenceRef.current, {
+      hostEpochNowMs: hostEpochNow(snapshotRef.current),
+    });
+    // Keep the previous array identity when nothing changed so the periodic
+    // refresh does not re-solve the constellation for free.
+    setEdgeRanges((current) =>
+      acousticRangesEqual(current, next) ? current : next,
+    );
+  }, []);
+  const recordPulseEvidence = useCallback(
+    (deviceId: string, pulse: AcousticPulse | null | undefined) => {
+      if (recordEdgePulse(edgeEvidenceRef.current, deviceId, pulse)) {
+        refreshEdgeRanges();
+      }
+    },
+    [refreshEdgeRanges],
+  );
+  const recordObservationEvidence = useCallback(
+    (deviceId: string, observation: AcousticObservation | null | undefined) => {
+      if (recordEdgeObservation(edgeEvidenceRef.current, deviceId, observation)) {
+        refreshEdgeRanges();
+      }
+    },
+    [refreshEdgeRanges],
+  );
   const handleRealtimeChirp = useCallback(
-    (pulse: AcousticPulse) => {
+    (pulse: AcousticPulse, fromDeviceId: string) => {
+      recordPulseEvidence(fromDeviceId, pulse);
+      // Only steal the single-pulse streaming matcher for chirps that are
+      // actually still observable; a late-relayed schedule is evidence, not
+      // something to listen for.
+      const hostEpochNowMs = hostEpochNow(snapshotRef.current);
+      if (hostEpochNowMs !== null) {
+        const deltaMs = pulse.emittedAtHostEpochMs - hostEpochNowMs;
+        if (deltaMs > 5_500 || deltaMs < -180) {
+          return;
+        }
+      }
       observablePulseRef.current = pulse;
       trackSensorPulse(pulse);
     },
-    [trackSensorPulse],
+    [recordPulseEvidence, trackSensorPulse],
+  );
+  const handleRealtimeObservation = useCallback(
+    (observation: AcousticObservation, fromDeviceId: string) => {
+      recordObservationEvidence(fromDeviceId, observation);
+    },
+    [recordObservationEvidence],
   );
   const getRealtimePulse = useCallback(
     () =>
@@ -96,24 +158,62 @@ export function BlackmagicApp() {
     getAcousticPulse: getRealtimePulse,
     getAcousticObservation: getRealtimeObservation,
     onChirpSchedule: handleRealtimeChirp,
+    onPulseObservation: handleRealtimeObservation,
+    onClockExchange: offerClockExchange,
   });
-  const constellation = useMemo(
-    () =>
-      roomState
-        ? solveConstellationWithTemporalSeed(roomState, {
-            perspectiveDeviceId: deviceId,
-            headingDegrees: sensors.snapshot.headingDegrees,
-          })
-        : null,
-    [deviceId, roomState, sensors.snapshot.headingDegrees],
-  );
+  const constellation = useMemo(() => {
+    if (!roomState) {
+      return null;
+    }
+
+    return solveConstellationWithTemporalSeed(
+      edgeRanges.length > 0
+        ? {
+            ...roomState,
+            ranges: mergeAcousticRanges(roomState.ranges, edgeRanges),
+          }
+        : roomState,
+      {
+        perspectiveDeviceId: deviceId,
+        headingDegrees: sensors.snapshot.headingDegrees,
+      },
+    );
+  }, [deviceId, edgeRanges, roomState, sensors.snapshot.headingDegrees]);
 
   useEffect(() => {
     snapshotRef.current = sensors.snapshot;
   }, [sensors.snapshot]);
 
+  // Re-derive edge ranges on a slow cadence so measurements age out of the
+  // constellation even when no fresh chirp evidence is arriving.
+  useEffect(() => {
+    if (phase !== "listening") {
+      return;
+    }
+    const timer = window.setInterval(refreshEdgeRanges, 3_000);
+    return () => window.clearInterval(timer);
+  }, [phase, refreshEdgeRanges]);
+
+  // The first connected device is the host and its clock is the room
+  // reference: peers NTP-sync against it over the data channel, the host
+  // publishes its own clock verbatim.
+  useEffect(() => {
+    if (!roomState?.hostDeviceId) {
+      return;
+    }
+    setClockAuthority(
+      roomState.hostDeviceId === deviceId ? "self" : "external",
+    );
+  }, [deviceId, roomState?.hostDeviceId, setClockAuthority]);
+
   const begin = useCallback(async () => {
     if (phase === "listening") {
+      // A tap is a fresh user gesture: if the mic never started (prompt was
+      // dismissed, or iOS dropped the request), retry the whole capture
+      // pipeline now while the activation is valid.
+      if (snapshotRef.current.mic === "blocked") {
+        await sensors.start();
+      }
       return;
     }
 
@@ -162,7 +262,10 @@ export function BlackmagicApp() {
         return;
       }
 
-      const turn = roomState.calibrationTurn;
+      // The turn rotation is derived client-side from the shared host-domain
+      // clock: every device computes the same schedule without depending on
+      // the server's wall clock, which lives in a different time domain.
+      const turn = selectRoomCalibrationTurn(roomState.devices, hostEpochNowMs);
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
@@ -217,7 +320,13 @@ export function BlackmagicApp() {
       }
       observablePulseRef.current = pulse;
       trackSensorPulse(pulse);
-      scheduleOutputPulse(pulse, snapshotRef.current, pulseSchedulerRef);
+      recordPulseEvidence(deviceId, pulse);
+      scheduleOutputPulse(
+        pulse,
+        snapshotRef.current,
+        pulseSchedulerRef,
+        sensors.getAudioContext,
+      );
     };
 
     void publishPulse();
@@ -225,7 +334,15 @@ export function BlackmagicApp() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [deviceId, flushCalibrationEvent, phase, roomState, trackSensorPulse]);
+  }, [
+    deviceId,
+    flushCalibrationEvent,
+    phase,
+    recordPulseEvidence,
+    roomState,
+    sensors.getAudioContext,
+    trackSensorPulse,
+  ]);
 
   useEffect(
     () => () => {
@@ -259,7 +376,10 @@ export function BlackmagicApp() {
 
     observablePulseRef.current = pulse;
     sensors.trackPulse(pulse);
-  }, [deviceId, phase, roomState, sensors]);
+    if (pulse) {
+      recordPulseEvidence(pulseEmitterId(pulse), pulse);
+    }
+  }, [deviceId, phase, recordPulseEvidence, roomState, sensors]);
 
   useEffect(() => {
     const voiceEventId = sensors.snapshot.voiceEvent?.id;
@@ -308,28 +428,34 @@ export function BlackmagicApp() {
       acousticPulse: calibrationRef.current.acousticPulse ?? null,
       acousticObservation: observation,
     };
+    recordObservationEvidence(deviceId, observation);
     void flushCalibrationEvent(
       calibrationEventKey(
         "observation",
         acousticObservationPublishKey(observation),
       ),
     );
-  }, [flushCalibrationEvent, phase, sensors.snapshot]);
+  }, [
+    deviceId,
+    flushCalibrationEvent,
+    phase,
+    recordObservationEvidence,
+    sensors.snapshot,
+  ]);
 
   const listening = phase === "listening";
+  // Realtime peer frames go through the same saturating microphone curve as
+  // every other level: raw RMS speech sits around 0.02, which reads as ~2%
+  // energy if it skips the curve — invisible on the gradient.
   const soundEnergy = roomSoundEnergy({
     localMicLevel: sensors.snapshot.micLevel,
-    devices: roomState?.devices ?? [],
+    devices: [
+      ...(roomState?.devices ?? []),
+      ...realtime.peerFrames.map((frame) => ({ micLevel: frame.micLevel })),
+    ],
     audioSources: constellation?.audioSources ?? [],
   });
-  const realtimePeerEnergy = realtime.peerFrames.reduce(
-    (level, frame) => Math.max(level, frame.micLevel),
-    0,
-  );
-  const fusedSoundEnergy = Math.max(soundEnergy, realtimePeerEnergy * 0.92);
-  const pulse = listening
-    ? Math.min(1, Math.max(0.12, fusedSoundEnergy))
-    : 0.16;
+  const pulse = listening ? Math.min(1, Math.max(0.12, soundEnergy)) : 0.16;
   const phoneMarkers = createPhoneMarkers(
     constellation?.devices.filter((device) => device.deviceId !== deviceId) ??
       [],
@@ -404,7 +530,9 @@ export function BlackmagicApp() {
         </span>
         <span className="flex flex-col items-end gap-1 text-right">
           <span>{syncLabel}</span>
-          {captureFiltered ? (
+          {sensors.snapshot.mic === "blocked" ? (
+            <span className="text-[#b45309]">mic off — tap to enable</span>
+          ) : captureFiltered ? (
             <span className="text-[#b45309]">filtered mic</span>
           ) : null}
         </span>
@@ -602,18 +730,57 @@ function scheduleOutputPulse(
   pulse: AcousticPulse,
   snapshot: SensorSnapshot,
   schedulerRef: MutableRefObject<PulseToneScheduler | null>,
+  getCaptureContext: () => AudioContext | null,
 ) {
   const now = hostEpochNow(snapshot);
   if (now === null) {
     return;
   }
 
+  // Play through the capture context: it was created inside the user's tap
+  // gesture, so iOS lets it produce sound. A context created here — outside
+  // any gesture — would stay suspended and the chirp would silently never
+  // play, so without a capture context the turn is skipped instead.
+  if (!getCaptureContext()) {
+    return;
+  }
   schedulerRef.current ??= createPulseToneScheduler({
     createContext: () => {
-      const AudioContextClass =
-        window.AudioContext || window.webkitAudioContext;
-      return new AudioContextClass();
+      // Resolved per schedule via the closed-context check, so a recreated
+      // capture context is picked up automatically.
+      const captureContext = getCaptureContext();
+      if (!captureContext) {
+        throw new Error("capture context unavailable");
+      }
+      return captureContext;
     },
+    ownsContext: false,
   });
-  void schedulerRef.current.schedule(pulse, { hostEpochNowMs: now });
+  void schedulerRef.current
+    .schedule(pulse, { hostEpochNowMs: now })
+    .catch(() => undefined);
+}
+
+function acousticRangesEqual(left: AcousticRange[], right: AcousticRange[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((range, index) => {
+    const other = right[index];
+    return (
+      range.from === other.from &&
+      range.to === other.to &&
+      range.pulseId === other.pulseId &&
+      range.meters === other.meters &&
+      range.samplesUsed === other.samplesUsed &&
+      range.confidence === other.confidence &&
+      range.observedAtHostEpochMs === other.observedAtHostEpochMs
+    );
+  });
+}
+
+function pulseEmitterId(pulse: AcousticPulse) {
+  // Pulse ids are `${deviceId}:${sequence}:${epochMs}`; device ids are UUIDs
+  // and never contain colons.
+  return pulse.id.split(":")[0] ?? "";
 }

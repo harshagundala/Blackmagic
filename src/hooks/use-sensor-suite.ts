@@ -11,10 +11,9 @@ import {
 } from "react";
 import {
   audioSampleTimestamp,
-  estimateClockOffset,
   projectClockModel,
   retainClockExchanges,
-  robustClockModel,
+  selectClockModel,
   type AudioFrameTimestamp,
   type ClockExchange,
   type ClockModel,
@@ -48,6 +47,8 @@ import {
 } from "@/lib/sensors/fusion";
 
 type SensorState = "idle" | "active" | "blocked";
+
+export type ClockAuthority = "self" | "external";
 
 export type { CaptureProcessingReport } from "@/lib/session/registry";
 
@@ -134,7 +135,9 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const motionActiveRef = useRef(false);
   const headingActiveRef = useRef(false);
   const motionMetadataRef = useRef<MotionSensorMetadata>(idleMotionMetadata);
-  const clockExchangesRef = useRef<ClockExchange[]>([]);
+  const serverClockExchangesRef = useRef<ClockExchange[]>([]);
+  const peerClockExchangesRef = useRef<ClockExchange[]>([]);
+  const clockAuthorityRef = useRef<ClockAuthority>("external");
   const clockModelRef = useRef<ClockModel | null>(null);
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
@@ -153,6 +156,60 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       streamingMatcherRef.current,
     );
   }, []);
+
+  // Recomputes the active clock model from whichever source currently wins:
+  // identity when this device is the room reference, fresh data-channel peer
+  // exchanges against the host, or the HTTP echo fallback.
+  const refreshClockModel = useCallback(() => {
+    const clock = selectClockModel({
+      authority: clockAuthorityRef.current,
+      peerExchanges: peerClockExchangesRef.current,
+      serverExchanges: serverClockExchangesRef.current,
+      nowPerfMs: performance.now(),
+    });
+    clockModelRef.current = clock;
+    updateStreamingMatcherPulse(
+      activePulseRef.current,
+      audioContextRef.current,
+      clock,
+      streamingMatcherRef.current,
+    );
+    setSnapshot((current) => ({ ...current, clock }));
+  }, []);
+
+  // Feeds an NTP-style exchange measured over a realtime data channel
+  // (peer <-> host) into the clock model. These exchanges have far lower
+  // round trips than HTTP echo, so they dominate while fresh.
+  const offerClockExchange = useCallback(
+    (exchange: ClockExchange) => {
+      // Deeper history than the HTTP path: probes are cheap on a data
+      // channel, and more samples mean more low-round-trip picks for the
+      // robust model plus a longer baseline for the drift fit.
+      peerClockExchangesRef.current = retainClockExchanges(
+        peerClockExchangesRef.current,
+        exchange,
+        { maxRoundTripMs: 350, maxSamples: 48 },
+      );
+      refreshClockModel();
+    },
+    [refreshClockModel],
+  );
+
+  // "self" marks this device as the room clock reference (the host).
+  const setClockAuthority = useCallback(
+    (authority: ClockAuthority) => {
+      if (clockAuthorityRef.current === authority) {
+        return;
+      }
+      clockAuthorityRef.current = authority;
+      refreshClockModel();
+    },
+    [refreshClockModel],
+  );
+
+  // The capture context doubles as the chirp playback context: it was created
+  // inside the user gesture, so iOS lets it keep running.
+  const getAudioContext = useCallback(() => audioContextRef.current, []);
 
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
@@ -187,7 +244,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     motionActiveRef.current = false;
     headingActiveRef.current = false;
     motionMetadataRef.current = idleMotionMetadata;
-    clockExchangesRef.current = [];
+    serverClockExchangesRef.current = [];
+    peerClockExchangesRef.current = [];
     clockModelRef.current = null;
     activePulseRef.current = null;
     voiceGateRef.current = { open: false, lastEventHostEpochMs: null };
@@ -206,21 +264,29 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       heading: "idle",
     }));
 
+    // The microphone request must be the permission prompt issued inside the
+    // raw tap-gesture stack, before ANY await: on iOS each permission prompt
+    // consumes the gesture's user activation, and getUserMedia called without
+    // activation is rejected WITHOUT ever showing a prompt. Motion permission
+    // (which also consumes an activation) is requested on a later tap instead.
+    const mediaStreamPromise = navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    const audioContext = new AudioContextClass();
+    // Created synchronously inside the user gesture so iOS lets it run.
+    let audioContext = new AudioContextClass();
     audioContextRef.current = audioContext;
     if (audioContext.state === "suspended") {
       await audioContext.resume().catch(() => undefined);
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-      });
+      const stream = await mediaStreamPromise;
       mediaStreamRef.current = stream;
 
       // Verify what the browser actually granted: iOS Safari treats audio
@@ -238,6 +304,21 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
           trackSettings?.autoGainControl === false,
       };
 
+      // iOS WebKit can run the context at a different hardware rate than the
+      // microphone capture route (44.1 kHz context vs 48 kHz mic). A
+      // mediastream source with mismatched rates produces silence — the mic
+      // looks granted but every sample is zero. Recreate the context at the
+      // track's actual rate when they disagree.
+      const trackSampleRate = finitePositiveNumber(trackSettings?.sampleRate);
+      if (
+        trackSampleRate !== null &&
+        Math.abs(trackSampleRate - audioContext.sampleRate) > 0.5
+      ) {
+        await audioContext.close().catch(() => undefined);
+        audioContext = new AudioContextClass({ sampleRate: trackSampleRate });
+        audioContextRef.current = audioContext;
+      }
+
       if (audioContext.state === "suspended") {
         await audioContext.resume().catch(() => undefined);
       }
@@ -246,16 +327,24 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         captureProcessing,
         audioContextState: audioContext.state,
       }));
-      lifecycleCleanupRef.current = attachAudioLifecycle({
+      const detachLifecycle = attachAudioLifecycle({
         audioContext,
         audioTrack,
         wakeLockRef,
         setSnapshot,
         resyncClock: () =>
-          void syncClock(setSnapshot, clockExchangesRef, (clock) => {
-            clockModelRef.current = clock;
-          }),
+          void syncServerClock(serverClockExchangesRef, refreshClockModel),
       });
+      // Opportunistic: succeeds on platforms where the activation survived
+      // the mic prompt; iOS will reject it quietly.
+      void requestMotionPermission();
+      // Deterministic: the next tap anywhere re-requests inside a fresh
+      // gesture. Once granted, iOS answers without showing the dialog again.
+      const disarmMotionRequest = armMotionPermissionRetry();
+      lifecycleCleanupRef.current = () => {
+        detachLifecycle();
+        disarmMotionRequest();
+      };
       const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
       rollingAudioRef.current = rollingAudio;
       const streamingMatcher = new StreamingPulseMatcher({
@@ -337,41 +426,14 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       };
       read();
 
-      void requestMotionPermission();
-      void syncClock(setSnapshot, clockExchangesRef, (clock) => {
-        clockModelRef.current = clock;
-        updateStreamingMatcherPulse(
-          activePulseRef.current,
-          audioContextRef.current,
-          clock,
-          streamingMatcherRef.current,
-        );
-      });
-      void warmClockSync(
-        setSnapshot,
-        clockExchangesRef,
+      void syncServerClock(serverClockExchangesRef, refreshClockModel);
+      void warmServerClockSync(
+        serverClockExchangesRef,
         () => clockSyncRunRef.current === syncRun,
-        (clock) => {
-          clockModelRef.current = clock;
-          updateStreamingMatcherPulse(
-            activePulseRef.current,
-            audioContextRef.current,
-            clock,
-            streamingMatcherRef.current,
-          );
-        },
+        refreshClockModel,
       );
       clockTimerRef.current = window.setInterval(
-        () =>
-          void syncClock(setSnapshot, clockExchangesRef, (clock) => {
-            clockModelRef.current = clock;
-            updateStreamingMatcherPulse(
-              activePulseRef.current,
-              audioContextRef.current,
-              clock,
-              streamingMatcherRef.current,
-            );
-          }),
+        () => void syncServerClock(serverClockExchangesRef, refreshClockModel),
         CLOCK_SYNC_INTERVAL_MS,
       );
     } catch {
@@ -410,14 +472,22 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         { enableHighAccuracy: true, maximumAge: 15_000, timeout: 5_000 },
       );
     }
-  }, []);
+  }, [refreshClockModel]);
 
   useEffect(() => stop, [stop]);
   useEffect(() => {
     trackPulse(activePulse);
   }, [activePulse, trackPulse]);
 
-  return { snapshot, start, stop, trackPulse };
+  return {
+    snapshot,
+    start,
+    stop,
+    trackPulse,
+    offerClockExchange,
+    setClockAuthority,
+    getAudioContext,
+  };
 
   function handleOrientation(event: DeviceOrientationEvent) {
     headingActiveRef.current = true;
@@ -505,20 +575,44 @@ function attachAudioLifecycle({
     setSnapshot((current) => ({ ...current, mic: "blocked" }));
   };
 
+  // Backstop for contexts that ended up suspended outside a gesture (e.g.
+  // the sample-rate-mismatch recreation): any subsequent tap revives them.
+  const onPointerDown = () => {
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().catch(() => undefined);
+    }
+  };
+
   audioContext.addEventListener("statechange", onAudioStateChange);
   document.addEventListener("visibilitychange", onVisibilityChange);
+  document.addEventListener("pointerdown", onPointerDown);
   audioTrack?.addEventListener("ended", onTrackEnded);
   void requestWakeLock();
 
   return () => {
     audioContext.removeEventListener("statechange", onAudioStateChange);
     document.removeEventListener("visibilitychange", onVisibilityChange);
+    document.removeEventListener("pointerdown", onPointerDown);
     audioTrack?.removeEventListener("ended", onTrackEnded);
   };
 }
 
 function booleanOrNull(value: unknown) {
   return typeof value === "boolean" ? value : null;
+}
+
+function finitePositiveNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
+}
+
+function armMotionPermissionRetry() {
+  const request = () => {
+    void requestMotionPermission();
+  };
+  document.addEventListener("pointerdown", request, { once: true });
+  return () => document.removeEventListener("pointerdown", request);
 }
 
 async function requestMotionPermission() {
@@ -537,10 +631,9 @@ async function requestMotionPermission() {
   ]);
 }
 
-async function syncClock(
-  setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
+async function syncServerClock(
   exchangesRef: MutableRefObject<ClockExchange[]>,
-  onClock?: (clock: ClockModel) => void,
+  onExchangesUpdated: () => void,
 ) {
   try {
     const clientPerfOriginEpochMs = Date.now() - performance.now();
@@ -561,34 +654,25 @@ async function syncClock(
       clientReceivePerfMs,
       serverInstanceId: server.serverInstanceId ?? null,
     };
-    const estimate = estimateClockOffset(exchange);
     exchangesRef.current = retainClockExchanges(exchangesRef.current, exchange);
-    const clock = robustClockModel(exchangesRef.current);
-    onClock?.(clock);
-
-    setSnapshot((current) => ({
-      ...current,
-      clock,
-    }));
-
-    return estimate;
+    onExchangesUpdated();
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
-async function warmClockSync(
-  setSnapshot: Dispatch<SetStateAction<SensorSnapshot>>,
+async function warmServerClockSync(
   exchangesRef: MutableRefObject<ClockExchange[]>,
   isCurrentRun: () => boolean,
-  onClock?: (clock: ClockModel) => void,
+  onExchangesUpdated: () => void,
 ) {
   for (let index = 0; index < CLOCK_SYNC_WARMUP_COUNT; index += 1) {
     await wait(CLOCK_SYNC_WARMUP_SPACING_MS);
     if (!isCurrentRun()) {
       return;
     }
-    await syncClock(setSnapshot, exchangesRef, onClock);
+    await syncServerClock(exchangesRef, onExchangesUpdated);
   }
 }
 

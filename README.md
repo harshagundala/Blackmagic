@@ -7,7 +7,9 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 - Next.js 16 App Router, React 19, TypeScript, Tailwind CSS.
 - Near-wordless Apple-like mobile UI: the deployment URL is the room, the first phone is host, later phones join nearby.
 - Browser sensor acquisition hook for mic level, sample rate, motion/orientation, and geolocation accuracy.
-- Host-clock sync model plus per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, offset, jitter, best RTT, max error, and uncertainty.
+- Host-anchored clock sync: the first device's clock is the room reference. Peers NTP-sync against the host over WebRTC data channels (clock probes + acks carrying host-epoch instants), which keeps inter-device error in the low milliseconds on a shared network. HTTP echo to the server remains only as a fallback prior when no data channel is open.
+- Per-audio-frame timestamp metadata: sample index, sample rate, audio context time, performance origin, host-estimated epoch, offset, jitter, best RTT, max error, and uncertainty.
+- Edge reconciliation: chirp schedules and pulse observations flow peer→host→peers over data channels; every device derives pairwise ranges locally from that shared evidence and merges them with the polled server ranges, so the constellation updates without waiting on server round trips. The calibration turn rotation is likewise derived client-side from the shared host clock.
 - URL-based room claim: first device is host, later devices are nearby phones.
 - Polling room heartbeat for active device presence, sensor status, clock quality, and audio-frame timing metadata.
 - Storage readiness endpoint at `/api/session/readiness` so production can prove whether room state is durable Redis or degraded in-memory.

@@ -27,9 +27,13 @@ export type RoomTimeSyncState = {
 
 const MIN_SYNC_SAMPLES = 3;
 const MIN_LOCALIZATION_SAMPLES = 4;
-const MAX_SYNC_ERROR_MS = 25;
-const MAX_LOCALIZATION_ERROR_MS = 12;
-const MAX_LOCALIZATION_JITTER_MS = 8;
+// Bounds sized for data-channel host sync (a few ms of RTT on a shared
+// network) with headroom for real Wi-Fi jitter. Reciprocal acoustic ranging
+// cancels absolute clock offsets, so localization only needs the clock to be
+// good enough to aim the chirp detector's sample search window.
+const MAX_SYNC_ERROR_MS = 50;
+const MAX_LOCALIZATION_ERROR_MS = 30;
+const MAX_LOCALIZATION_JITTER_MS = 12;
 const MAX_LOCALIZATION_ROUND_TRIP_MS = 160;
 const MIN_SYNC_QUALITY = 0.45;
 const MIN_LOCALIZATION_QUALITY = 0.55;

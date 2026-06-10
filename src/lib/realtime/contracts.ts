@@ -90,6 +90,12 @@ export type RealtimeClockProbeAckMessage = {
   probeReceivedAtClientPerfMs: number;
   ackSentAtClientPerfMs: number;
   hostEstimatedEpochMs: number | null;
+  // Receive/send instants in the responder's own wall-clock epoch domain
+  // (performance.timeOrigin + performance.now()). When the responder is the
+  // room host, these let a peer NTP-sync directly against the host clock over
+  // the data channel instead of against a far-away HTTP server.
+  probeReceivedAtEpochMs?: number | null;
+  ackSentAtEpochMs?: number | null;
 };
 
 export type RealtimeSensorFrameMessage = {

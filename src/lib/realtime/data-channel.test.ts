@@ -1,10 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
+  clockExchangeFromProbeAck,
+  createClockProbeAckMessage,
   createClockProbeMessage,
   createRealtimeSensorFrame,
   parseRealtimeDataChannelMessage,
   serializeRealtimeDataChannelMessage,
 } from "./data-channel";
+import { estimateClockOffset } from "../timing/clock-sync";
 
 describe("realtime data channel messages", () => {
   test("serializes sensor metadata frames without raw audio payloads", () => {
@@ -118,6 +121,92 @@ describe("realtime data channel messages", () => {
       sentAtClientPerfMs: 1_234.5,
       hostEstimatedEpochMs: 1_800_000_001_234.5,
     });
+  });
+
+  test("stamps probe acks with the responder's wall-clock epoch instants", () => {
+    const probe = createClockProbeMessage({
+      id: "clock-phone-a-7",
+      fromDeviceId: "phone-a",
+      sentAtClientPerfMs: 5_000,
+    });
+    const ack = createClockProbeAckMessage({
+      probe,
+      fromDeviceId: "host-device",
+      probeReceivedAtClientPerfMs: 9_000,
+      ackSentAtClientPerfMs: 9_001,
+      perfOriginEpochMs: 1_800_000_000_000,
+      hostEstimatedEpochMs: 1_800_000_009_002,
+    });
+
+    expect(ack.probeReceivedAtEpochMs).toBe(1_800_000_009_000);
+    expect(ack.ackSentAtEpochMs).toBe(1_800_000_009_001);
+    expect(parseRealtimeDataChannelMessage(JSON.stringify(ack))).toEqual(ack);
+  });
+
+  test("converts a completed probe round trip into a host clock exchange", () => {
+    const probe = createClockProbeMessage({
+      id: "clock-phone-a-8",
+      fromDeviceId: "phone-a",
+      sentAtClientPerfMs: 1_000,
+    });
+    // The host clock runs 250 ms ahead of the prober; one-way latency 6 ms,
+    // 2 ms of host processing between receive and ack. The host stamped perf
+    // 50_006 at the physical instant the prober's perf clock read 1_006, so
+    // its origin is prober-origin - 49_000 + 250.
+    const ack = createClockProbeAckMessage({
+      probe,
+      fromDeviceId: "host-device",
+      probeReceivedAtClientPerfMs: 50_006,
+      ackSentAtClientPerfMs: 50_008,
+      perfOriginEpochMs: 1_800_000_000_000 - 1_000 - 49_000 + 250,
+    });
+
+    const exchange = clockExchangeFromProbeAck({
+      ack,
+      receivedAtClientPerfMs: 1_014,
+      clientPerfOriginEpochMs: 1_800_000_000_000 - 1_000,
+    });
+
+    expect(exchange).not.toBeNull();
+    expect(exchange?.serverInstanceId).toBe("peer:host-device");
+    const estimate = estimateClockOffset(exchange!);
+    expect(estimate.offsetMs).toBeCloseTo(250, 3);
+    expect(estimate.roundTripMs).toBeCloseTo(12, 3);
+  });
+
+  test("refuses probe acks that cannot form a sane exchange", () => {
+    const probe = createClockProbeMessage({
+      id: "clock-phone-a-9",
+      fromDeviceId: "phone-a",
+      sentAtClientPerfMs: 1_000,
+    });
+    const ack = createClockProbeAckMessage({
+      probe,
+      fromDeviceId: "host-device",
+      probeReceivedAtClientPerfMs: 2_000,
+      ackSentAtClientPerfMs: 2_001,
+      perfOriginEpochMs: Number.NaN,
+    });
+
+    expect(
+      clockExchangeFromProbeAck({
+        ack,
+        receivedAtClientPerfMs: 1_020,
+        clientPerfOriginEpochMs: 0,
+      }),
+    ).toBeNull();
+    expect(
+      clockExchangeFromProbeAck({
+        ack: {
+          ...ack,
+          probeReceivedAtEpochMs: 5_000,
+          ackSentAtEpochMs: 5_001,
+        },
+        // Arrived before it was sent: clock nonsense, reject.
+        receivedAtClientPerfMs: 900,
+        clientPerfOriginEpochMs: 0,
+      }),
+    ).toBeNull();
   });
 
   test("rejects malformed or oversized data channel payloads", () => {

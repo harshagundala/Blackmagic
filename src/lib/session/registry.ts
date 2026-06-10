@@ -321,6 +321,11 @@ export function createSessionRegistry(options: SessionRegistryOptions = {}) {
   };
 }
 
+// NOTE: the server calls this with its own Date.now(), which lives in a
+// different time domain than the host-anchored epoch clients now share.
+// Clients therefore derive the turn themselves from room state and their
+// host-domain clock; the server-computed `calibrationTurn` in RoomState is
+// informational only and must not be used to schedule playback.
 export function selectRoomCalibrationTurn(
   devices: RoomDevice[],
   hostEpochNowMs: number,

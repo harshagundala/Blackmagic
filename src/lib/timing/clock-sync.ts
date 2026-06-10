@@ -231,6 +231,59 @@ export function robustClockModel(exchanges: ClockExchange[]): ClockModel {
   };
 }
 
+// The clock model for the device whose clock *is* the room reference (the
+// host). Offset zero by definition; near-zero error so timing health treats
+// the host as always localization-ready. referencePerfMs keeps
+// projectClockModel() from widening the bounds as the session ages.
+export function identityClockModel(referencePerfMs: number): ClockModel {
+  return {
+    offsetMs: 0,
+    uncertaintyMs: 0.1,
+    maxErrorMs: 0.2,
+    bestRoundTripMs: 0,
+    worstAcceptedRoundTripMs: 0,
+    jitterMs: 0,
+    offsetStabilityMs: 0,
+    quality: 1,
+    samplesUsed: 24,
+    outliersRejected: 0,
+    crossInstanceRejected: 0,
+    driftMsPerSecond: 0,
+    referencePerfMs: round(referencePerfMs),
+    sampleSpanMs: 0,
+  };
+}
+
+export type ClockModelSelectionInput = {
+  // "self": this device's clock is the room reference (it is the host).
+  // "external": sync against the host via peer exchanges, with HTTP server
+  // exchanges only as the prior before the first data-channel probe lands.
+  authority: "self" | "external";
+  peerExchanges: ClockExchange[];
+  serverExchanges: ClockExchange[];
+  nowPerfMs: number;
+};
+
+export function selectClockModel({
+  authority,
+  peerExchanges,
+  serverExchanges,
+  nowPerfMs,
+}: ClockModelSelectionInput): ClockModel {
+  if (authority === "self") {
+    return identityClockModel(nowPerfMs);
+  }
+
+  // Peer exchanges measure the offset to the host phone's epoch; server
+  // exchanges measure it to a server's wall clock — two unrelated time
+  // domains. Once host sync has been achieved, never silently jump back to
+  // the server domain on probe silence: hold the last peer model and let
+  // projectClockModel widen its error bounds honestly as it ages.
+  return robustClockModel(
+    peerExchanges.length > 0 ? peerExchanges : serverExchanges,
+  );
+}
+
 // Ages a clock model to "now": applies the fitted drift slope to the offset
 // and widens the error bounds for unmodeled drift since the last exchange.
 export function projectClockModel(

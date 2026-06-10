@@ -44,10 +44,17 @@ export type PulseToneSchedulerOptions = {
   createContext: () => PulseToneAudioContext;
   minimumLeadSeconds?: number;
   peakGain?: number;
+  // False when the scheduler plays through a context someone else manages
+  // (e.g. the capture context); close() then releases the reference without
+  // closing the shared context.
+  ownsContext?: boolean;
 };
 
 const DEFAULT_MINIMUM_LEAD_SECONDS = 0.02;
-const DEFAULT_PEAK_GAIN = 0.045;
+// The chirp band (17-19 kHz) is near-inaudible, but phone speakers and mics
+// both roll off hard up there. A timid gain leaves the matched filter with
+// nothing to correlate beyond arm's length, so drive the tone hard.
+const DEFAULT_PEAK_GAIN = 0.55;
 const FLOOR_GAIN = 0.0001;
 const ATTACK_SECONDS = 0.008;
 
@@ -55,11 +62,14 @@ export function createPulseToneScheduler({
   createContext,
   minimumLeadSeconds = DEFAULT_MINIMUM_LEAD_SECONDS,
   peakGain = DEFAULT_PEAK_GAIN,
+  ownsContext = true,
 }: PulseToneSchedulerOptions): PulseToneScheduler {
   let context: PulseToneAudioContext | null = null;
 
   async function audioContext() {
-    context ??= createContext();
+    if (!context || context.state === "closed") {
+      context = createContext();
+    }
     if (context.state === "suspended" && context.resume) {
       await context.resume().catch(() => undefined);
     }
@@ -81,7 +91,9 @@ export function createPulseToneScheduler({
     async close() {
       const closingContext = context;
       context = null;
-      await closingContext?.close?.().catch(() => undefined);
+      if (ownsContext) {
+        await closingContext?.close?.().catch(() => undefined);
+      }
     },
   };
 }

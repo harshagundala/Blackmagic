@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SensorSnapshot } from "@/hooks/use-sensor-suite";
 import {
+  clockExchangeFromProbeAck,
+  createClockProbeAckMessage,
   createClockProbeMessage,
   createRealtimeSensorFrame,
   parseRealtimeDataChannelMessage,
@@ -15,6 +17,7 @@ import type {
   RealtimeSignalPayload,
   RealtimeSensorFrameMessage,
 } from "@/lib/realtime/contracts";
+import type { ClockExchange } from "@/lib/timing/clock-sync";
 import type {
   AcousticObservation,
   AcousticPulse,
@@ -28,8 +31,11 @@ type WebRtcRoomOptions = {
   snapshot: SensorSnapshot;
   getAcousticPulse?: () => AcousticPulse | null;
   getAcousticObservation?: () => AcousticObservation | null;
-  onChirpSchedule?: (pulse: AcousticPulse) => void;
-  onPulseObservation?: (observation: AcousticObservation) => void;
+  onChirpSchedule?: (pulse: AcousticPulse, fromDeviceId: string) => void;
+  onPulseObservation?: (observation: AcousticObservation, fromDeviceId: string) => void;
+  // Fired when a clock probe to the room host completes; the exchange is in
+  // the host's wall-clock domain and feeds the device's clock model.
+  onClockExchange?: (exchange: ClockExchange) => void;
 };
 
 export type WebRtcRoomState = {
@@ -52,7 +58,13 @@ type PeerRuntime = {
 
 const SIGNAL_POLL_MS = 420;
 const SENSOR_FRAME_MS = 220;
-const CLOCK_PROBE_MS = 1_000;
+const CLOCK_PROBE_MS = 300;
+// A burst right after the channel opens fills the clock model fast and gives
+// the robust estimator a pool of round trips to pick the quietest from; the
+// displayed sync error tracks the BEST round trip, so more samples directly
+// sharpen it.
+const CLOCK_PROBE_BURST_COUNT = 10;
+const CLOCK_PROBE_BURST_SPACING_MS = 100;
 const RECENT_PEER_FRAME_MS = 2_500;
 
 export function useWebRtcRoom({
@@ -64,16 +76,18 @@ export function useWebRtcRoom({
   getAcousticObservation,
   onChirpSchedule,
   onPulseObservation,
+  onClockExchange,
 }: WebRtcRoomOptions): WebRtcRoomState {
   const snapshotRef = useRef(snapshot);
   const getAcousticPulseRef = useRef(getAcousticPulse);
   const getAcousticObservationRef = useRef(getAcousticObservation);
   const onChirpScheduleRef = useRef(onChirpSchedule);
   const onPulseObservationRef = useRef(onPulseObservation);
+  const onClockExchangeRef = useRef(onClockExchange);
   const peersRef = useRef(new Map<string, PeerRuntime>());
   const lastSignalSeqRef = useRef(0);
   const messageSequenceRef = useRef(0);
-  const peerFramesRef = useRef<Record<string, RealtimeSensorFrameMessage>>({});
+  const peerFramesRef = useRef<Record<string, ReceivedPeerFrame>>({});
   const [peerFrames, setPeerFrames] = useState<RealtimeSensorFrameMessage[]>(
     [],
   );
@@ -86,6 +100,15 @@ export function useWebRtcRoom({
   );
   const targetKey = peerTargets.join("\u0000");
   const isHost = roomState?.hostDeviceId === deviceId;
+  // Channel callbacks outlive the effect run that created them; mirror the
+  // host topology into refs so long-lived handlers never read stale values.
+  const isHostRef = useRef(isHost);
+  const hostDeviceIdRef = useRef(roomState?.hostDeviceId ?? null);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+    hostDeviceIdRef.current = roomState?.hostDeviceId ?? null;
+  }, [isHost, roomState?.hostDeviceId]);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
@@ -106,6 +129,10 @@ export function useWebRtcRoom({
   useEffect(() => {
     onPulseObservationRef.current = onPulseObservation;
   }, [onPulseObservation]);
+
+  useEffect(() => {
+    onClockExchangeRef.current = onClockExchange;
+  }, [onClockExchange]);
 
   useEffect(() => {
     if (!active || !supported || !roomState) {
@@ -131,6 +158,7 @@ export function useWebRtcRoom({
           publishSignal,
           handleMessage,
           syncOpenPeerCount,
+          onChannelOpen: burstClockProbes,
         });
       }
     }
@@ -148,6 +176,7 @@ export function useWebRtcRoom({
         publishSignal,
         handleMessage,
         syncOpenPeerCount,
+        onChannelOpen: burstClockProbes,
       });
     };
     void poll();
@@ -171,42 +200,136 @@ export function useWebRtcRoom({
     }
 
     function handleMessage(peerId: string, message: RealtimeDataChannelMessage) {
+      // The host is the room hub: peers only hold a channel to the host, so
+      // the host forwards peer traffic to every other peer. Peers never
+      // relay, which keeps the star topology loop-free.
+      if (isHostRef.current) {
+        relayToOtherPeers(peerId, message);
+      }
+
       if (message.type === "clock-probe") {
-        sendDataChannelMessage(peersRef.current.get(peerId), {
-          type: "clock-probe-ack",
-          version: 1,
-          id: message.id,
-          fromDeviceId: deviceId,
-          probeSentAtClientPerfMs: message.sentAtClientPerfMs,
-          probeReceivedAtClientPerfMs: nowPerfMs(),
-          ackSentAtClientPerfMs: nowPerfMs(),
-          hostEstimatedEpochMs:
-            snapshotRef.current.audioFrame?.hostEstimatedEpochMs ?? null,
+        sendDataChannelMessage(
+          peersRef.current.get(peerId),
+          createClockProbeAckMessage({
+            probe: message,
+            fromDeviceId: deviceId,
+            probeReceivedAtClientPerfMs: nowPerfMs(),
+            ackSentAtClientPerfMs: nowPerfMs(),
+            perfOriginEpochMs: perfOriginEpochMs(),
+            hostEstimatedEpochMs:
+              snapshotRef.current.audioFrame?.hostEstimatedEpochMs ?? null,
+          }),
+        );
+        return;
+      }
+
+      if (message.type === "clock-probe-ack") {
+        // Only acks from the room host carry the reference clock; the device
+        // syncs its host-epoch estimate from them.
+        if (
+          isHostRef.current ||
+          message.fromDeviceId !== hostDeviceIdRef.current
+        ) {
+          return;
+        }
+        const exchange = clockExchangeFromProbeAck({
+          ack: message,
+          receivedAtClientPerfMs: nowPerfMs(),
+          clientPerfOriginEpochMs: perfOriginEpochMs(),
         });
+        if (exchange) {
+          onClockExchangeRef.current?.(exchange);
+        }
         return;
       }
 
       if (message.type === "sensor-frame") {
+        // Freshness must be judged on the receiver's clock: the sender's
+        // perf timestamps count its own page uptime and are not comparable
+        // across devices.
         peerFramesRef.current = {
           ...peerFramesRef.current,
-          [message.fromDeviceId]: message,
+          [message.fromDeviceId]: {
+            frame: message,
+            receivedAtPerfMs: nowPerfMs(),
+          },
         };
         setPeerFrames(recentPeerFrames(peerFramesRef.current));
+        if (message.pulseObservation) {
+          onPulseObservationRef.current?.(
+            message.pulseObservation,
+            message.fromDeviceId,
+          );
+        }
         return;
       }
 
       if (message.type === "chirp-schedule") {
-        onChirpScheduleRef.current?.(message.pulse);
+        onChirpScheduleRef.current?.(message.pulse, message.fromDeviceId);
         return;
       }
 
       if (message.type === "pulse-observation") {
-        onPulseObservationRef.current?.(message.observation);
+        onPulseObservationRef.current?.(
+          message.observation,
+          message.fromDeviceId,
+        );
+      }
+    }
+
+    function relayToOtherPeers(
+      sourcePeerId: string,
+      message: RealtimeDataChannelMessage,
+    ) {
+      if (
+        message.type !== "sensor-frame" &&
+        message.type !== "chirp-schedule" &&
+        message.type !== "pulse-observation"
+      ) {
+        return;
+      }
+
+      for (const runtime of peersRef.current.values()) {
+        if (runtime.peerId !== sourcePeerId) {
+          sendDataChannelMessage(runtime, message);
+        }
       }
     }
 
     function syncOpenPeerCount() {
       setOpenPeerCount(countOpenPeers(peersRef.current));
+    }
+
+    function burstClockProbes(runtime: PeerRuntime) {
+      // Only non-hosts sync against the channel peer (the host).
+      if (isHostRef.current) {
+        return;
+      }
+
+      let sent = 0;
+      const sendNext = () => {
+        if (sent >= CLOCK_PROBE_BURST_COUNT) {
+          return;
+        }
+        if (runtime.channel?.readyState !== "open") {
+          return;
+        }
+        sent += 1;
+        const sentAtClientPerfMs = nowPerfMs();
+        runtime.lastClockProbeAt = sentAtClientPerfMs;
+        runtime.clockProbeSequence += 1;
+        sendDataChannelMessage(
+          runtime,
+          createClockProbeMessage({
+            id: `clock:${deviceId}:${runtime.peerId}:${runtime.clockProbeSequence}`,
+            fromDeviceId: deviceId,
+            sentAtClientPerfMs,
+            hostEstimatedEpochMs: null,
+          }),
+        );
+        window.setTimeout(sendNext, CLOCK_PROBE_BURST_SPACING_MS);
+      };
+      sendNext();
     }
   }, [active, deviceId, isHost, peerTargets, roomState, supported, targetKey]);
 
@@ -230,7 +353,11 @@ export function useWebRtcRoom({
 
       for (const runtime of peersRef.current.values()) {
         sendDataChannelMessage(runtime, frame);
-        maybeSendClockProbe(runtime, deviceId, sentAtClientPerfMs);
+        // Only non-hosts probe: the host is the clock reference, so an ack
+        // from a peer carries nothing the host can use.
+        if (!isHostRef.current) {
+          maybeSendClockProbe(runtime, deviceId, sentAtClientPerfMs);
+        }
         if (pulse && runtime.lastPulseId !== pulse.id) {
           runtime.lastPulseId = pulse.id;
           sendDataChannelMessage(runtime, {
@@ -284,6 +411,7 @@ async function createPeerRuntime({
   publishSignal,
   handleMessage,
   syncOpenPeerCount,
+  onChannelOpen,
 }: {
   deviceId: string;
   peerId: string;
@@ -296,6 +424,7 @@ async function createPeerRuntime({
   ) => Promise<void>;
   handleMessage: (peerId: string, message: RealtimeDataChannelMessage) => void;
   syncOpenPeerCount: () => void;
+  onChannelOpen?: (runtime: PeerRuntime) => void;
 }) {
   const connection = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -334,7 +463,13 @@ async function createPeerRuntime({
     syncOpenPeerCount();
   };
   connection.ondatachannel = (event) => {
-    attachDataChannel(runtime, event.channel, handleMessage, syncOpenPeerCount);
+    attachDataChannel(
+      runtime,
+      event.channel,
+      handleMessage,
+      syncOpenPeerCount,
+      onChannelOpen,
+    );
   };
 
   if (!initiator) {
@@ -349,6 +484,7 @@ async function createPeerRuntime({
     }),
     handleMessage,
     syncOpenPeerCount,
+    onChannelOpen,
   );
   await connection.setLocalDescription(await connection.createOffer());
   if (connection.localDescription?.sdp) {
@@ -364,10 +500,14 @@ function attachDataChannel(
   channel: RTCDataChannel,
   handleMessage: (peerId: string, message: RealtimeDataChannelMessage) => void,
   syncOpenPeerCount: () => void,
+  onChannelOpen?: (runtime: PeerRuntime) => void,
 ) {
   runtime.channel = channel;
   channel.binaryType = "arraybuffer";
-  channel.onopen = syncOpenPeerCount;
+  channel.onopen = () => {
+    syncOpenPeerCount();
+    onChannelOpen?.(runtime);
+  };
   channel.onclose = syncOpenPeerCount;
   channel.onerror = syncOpenPeerCount;
   channel.onmessage = (event) => {
@@ -389,6 +529,7 @@ async function pollSignals({
   publishSignal,
   handleMessage,
   syncOpenPeerCount,
+  onChannelOpen,
 }: {
   deviceId: string;
   targets: Set<string>;
@@ -401,6 +542,7 @@ async function pollSignals({
   ) => Promise<void>;
   handleMessage: (peerId: string, message: RealtimeDataChannelMessage) => void;
   syncOpenPeerCount: () => void;
+  onChannelOpen?: (runtime: PeerRuntime) => void;
 }) {
   const params = new URLSearchParams({
     url: window.location.href,
@@ -433,6 +575,7 @@ async function pollSignals({
         publishSignal,
         handleMessage,
         syncOpenPeerCount,
+        onChannelOpen,
       });
       runtime = peers.get(signal.fromDeviceId);
     }
@@ -587,15 +730,26 @@ function countOpenPeers(peers: Map<string, PeerRuntime>) {
   ).length;
 }
 
-function recentPeerFrames(
-  frames: Record<string, RealtimeSensorFrameMessage>,
-) {
+type ReceivedPeerFrame = {
+  frame: RealtimeSensorFrameMessage;
+  receivedAtPerfMs: number;
+};
+
+function recentPeerFrames(frames: Record<string, ReceivedPeerFrame>) {
   const now = nowPerfMs();
   return Object.values(frames)
-    .filter((frame) => now - frame.sentAtClientPerfMs <= RECENT_PEER_FRAME_MS)
+    .filter((entry) => now - entry.receivedAtPerfMs <= RECENT_PEER_FRAME_MS)
+    .map((entry) => entry.frame)
     .sort((a, b) => a.fromDeviceId.localeCompare(b.fromDeviceId));
 }
 
 function nowPerfMs() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function perfOriginEpochMs() {
+  if (typeof performance === "undefined") {
+    return 0;
+  }
+  return performance.timeOrigin || Date.now() - performance.now();
 }

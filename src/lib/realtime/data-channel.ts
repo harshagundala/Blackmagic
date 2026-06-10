@@ -1,9 +1,11 @@
 import type {
+  RealtimeClockProbeAckMessage,
   RealtimeClockProbeMessage,
   RealtimeDataChannelMessage,
   RealtimeSensorFrameMessage,
 } from "./contracts";
 import type { AcousticObservation } from "../session/registry";
+import type { ClockExchange } from "../timing/clock-sync";
 
 const DATA_CHANNEL_MESSAGE_VERSION = 1;
 const MAX_DATA_CHANNEL_MESSAGE_CHARS = 64_000;
@@ -60,6 +62,77 @@ export function createClockProbeMessage({
     fromDeviceId,
     sentAtClientPerfMs,
     hostEstimatedEpochMs: finiteNumberOrNull(hostEstimatedEpochMs),
+  };
+}
+
+export function createClockProbeAckMessage({
+  probe,
+  fromDeviceId,
+  probeReceivedAtClientPerfMs,
+  ackSentAtClientPerfMs,
+  perfOriginEpochMs,
+  hostEstimatedEpochMs,
+}: {
+  probe: RealtimeClockProbeMessage;
+  fromDeviceId: string;
+  probeReceivedAtClientPerfMs: number;
+  ackSentAtClientPerfMs: number;
+  // The responder's performance.timeOrigin equivalent; lets the prober map
+  // the responder's perf instants into the responder's wall-clock domain.
+  perfOriginEpochMs: number;
+  hostEstimatedEpochMs?: number | null;
+}): RealtimeClockProbeAckMessage {
+  return {
+    type: "clock-probe-ack",
+    version: DATA_CHANNEL_MESSAGE_VERSION,
+    id: probe.id,
+    fromDeviceId,
+    probeSentAtClientPerfMs: probe.sentAtClientPerfMs,
+    probeReceivedAtClientPerfMs,
+    ackSentAtClientPerfMs,
+    hostEstimatedEpochMs: finiteNumberOrNull(hostEstimatedEpochMs),
+    probeReceivedAtEpochMs: finiteNumberOrNull(
+      perfOriginEpochMs + probeReceivedAtClientPerfMs,
+    ),
+    ackSentAtEpochMs: finiteNumberOrNull(
+      perfOriginEpochMs + ackSentAtClientPerfMs,
+    ),
+  };
+}
+
+// Converts a completed probe/ack round trip into the same ClockExchange shape
+// the HTTP time-echo path produces, so the existing robust clock model can
+// consume data-channel exchanges unchanged. The "server" side of the exchange
+// is the responding peer (normally the room host).
+export function clockExchangeFromProbeAck({
+  ack,
+  receivedAtClientPerfMs,
+  clientPerfOriginEpochMs,
+}: {
+  ack: RealtimeClockProbeAckMessage;
+  receivedAtClientPerfMs: number;
+  clientPerfOriginEpochMs: number;
+}): ClockExchange | null {
+  const probeReceivedAtEpochMs = finiteNumberOrNull(ack.probeReceivedAtEpochMs);
+  const ackSentAtEpochMs = finiteNumberOrNull(ack.ackSentAtEpochMs);
+  if (
+    probeReceivedAtEpochMs === null ||
+    ackSentAtEpochMs === null ||
+    !finiteNumber(ack.probeSentAtClientPerfMs) ||
+    !finiteNumber(receivedAtClientPerfMs) ||
+    receivedAtClientPerfMs <= ack.probeSentAtClientPerfMs ||
+    ackSentAtEpochMs < probeReceivedAtEpochMs
+  ) {
+    return null;
+  }
+
+  return {
+    clientPerfOriginEpochMs,
+    clientSendPerfMs: ack.probeSentAtClientPerfMs,
+    serverReceiveEpochMs: probeReceivedAtEpochMs,
+    serverSendEpochMs: ackSentAtEpochMs,
+    clientReceivePerfMs: receivedAtClientPerfMs,
+    serverInstanceId: `peer:${ack.fromDeviceId}`,
   };
 }
 
@@ -178,7 +251,9 @@ export function isRealtimeDataChannelMessage(
         finiteNumber(value.probeSentAtClientPerfMs) &&
         finiteNumber(value.probeReceivedAtClientPerfMs) &&
         finiteNumber(value.ackSentAtClientPerfMs) &&
-        nullableFiniteNumber(value.hostEstimatedEpochMs)
+        nullableFiniteNumber(value.hostEstimatedEpochMs) &&
+        optionalNullableFiniteNumber(value.probeReceivedAtEpochMs) &&
+        optionalNullableFiniteNumber(value.ackSentAtEpochMs)
       );
     case "sensor-frame":
       return (
@@ -207,6 +282,10 @@ function finiteNumber(value: unknown): value is number {
 
 function nullableFiniteNumber(value: unknown) {
   return value === null || finiteNumber(value);
+}
+
+function optionalNullableFiniteNumber(value: unknown) {
+  return value === undefined || nullableFiniteNumber(value);
 }
 
 function nonEmptyString(value: unknown): value is string {

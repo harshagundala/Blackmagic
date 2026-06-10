@@ -315,7 +315,11 @@ export function rangeLayoutWeight(range: AcousticRange) {
 
 function localizationDeviceIdsFor(room: RoomState) {
   const ids = room.timeSync?.localizationDeviceIds;
-  return Array.isArray(ids) && ids.length > 0 ? new Set(ids) : null;
+  // A range needs both endpoints ready, so a set with fewer than two devices
+  // can only filter out everything; treat it as "no gate" instead of
+  // discarding ranges that the reciprocal math (which cancels clock offsets)
+  // already vouched for.
+  return Array.isArray(ids) && ids.length >= 2 ? new Set(ids) : null;
 }
 
 function isLocalizationReadyRange(
