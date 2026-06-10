@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   createPairwiseCalibrationPlan,
   selectObservablePulse,
+  selectTrackedPulse,
   selectUpcomingCalibrationTurn,
   summarizePairwiseMeasurements,
   type PairwiseMeasurement,
@@ -207,6 +208,43 @@ describe("pairwise calibration session", () => {
         emittedAtHostEpochMs: 10_200,
       }),
     );
+  });
+
+  test("keeps a locally acknowledged pulse while ack-only heartbeats catch up", () => {
+    const localPulse = {
+      id: "phone-a:local:10_400",
+      emittedAtHostEpochMs: 10_400,
+      durationMs: 48,
+      frequencyHz: 17_200,
+      endFrequencyHz: 19_200,
+    };
+    const devices: RoomDevice[] = [
+      deviceWithPulse("host", "host:later", 11_800),
+    ];
+
+    expect(
+      selectTrackedPulse(devices, "phone-a", 10_000, localPulse, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toEqual(localPulse);
+  });
+
+  test("releases a locally tracked pulse after the listening window expires", () => {
+    const localPulse = {
+      id: "phone-a:local:10_000",
+      emittedAtHostEpochMs: 10_000,
+      durationMs: 48,
+      frequencyHz: 17_200,
+      endFrequencyHz: 19_200,
+    };
+
+    expect(
+      selectTrackedPulse([], "phone-a", 10_250, localPulse, {
+        maxFutureMs: 1_500,
+        maxLateMs: 200,
+      }),
+    ).toBeNull();
   });
 });
 

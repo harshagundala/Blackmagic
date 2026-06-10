@@ -158,8 +158,53 @@ export function selectObservablePulse(
   return candidates[0] ?? null;
 }
 
+export function selectTrackedPulse(
+  devices: RoomDevice[],
+  observerDeviceId: string,
+  hostEpochNowMs: number,
+  currentPulse: AcousticPulse | null,
+  options: ObservablePulseOptions = {},
+): AcousticPulse | null {
+  const observablePulse = selectObservablePulse(
+    devices,
+    observerDeviceId,
+    hostEpochNowMs,
+    options,
+  );
+  if (observablePulse) {
+    return observablePulse;
+  }
+
+  if (
+    currentPulse &&
+    !observedPulseIdsFor(devices, observerDeviceId).has(currentPulse.id) &&
+    isPulseInsideObservableWindow(currentPulse, hostEpochNowMs, options)
+  ) {
+    return currentPulse;
+  }
+
+  return null;
+}
+
+function isPulseInsideObservableWindow(
+  pulse: AcousticPulse,
+  hostEpochNowMs: number,
+  options: ObservablePulseOptions,
+) {
+  if (!Number.isFinite(hostEpochNowMs)) {
+    return false;
+  }
+
+  const maxFutureMs = options.maxFutureMs ?? 5_500;
+  const maxLateMs = options.maxLateMs ?? 180;
+  const deltaMs = pulse.emittedAtHostEpochMs - hostEpochNowMs;
+  return deltaMs <= maxFutureMs && deltaMs >= -maxLateMs;
+}
+
 function observedPulseIdsFor(devices: RoomDevice[], observerDeviceId: string) {
-  const observer = devices.find((device) => device.deviceId === observerDeviceId);
+  const observer = devices.find(
+    (device) => device.deviceId === observerDeviceId,
+  );
   if (!observer) {
     return new Set<string>();
   }
@@ -215,27 +260,32 @@ export function summarizePairwiseMeasurements(
     }
 
     const key = [...[measurement.from, measurement.to].sort()].join(":");
-    const group =
-      groups.get(key) ?? {
-        from: measurement.from,
-        to: measurement.to,
-        measurements: [],
-      };
+    const group = groups.get(key) ?? {
+      from: measurement.from,
+      to: measurement.to,
+      measurements: [],
+    };
     group.measurements.push(measurement);
     groups.set(key, group);
   }
 
   return [...groups.values()]
     .map((group) => {
-      const sorted = [...group.measurements].sort((a, b) => a.meters - b.meters);
+      const sorted = [...group.measurements].sort(
+        (a, b) => a.meters - b.meters,
+      );
       const median = sorted[Math.floor(sorted.length / 2)];
       const deviations = sorted
         .map((item) => Math.abs(item.meters - median.meters))
         .sort((a, b) => a - b);
-      const medianDeviation = deviations[Math.floor(deviations.length / 2)] ?? 0;
+      const medianDeviation =
+        deviations[Math.floor(deviations.length / 2)] ?? 0;
       const inliers = group.measurements.filter((item) => {
         const threshold = Math.max(0.35, medianDeviation * 3);
-        return item.confidence >= 0.25 && Math.abs(item.meters - median.meters) <= threshold;
+        return (
+          item.confidence >= 0.25 &&
+          Math.abs(item.meters - median.meters) <= threshold
+        );
       });
       const kept = inliers.length > 0 ? inliers : group.measurements;
       const confidenceMean =

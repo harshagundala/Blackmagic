@@ -14,6 +14,7 @@ import { createPhoneMarkers } from "@/lib/blackmagic/phone-markers";
 import { roomSoundEnergy } from "@/lib/blackmagic/room-sound-energy";
 import {
   calibrationEventKey,
+  hasPulseLead,
   shouldFlushCalibrationEvent,
 } from "@/lib/calibration/cadence";
 import {
@@ -28,9 +29,7 @@ import {
   createPulseToneScheduler,
   type PulseToneScheduler,
 } from "@/lib/calibration/playback";
-import {
-  selectObservablePulse,
-} from "@/lib/calibration/session";
+import { selectTrackedPulse } from "@/lib/calibration/session";
 import type { PhonePoint } from "@/lib/positioning/layout";
 import { estimateRoomConstellation } from "@/lib/positioning/room-state-layout";
 import { projectClockModel } from "@/lib/timing/clock-sync";
@@ -44,9 +43,10 @@ import { captureProcessingState } from "@/lib/session/registry";
 
 type Phase = "arriving" | "waiting" | "listening";
 
-// A chirp commits to playback only if its advertisement was acknowledged at
-// least this long before the scheduled emission, so peers can poll it in time.
-const MIN_COMMIT_LEAD_MS = 600;
+// A chirp is only advertised when peers have enough time to receive it through
+// long-poll; after the server ack, WebAudio only needs a short scheduling lead.
+const MIN_ADVERTISE_LEAD_MS = 1_500;
+const MIN_OUTPUT_SCHEDULE_LEAD_MS = 120;
 type CalibrationHeartbeat = Pick<
   DeviceHeartbeat,
   "acousticPulse" | "acousticObservation"
@@ -60,6 +60,7 @@ export function BlackmagicApp() {
     }),
   });
   const sensors = useSensorSuite();
+  const trackSensorPulse = sensors.trackPulse;
   const snapshotRef = useRef(sensors.snapshot);
   const calibrationRef = useRef<CalibrationHeartbeat>({});
   const publishedPulseIdRef = useRef("");
@@ -145,6 +146,9 @@ export function BlackmagicApp() {
         leadMs: turn.pulseEmittedAtHostEpochMs - hostEpochNowMs,
         durationMs: turn.pulseDurationMs,
       });
+      if (!hasPulseLead(pulse, hostEpochNowMs, MIN_ADVERTISE_LEAD_MS)) {
+        return;
+      }
       if (pulse.id === publishedPulseIdRef.current) {
         return;
       }
@@ -160,8 +164,6 @@ export function BlackmagicApp() {
       const acknowledged = await flushCalibrationEvent(
         calibrationEventKey("pulse", pulse.id),
       );
-      const remainingLeadMs =
-        pulse.emittedAtHostEpochMs - (hostEpochNow(snapshotRef.current) ?? 0);
       if (!acknowledged) {
         // The advertisement never landed; allow the interval to retry while
         // there is still lead instead of burning the slot silently.
@@ -169,9 +171,24 @@ export function BlackmagicApp() {
         flushedCalibrationEventRef.current = "";
         return;
       }
-      if (remainingLeadMs < MIN_COMMIT_LEAD_MS) {
+      if (
+        !hasPulseLead(
+          pulse,
+          hostEpochNow(snapshotRef.current) ?? Number.NaN,
+          MIN_OUTPUT_SCHEDULE_LEAD_MS,
+        )
+      ) {
+        publishedPulseIdRef.current = "";
+        flushedCalibrationEventRef.current = "";
+        calibrationRef.current = {
+          acousticPulse: null,
+          acousticObservation:
+            calibrationRef.current.acousticObservation ?? null,
+        };
         return;
       }
+      observablePulseRef.current = pulse;
+      trackSensorPulse(pulse);
       scheduleOutputPulse(pulse, snapshotRef.current, pulseSchedulerRef);
     };
 
@@ -180,7 +197,7 @@ export function BlackmagicApp() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [deviceId, flushCalibrationEvent, phase, roomState]);
+  }, [deviceId, flushCalibrationEvent, phase, roomState, trackSensorPulse]);
 
   useEffect(
     () => () => {
@@ -201,7 +218,12 @@ export function BlackmagicApp() {
     const pulse =
       hostEpochNowMs === null
         ? null
-        : selectObservablePulse(roomState.devices, deviceId, hostEpochNowMs);
+        : selectTrackedPulse(
+            roomState.devices,
+            deviceId,
+            hostEpochNowMs,
+            observablePulseRef.current,
+          );
 
     if (observablePulseRef.current?.id === pulse?.id) {
       return;
@@ -245,7 +267,10 @@ export function BlackmagicApp() {
     }
 
     if (
-      !shouldPublishAcousticObservation(publishedObservationRef.current, observation)
+      !shouldPublishAcousticObservation(
+        publishedObservationRef.current,
+        observation,
+      )
     ) {
       return;
     }
@@ -271,9 +296,8 @@ export function BlackmagicApp() {
   });
   const pulse = listening ? Math.min(1, Math.max(0.12, soundEnergy)) : 0.16;
   const phoneMarkers = createPhoneMarkers(
-    constellation?.devices.filter(
-      (device) => device.deviceId !== deviceId,
-    ) ?? [],
+    constellation?.devices.filter((device) => device.deviceId !== deviceId) ??
+      [],
   );
   const peerCount = Math.max(0, (roomState?.devices.length ?? 1) - 1);
   const syncLabel = describeTimeSync(roomState?.timeSync ?? null, peerCount);
@@ -419,9 +443,9 @@ export function BlackmagicApp() {
 }
 
 function describeTimeSync(
-  timeSync: NonNullable<
-    Parameters<typeof estimateRoomConstellation>[0]
-  >["timeSync"] | null,
+  timeSync:
+    | NonNullable<Parameters<typeof estimateRoomConstellation>[0]>["timeSync"]
+    | null,
   peerCount: number,
 ) {
   if (!timeSync || peerCount === 0) {
@@ -518,8 +542,7 @@ function pulseSearchBounds(pulse: AcousticPulse, snapshot: SensorSnapshot) {
   const lateMs = Math.max(180, clockUncertaintyMs * 3);
   const expectedStartSampleIndex =
     snapshot.audioFrame.sampleIndex +
-    ((pulse.emittedAtHostEpochMs -
-      snapshot.audioFrame.hostEstimatedEpochMs) /
+    ((pulse.emittedAtHostEpochMs - snapshot.audioFrame.hostEstimatedEpochMs) /
       1_000) *
       snapshot.audioFrame.sampleRate;
 
@@ -552,7 +575,8 @@ function scheduleOutputPulse(
 
   schedulerRef.current ??= createPulseToneScheduler({
     createContext: () => {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext || window.webkitAudioContext;
       return new AudioContextClass();
     },
   });
