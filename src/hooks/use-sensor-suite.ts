@@ -179,15 +179,18 @@ function loadStoredCaptureMode(): CaptureConstraintMode {
   }
   try {
     const value = window.localStorage.getItem(CAPTURE_MODE_STORAGE_KEY);
-    return value === "raw" || value === "processed" || value === "video"
-      ? value
-      : "processed";
+    // "video" never restores: it requires a camera prompt that cannot fire
+    // at page load, so booting into it bricks the session.
+    return value === "raw" || value === "processed" ? value : "processed";
   } catch {
     return "processed";
   }
 }
 
 function storeCaptureMode(mode: CaptureConstraintMode) {
+  if (mode === "video") {
+    return;
+  }
   try {
     window.localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, mode);
   } catch {
@@ -222,7 +225,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const captureSilentSincePerfMsRef = useRef<number | null>(null);
   const captureRebuildCountRef = useRef(0);
   const captureRebuildInFlightRef = useRef(false);
-  const captureModeRef = useRef<CaptureConstraintMode>(loadStoredCaptureMode());
+  // Resolved lazily (not in render) so localStorage is read once, on start.
+  const captureModeRef = useRef<CaptureConstraintMode | null>(null);
   const lastStoredCaptureModeRef = useRef<CaptureConstraintMode | null>(null);
   const voiceGateRef = useRef<VoiceActivityGate>({
     open: false,
@@ -374,13 +378,16 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       heading: "idle",
     }));
 
+    captureModeRef.current ??= loadStoredCaptureMode();
+    const startMode = captureModeRef.current;
+
     // The microphone request must be the permission prompt issued inside the
     // raw tap-gesture stack, before ANY await: on iOS each permission prompt
     // consumes the gesture's user activation, and getUserMedia called without
     // activation is rejected WITHOUT ever showing a prompt. Motion permission
     // (which also consumes an activation) is requested on a later tap instead.
     const mediaStreamPromise = navigator.mediaDevices.getUserMedia(
-      captureConstraintsFor(captureModeRef.current),
+      captureConstraintsFor(startMode),
     );
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -388,6 +395,23 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     let audioContext = new AudioContextClass();
     audioContextRef.current = audioContext;
     await resumeAudioContextIfNeeded(audioContext);
+
+    // Clock sync is independent of the microphone: it must run even when
+    // capture fails, both for the recovery paths and so a mic-less device
+    // still shares the room timeline.
+    void syncServerClock(serverClockExchangesRef, refreshClockModel);
+    void warmServerClockSync(
+      serverClockExchangesRef,
+      () => clockSyncRunRef.current === syncRun,
+      refreshClockModel,
+    );
+    if (clockTimerRef.current !== null) {
+      window.clearInterval(clockTimerRef.current);
+    }
+    clockTimerRef.current = window.setInterval(
+      () => void syncServerClock(serverClockExchangesRef, refreshClockModel),
+      CLOCK_SYNC_INTERVAL_MS,
+    );
 
     try {
       const stream = await mediaStreamPromise;
@@ -431,26 +455,30 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       captureRebuildCountRef.current = 0;
       captureSilentSincePerfMsRef.current = null;
       startCaptureReadLoop();
-
-      void syncServerClock(serverClockExchangesRef, refreshClockModel);
-      void warmServerClockSync(
-        serverClockExchangesRef,
-        () => clockSyncRunRef.current === syncRun,
-        refreshClockModel,
-      );
-      clockTimerRef.current = window.setInterval(
-        () => void syncServerClock(serverClockExchangesRef, refreshClockModel),
-        CLOCK_SYNC_INTERVAL_MS,
-      );
     } catch {
       void audioContext.close().catch(() => undefined);
       audioContextRef.current = null;
-      setSnapshot((current) => ({
-        ...current,
-        mic: "blocked",
-        audioContextState: null,
-      }));
-      return;
+      // A non-default capture mode that fails to start must not strand the
+      // session: retry on the processed pipeline (permission, if granted,
+      // carries over; if it was denied, this fails fast and marks the mic
+      // blocked). This also un-bricks a stale persisted mode.
+      if (startMode !== "processed") {
+        captureModeRef.current = "processed";
+        lastStoredCaptureModeRef.current = "processed";
+        storeCaptureMode("processed");
+        await reacquireCaptureStream("processed");
+        // The read loop normally starts inside the try block; after a
+        // fallback reacquire it must start here (it idles harmlessly if the
+        // fallback also failed).
+        startCaptureReadLoop();
+      } else {
+        setSnapshot((current) => ({
+          ...current,
+          mic: "blocked",
+          audioContextState: null,
+        }));
+        return;
+      }
     }
 
     if ("geolocation" in navigator) {
@@ -676,9 +704,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       // known-good capture path, worth remembering across reloads.
       captureRebuildCountRef.current = 0;
       captureSilentSincePerfMsRef.current = null;
-      if (lastStoredCaptureModeRef.current !== captureModeRef.current) {
-        lastStoredCaptureModeRef.current = captureModeRef.current;
-        storeCaptureMode(captureModeRef.current);
+      const liveMode = captureModeRef.current;
+      if (liveMode && lastStoredCaptureModeRef.current !== liveMode) {
+        lastStoredCaptureModeRef.current = liveMode;
+        storeCaptureMode(liveMode);
       }
       return;
     }
@@ -712,7 +741,9 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     const recovery =
       attempt <= 1
         ? rebuildCaptureGraph()
-        : reacquireCaptureStream(attempt >= 3 ? "processed" : captureModeRef.current);
+        : reacquireCaptureStream(
+            attempt >= 3 ? "processed" : (captureModeRef.current ?? "processed"),
+          );
     void recovery.finally(() => {
       captureRebuildInFlightRef.current = false;
     });
