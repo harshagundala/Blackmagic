@@ -14,6 +14,31 @@ describe("ranging progress narration", () => {
     ).toBeNull();
   });
 
+  test("names the closed gate while nothing has chirped", () => {
+    expect(
+      describeRangingProgress({
+        peerCount: 1,
+        pulseCount: 0,
+        observationCount: 0,
+        ranges: [],
+        emitterReadyCount: 1,
+        deviceCount: 2,
+        directLinkOpen: true,
+      }),
+    ).toBe("mic clock 1/2");
+    expect(
+      describeRangingProgress({
+        peerCount: 1,
+        pulseCount: 0,
+        observationCount: 0,
+        ranges: [],
+        emitterReadyCount: 2,
+        deviceCount: 2,
+        directLinkOpen: false,
+      }),
+    ).toBe("linking phones");
+  });
+
   test("walks the pipeline stages", () => {
     expect(
       describeRangingProgress({

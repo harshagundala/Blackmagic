@@ -1075,15 +1075,27 @@ function timestampAudioFrame(
     sampleRate: audioContext.sampleRate,
     clientPerfOriginEpochMs: performance.timeOrigin || Date.now() - performance.now(),
     clockOffsetMs: projected.offsetMs,
-    clockUncertaintyMs: projected.uncertaintyMs,
+    // A sparse clock model reports Infinity, which JSON serializes to null
+    // and the server then rejects the whole audio frame — taking this device
+    // out of the chirp rotation invisibly. Clamp to a finite, honest
+    // worst-case bound instead so the frame survives transport.
+    clockUncertaintyMs: finiteClockMs(projected.uncertaintyMs),
     clockQuality: clock.quality,
-    clockMaxErrorMs: projected.maxErrorMs,
-    clockBestRoundTripMs: clock.bestRoundTripMs,
-    clockJitterMs: clock.jitterMs,
+    clockMaxErrorMs: finiteClockMs(projected.maxErrorMs),
+    clockBestRoundTripMs: finiteClockMs(clock.bestRoundTripMs),
+    clockJitterMs: finiteClockMs(clock.jitterMs),
     clockSamplesUsed: clock.samplesUsed,
     clockOutliersRejected: clock.outliersRejected,
-    clockOffsetStabilityMs: clock.offsetStabilityMs,
+    clockOffsetStabilityMs: finiteClockMs(clock.offsetStabilityMs),
   });
+}
+
+const MAX_REPORTED_CLOCK_ERROR_MS = 9_999;
+
+function finiteClockMs(value: number) {
+  return Number.isFinite(value)
+    ? Math.min(value, MAX_REPORTED_CLOCK_ERROR_MS)
+    : MAX_REPORTED_CLOCK_ERROR_MS;
 }
 
 function validTimestamp(value: number | undefined, fallback: number) {

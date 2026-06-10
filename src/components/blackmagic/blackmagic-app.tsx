@@ -504,6 +504,12 @@ export function BlackmagicApp() {
           serverObservationCount,
         ),
         ranges: mergedRanges,
+        emitterReadyCount:
+          roomState?.devices.filter(
+            (device) => device.mic === "active" && device.audioFrame,
+          ).length ?? 0,
+        deviceCount: roomState?.devices.length ?? 0,
+        directLinkOpen: realtime.openPeerCount > 0,
       })
     : null;
   const captureStatus = captureProcessingState(
