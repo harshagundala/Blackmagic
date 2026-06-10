@@ -445,6 +445,8 @@ describe("validation trace", () => {
           [
             "insufficient_devices",
             "insufficient_acoustic_ranges",
+            "missing_sample_anchored_observations",
+            "incomplete_reciprocal_anchors",
             "insufficient_audio_capture",
             "insufficient_audio_timestamps",
             "no_tdoa_source",
@@ -462,7 +464,11 @@ describe("validation trace", () => {
             device("phone-a", {
               audioCaptureReady: false,
               audioTimestampReady: false,
-              blockers: ["audio_capture_missing", "audio_timestamp_missing"],
+              blockers: [
+                "audio_capture_missing",
+                "audio_timestamp_missing",
+                "no_sample_anchored_observation",
+              ],
             }),
           ],
         ),
@@ -498,6 +504,12 @@ describe("validation trace", () => {
       expect.objectContaining({
         id: "complete_acoustic_calibration",
         gates: ["localized_devices", "acoustic_ranges"],
+        blockers: expect.arrayContaining([
+          "insufficient_acoustic_ranges",
+          "missing_sample_anchored_observations",
+          "incomplete_reciprocal_anchors",
+          "no_sample_anchored_observation",
+        ]),
       }),
       expect.objectContaining({
         id: "capture_spoken_source",

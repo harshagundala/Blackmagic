@@ -20,6 +20,10 @@ export type PhysicalRoomValidationMetrics = {
   deviceCount: number;
   localizedDeviceCount: number;
   rangeCount: number;
+  acousticPulseDeviceCount: number;
+  acousticObservationDeviceCount: number;
+  sampleAnchoredObservationDeviceCount: number;
+  completeReciprocalExchangeCount: number;
   layoutStressMeters: number;
   clockStatus: RoomState["timeSync"]["status"];
   worstClockErrorMs: number | null;
@@ -57,6 +61,9 @@ export type PhysicalRoomValidationDeviceDiagnostic = {
   clockMaxErrorMs: number | null;
   clockQuality: number | null;
   motionStability: number | null;
+  acousticPulseCount: number;
+  acousticObservationCount: number;
+  sampleAnchoredObservationCount: number;
   blockers: string[];
 };
 
@@ -76,17 +83,27 @@ const MAX_READY_AUDIO_TIMESTAMP_ERROR_MS = 12;
 const MIN_READY_AUDIO_TIMING_CONFIDENCE = 0.35;
 const MAX_READY_SOURCE_RESIDUAL_MS = 5;
 const MIN_READY_SOURCE_CONFIDENCE = 0.35;
+const MAX_RECIPROCAL_ANCHOR_TURN_MS = 12_000;
 
 export function validatePhysicalRoomLocalization(
   roomState: RoomState,
   constellation: RoomConstellation = estimateRoomConstellation(roomState),
 ): PhysicalRoomValidationReport {
-  const metrics = validationMetrics(roomState, constellation);
+  const acousticCalibration = acousticCalibrationDiagnostics(roomState.devices);
+  const metrics = validationMetrics(
+    roomState,
+    constellation,
+    acousticCalibration,
+  );
   const phoneLayout = phoneLayoutSection(metrics);
   const audioCapture = audioCaptureSection(metrics);
   const audioTimestamps = audioTimestampsSection(metrics);
   const spokenSource = spokenSourceSection(metrics);
-  const devices = deviceDiagnostics(roomState, constellation);
+  const devices = deviceDiagnostics(
+    roomState,
+    constellation,
+    acousticCalibration,
+  );
   const sections = [phoneLayout, audioCapture, audioTimestamps, spokenSource];
   const blockers = unique([
     ...phoneLayout.blockers,
@@ -110,17 +127,23 @@ export function validatePhysicalRoomLocalization(
 function deviceDiagnostics(
   roomState: RoomState,
   constellation: RoomConstellation,
+  acousticCalibration: AcousticCalibrationDiagnostics,
 ): PhysicalRoomValidationDeviceDiagnostic[] {
   const layoutDevices = new Map(
     constellation.devices.map((device) => [device.deviceId, device]),
   );
+  const calibrationDevices = new Map(
+    acousticCalibration.devices.map((device) => [device.deviceId, device]),
+  );
 
   return roomState.devices.map((device) => {
     const layoutDevice = layoutDevices.get(device.deviceId);
+    const calibrationDevice = calibrationDevices.get(device.deviceId);
     const capture = audioCaptureState(device);
     const timestamp = audioTimestampState(device);
     const captureStatus = captureProcessingState(device.captureProcessing);
     const blockers = deviceBlockers({
+      calibration: calibrationDevice,
       device,
       capture,
       captureStatus,
@@ -155,18 +178,25 @@ function deviceDiagnostics(
         firstFinite(device.audioFrame?.clockQuality, device.clockQuality),
       ),
       motionStability: roundOrNull(clampNumber(device.motionStability, 0, 1)),
+      acousticPulseCount: calibrationDevice?.acousticPulseCount ?? 0,
+      acousticObservationCount:
+        calibrationDevice?.acousticObservationCount ?? 0,
+      sampleAnchoredObservationCount:
+        calibrationDevice?.sampleAnchoredObservationCount ?? 0,
       blockers,
     };
   });
 }
 
 function deviceBlockers({
+  calibration,
   device,
   capture,
   captureStatus,
   timestamp,
   localized,
 }: {
+  calibration: AcousticCalibrationDeviceDiagnostics | undefined;
   device: RoomDevice;
   capture: ReturnType<typeof audioCaptureState>;
   captureStatus: CaptureProcessingState;
@@ -218,6 +248,14 @@ function deviceBlockers({
   if (!localized) {
     blockers.push("not_localized");
   }
+  if (device.mic === "active" && timestamp.present) {
+    if ((calibration?.acousticPulseCount ?? 0) === 0) {
+      blockers.push("no_acoustic_pulse");
+    }
+    if ((calibration?.sampleAnchoredObservationCount ?? 0) === 0) {
+      blockers.push("no_sample_anchored_observation");
+    }
+  }
 
   return blockers;
 }
@@ -225,6 +263,7 @@ function deviceBlockers({
 function validationMetrics(
   roomState: RoomState,
   constellation: RoomConstellation,
+  acousticCalibration: AcousticCalibrationDiagnostics,
 ): PhysicalRoomValidationMetrics {
   const tdoaSources = constellation.audioSources.filter(
     (source) => source.method === "tdoa-grid",
@@ -247,6 +286,17 @@ function validationMetrics(
     localizedDeviceCount: constellation.devices.filter((device) => device.localized)
       .length,
     rangeCount: roomState.ranges.length,
+    acousticPulseDeviceCount: acousticCalibration.devices.filter(
+      (device) => device.acousticPulseCount > 0,
+    ).length,
+    acousticObservationDeviceCount: acousticCalibration.devices.filter(
+      (device) => device.acousticObservationCount > 0,
+    ).length,
+    sampleAnchoredObservationDeviceCount: acousticCalibration.devices.filter(
+      (device) => device.sampleAnchoredObservationCount > 0,
+    ).length,
+    completeReciprocalExchangeCount:
+      acousticCalibration.completeReciprocalExchangeCount,
     layoutStressMeters: round(constellation.layout.stress),
     clockStatus: roomState.timeSync.status,
     worstClockErrorMs: roomState.timeSync.worstLocalizationErrorMs,
@@ -341,14 +391,42 @@ function phoneLayoutSection(
 ): PhysicalRoomValidationSection {
   const blockers: string[] = [];
   let degraded = false;
+  const requiredCalibrationDevices =
+    metrics.deviceCount >= 3 ? 3 : Math.min(2, metrics.deviceCount);
+  const requiredRanges = Math.max(1, metrics.deviceCount - 1);
   if (metrics.deviceCount < 2) {
     blockers.push("insufficient_devices");
   }
   if (metrics.clockStatus !== "ready") {
     blockers.push("clock_not_ready");
   }
-  if (metrics.rangeCount < Math.max(1, metrics.deviceCount - 1)) {
+  if (metrics.rangeCount < requiredRanges) {
     blockers.push("insufficient_acoustic_ranges");
+    if (
+      metrics.deviceCount >= 2 &&
+      metrics.acousticPulseDeviceCount < requiredCalibrationDevices
+    ) {
+      blockers.push("missing_acoustic_pulses");
+    }
+    if (
+      metrics.deviceCount >= 2 &&
+      metrics.acousticObservationDeviceCount < requiredCalibrationDevices
+    ) {
+      blockers.push("missing_acoustic_observations");
+    }
+    if (
+      metrics.deviceCount >= 2 &&
+      metrics.sampleAnchoredObservationDeviceCount <
+        requiredCalibrationDevices
+    ) {
+      blockers.push("missing_sample_anchored_observations");
+    }
+    if (
+      metrics.deviceCount >= 2 &&
+      metrics.completeReciprocalExchangeCount < requiredRanges
+    ) {
+      blockers.push("incomplete_reciprocal_anchors");
+    }
   }
   if (metrics.localizedDeviceCount < Math.min(2, metrics.deviceCount)) {
     blockers.push("insufficient_localized_devices");
@@ -482,6 +560,198 @@ function aggregateStatus(sections: PhysicalRoomValidationSection[]) {
 
 function unique(values: string[]) {
   return [...new Set(values)];
+}
+
+type AcousticCalibrationDeviceDiagnostics = {
+  deviceId: string;
+  acousticPulseCount: number;
+  acousticObservationCount: number;
+  sampleAnchoredObservationCount: number;
+};
+
+type AcousticCalibrationDiagnostics = {
+  devices: AcousticCalibrationDeviceDiagnostics[];
+  completeReciprocalExchangeCount: number;
+};
+
+type PulseWithDevice = {
+  device: RoomDevice;
+  pulse: NonNullable<RoomDevice["acousticPulse"]>;
+};
+
+function acousticCalibrationDiagnostics(
+  devices: RoomDevice[],
+): AcousticCalibrationDiagnostics {
+  const observationsByDevice = new Map(
+    devices.map((device) => [
+      device.deviceId,
+      new Map(
+        acousticObservationHistory(device).map((observation) => [
+          observation.pulseId,
+          observation,
+        ]),
+      ),
+    ]),
+  );
+  const pulsesByDevice = new Map(
+    devices.map((device) => [
+      device.deviceId,
+      acousticPulseHistory(device)
+        .map((pulse) => ({ device, pulse }))
+        .sort((a, b) => a.pulse.emittedAtHostEpochMs - b.pulse.emittedAtHostEpochMs),
+    ]),
+  );
+
+  return {
+    devices: devices.map((device) => {
+      const observations = acousticObservationHistory(device);
+      return {
+        deviceId: device.deviceId,
+        acousticPulseCount: acousticPulseHistory(device).length,
+        acousticObservationCount: observations.length,
+        sampleAnchoredObservationCount: observations.filter(hasSampleAnchor)
+          .length,
+      };
+    }),
+    completeReciprocalExchangeCount: completeReciprocalExchangeCount(
+      devices,
+      pulsesByDevice,
+      observationsByDevice,
+    ),
+  };
+}
+
+function completeReciprocalExchangeCount(
+  devices: RoomDevice[],
+  pulsesByDevice: Map<string, PulseWithDevice[]>,
+  observationsByDevice: Map<
+    string,
+    Map<string, NonNullable<RoomDevice["acousticObservation"]>>
+  >,
+) {
+  let count = 0;
+  for (let leftIndex = 0; leftIndex < devices.length; leftIndex += 1) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < devices.length;
+      rightIndex += 1
+    ) {
+      const left = devices[leftIndex];
+      const right = devices[rightIndex];
+      const reciprocalPairs = reciprocalPulsePairs(
+        pulsesByDevice.get(left.deviceId) ?? [],
+        pulsesByDevice.get(right.deviceId) ?? [],
+      );
+      for (const [first, second] of reciprocalPairs) {
+        if (hasCompleteReciprocalAnchors(first, second, observationsByDevice)) {
+          count += 1;
+        }
+      }
+    }
+  }
+
+  return count;
+}
+
+function hasCompleteReciprocalAnchors(
+  first: PulseWithDevice,
+  second: PulseWithDevice,
+  observationsByDevice: Map<
+    string,
+    Map<string, NonNullable<RoomDevice["acousticObservation"]>>
+  >,
+) {
+  const firstObservations =
+    observationsByDevice.get(first.device.deviceId) ?? new Map();
+  const secondObservations =
+    observationsByDevice.get(second.device.deviceId) ?? new Map();
+
+  return (
+    hasSampleAnchor(firstObservations.get(first.pulse.id)) &&
+    hasSampleAnchor(firstObservations.get(second.pulse.id)) &&
+    hasSampleAnchor(secondObservations.get(first.pulse.id)) &&
+    hasSampleAnchor(secondObservations.get(second.pulse.id))
+  );
+}
+
+function reciprocalPulsePairs(
+  leftPulses: PulseWithDevice[],
+  rightPulses: PulseWithDevice[],
+) {
+  const pairs = new Map<string, [PulseWithDevice, PulseWithDevice]>();
+  appendForwardPairs(pairs, leftPulses, rightPulses);
+  appendForwardPairs(pairs, rightPulses, leftPulses);
+  return [...pairs.values()].sort(
+    ([left], [right]) =>
+      left.pulse.emittedAtHostEpochMs - right.pulse.emittedAtHostEpochMs,
+  );
+}
+
+function appendForwardPairs(
+  pairs: Map<string, [PulseWithDevice, PulseWithDevice]>,
+  firstPulses: PulseWithDevice[],
+  secondPulses: PulseWithDevice[],
+) {
+  for (const first of firstPulses) {
+    const second = secondPulses
+      .filter((candidate) => {
+        const deltaMs =
+          candidate.pulse.emittedAtHostEpochMs -
+          first.pulse.emittedAtHostEpochMs;
+        return deltaMs > 0 && deltaMs <= MAX_RECIPROCAL_ANCHOR_TURN_MS;
+      })
+      .sort(
+        (a, b) =>
+          a.pulse.emittedAtHostEpochMs - b.pulse.emittedAtHostEpochMs,
+      )[0];
+    if (second) {
+      pairs.set(`${first.pulse.id}->${second.pulse.id}`, [first, second]);
+    }
+  }
+}
+
+function acousticPulseHistory(device: RoomDevice) {
+  return uniqueBy(
+    [
+      ...(device.acousticPulses ?? []),
+      ...(device.acousticPulse ? [device.acousticPulse] : []),
+    ],
+    (pulse) => pulse.id,
+  );
+}
+
+function acousticObservationHistory(device: RoomDevice) {
+  return uniqueBy(
+    [
+      ...(device.acousticObservations ?? []),
+      ...(device.acousticObservation ? [device.acousticObservation] : []),
+    ],
+    (observation) => observation.pulseId,
+  );
+}
+
+function hasSampleAnchor(
+  observation: RoomDevice["acousticObservation"] | undefined,
+) {
+  return (
+    observation !== null &&
+    observation !== undefined &&
+    typeof observation.detectedSampleIndex === "number" &&
+    Number.isFinite(observation.detectedSampleIndex) &&
+    observation.detectedSampleIndex >= 0 &&
+    typeof observation.sampleRate === "number" &&
+    Number.isFinite(observation.sampleRate) &&
+    observation.sampleRate > 0
+  );
+}
+
+function uniqueBy<T>(items: T[], keyFor: (item: T) => string) {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    map.delete(keyFor(item));
+    map.set(keyFor(item), item);
+  }
+  return [...map.values()];
 }
 
 function requiredAudioTimestampDevices(deviceCount: number) {

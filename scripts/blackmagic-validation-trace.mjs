@@ -464,6 +464,10 @@ function createNextActions({ failedGateIds, minDevices, summary }) {
   const blockerSet = new Set([
     ...summary.finalBlockers,
     ...summary.observedBlockers,
+    ...summary.devices.flatMap((device) => [
+      ...device.finalBlockers,
+      ...device.observedBlockers,
+    ]),
   ]);
   const actions = [];
 
@@ -535,9 +539,15 @@ function createNextActions({ failedGateIds, minDevices, summary }) {
       ),
       blockers: relatedBlockers(blockerSet, [
         "insufficient_acoustic_ranges",
+        "missing_acoustic_pulses",
+        "missing_acoustic_observations",
+        "missing_sample_anchored_observations",
+        "incomplete_reciprocal_anchors",
         "insufficient_localized_devices",
         "layout_stress_high",
         "not_localized",
+        "no_acoustic_pulse",
+        "no_sample_anchored_observation",
       ]),
       deviceIds: devicesMatching(summary, (device) => !device.finalLocalized),
     });

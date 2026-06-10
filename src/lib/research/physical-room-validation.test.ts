@@ -37,6 +37,12 @@ describe("physical room validation", () => {
     expect(report.metrics.deviceCount).toBe(3);
     expect(report.metrics.localizedDeviceCount).toBe(3);
     expect(report.metrics.rangeCount).toBe(3);
+    expect(report.metrics.acousticPulseDeviceCount).toBe(3);
+    expect(report.metrics.acousticObservationDeviceCount).toBe(3);
+    expect(report.metrics.sampleAnchoredObservationDeviceCount).toBe(3);
+    expect(report.metrics.completeReciprocalExchangeCount).toBeGreaterThanOrEqual(
+      3,
+    );
     expect(report.audioCapture.status).toBe("ready");
     expect(report.metrics.audioCaptureReadyDeviceCount).toBe(3);
     expect(report.metrics.rawCaptureVerifiedDeviceCount).toBe(3);
@@ -103,6 +109,72 @@ describe("physical room validation", () => {
     expect(report.spokenSource.status).toBe("warming");
     expect(report.status).toBe("warming");
     expect(report.blockers).toContain("no_tdoa_source");
+  });
+
+  test("pinpoints missing reciprocal acoustic anchors in a two-phone room", () => {
+    const simulation = simulateAcousticRoom({
+      roomUrl: "https://blackmagic.app/lab-missing-anchors",
+      devices: [
+        { deviceId: "host", x: 0, y: 0 },
+        { deviceId: "phone-a", x: 2.1, y: 0.2 },
+      ],
+      exchangesPerPair: 1,
+      sampleNoiseStdDev: 0.02,
+    });
+    const missingPhoneObservations = {
+      ...simulation.roomState,
+      ranges: [],
+      devices: simulation.roomState.devices.map((device) =>
+        device.deviceId === "phone-a"
+          ? {
+              ...device,
+              acousticObservation: null,
+              acousticObservations: [],
+            }
+          : device,
+      ),
+    };
+
+    const report = validatePhysicalRoomLocalization(missingPhoneObservations);
+    const failingPhone = report.devices.find(
+      (device) => device.deviceId === "phone-a",
+    );
+    const host = report.devices.find((device) => device.deviceId === "host");
+
+    expect(report.phoneLayout.status).toBe("warming");
+    expect(report.metrics.rangeCount).toBe(0);
+    expect(report.metrics.acousticPulseDeviceCount).toBe(2);
+    expect(report.metrics.acousticObservationDeviceCount).toBe(1);
+    expect(report.metrics.sampleAnchoredObservationDeviceCount).toBe(1);
+    expect(report.metrics.completeReciprocalExchangeCount).toBe(0);
+    expect(report.phoneLayout.blockers).toEqual(
+      expect.arrayContaining([
+        "insufficient_acoustic_ranges",
+        "missing_sample_anchored_observations",
+        "incomplete_reciprocal_anchors",
+      ]),
+    );
+    expect(failingPhone).toEqual(
+      expect.objectContaining({
+        deviceId: "phone-a",
+        acousticPulseCount: 1,
+        acousticObservationCount: 0,
+        sampleAnchoredObservationCount: 0,
+      }),
+    );
+    expect(failingPhone?.blockers).toEqual(
+      expect.arrayContaining([
+        "not_localized",
+        "no_sample_anchored_observation",
+      ]),
+    );
+    expect(host).toEqual(
+      expect.objectContaining({
+        acousticPulseCount: 1,
+        acousticObservationCount: 2,
+        sampleAnchoredObservationCount: 2,
+      }),
+    );
   });
 
   test("marks high-error spoken-source evidence degraded", () => {
