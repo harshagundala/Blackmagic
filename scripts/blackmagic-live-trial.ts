@@ -121,7 +121,7 @@ function parseArgs(args: string[]) {
     !Number.isFinite(parsed.intervalMs) ||
     parsed.intervalMs < 250 ||
     !Number.isFinite(parsed.minDevices) ||
-    parsed.minDevices < 3 ||
+    parsed.minDevices < 2 ||
     !Number.isFinite(parsed.readyStreakMs) ||
     parsed.readyStreakMs < 0 ||
     !Number.isFinite(parsed.samples) ||
@@ -182,7 +182,7 @@ Options:
   --samples <count>         Number of validation samples. Default: ${DEFAULT_SAMPLES}
   --interval-ms <ms>        Delay between samples. Default: ${DEFAULT_INTERVAL_MS}
   --ready-streak-ms <ms>    Required final ready streak. Default: ${DEFAULT_READY_STREAK_MS}
-  --min-devices <count>     Planned physical devices. Default: ${DEFAULT_MIN_DEVICES}
+  --min-devices <count>     Planned phones: 2 for pairwise ranging, 3+ for TDOA source validation. Default: ${DEFAULT_MIN_DEVICES}
   --dry-run                 Print the plan without polling.
   --json                    Print the plan as JSON.
 `);

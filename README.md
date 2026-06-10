@@ -35,6 +35,20 @@ npm run lint
 npm run build
 ```
 
+Two-phone pairwise field proof:
+
+```bash
+npm run trial:live -- --min-devices 2
+npm run trial:report -- artifacts/live-trials/<trial-slug>/trial-evidence.json
+```
+
+Three-or-more phone full-room proof:
+
+```bash
+npm run trial:live -- --min-devices 3
+npm run trial:report -- artifacts/live-trials/<trial-slug>/trial-evidence.json
+```
+
 Production preview:
 
 ```bash

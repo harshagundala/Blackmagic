@@ -13,7 +13,9 @@ export type PhysicalRoomValidationSnapshot = {
 };
 
 export type PhysicalRoomValidationTraceOptions = {
+  minDevices?: number;
   requiredReadyStreakMs?: number;
+  requireTdoaSource?: boolean;
 };
 
 export type PhysicalRoomValidationTraceSummary = {
@@ -60,7 +62,9 @@ export type PhysicalRoomValidationDeviceTraceSummary = {
 export type PhysicalRoomTrialEvidenceOptions = {
   baseUrl: string;
   generatedAtMs: number;
+  minDevices?: number;
   requiredReadyStreakMs?: number;
+  requireTdoaSource?: boolean;
   sessionUrl: string;
   snapshots: PhysicalRoomValidationSnapshot[];
 };
@@ -97,7 +101,9 @@ export type PhysicalRoomTrialEvidence = {
   baseUrl: string;
   sessionUrl: string;
   sessionKey: string | null;
+  minDevices: number;
   requiredReadyStreakMs: number;
+  requireTdoaSource: boolean;
   passed: boolean;
   sampleWindow: {
     firstCapturedAtMs: number | null;
@@ -120,28 +126,46 @@ export type PhysicalRoomTrialEvidence = {
   };
 };
 
+const DEFAULT_TRIAL_MIN_DEVICES = 3;
+const TDOA_BLOCKERS = new Set([
+  "insufficient_tdoa_devices",
+  "no_tdoa_source",
+  "source_residual_high",
+  "source_confidence_low",
+]);
+
 export function createPhysicalRoomTrialEvidence({
   baseUrl,
   generatedAtMs,
+  minDevices = DEFAULT_TRIAL_MIN_DEVICES,
   requiredReadyStreakMs = 0,
+  requireTdoaSource,
   sessionUrl,
   snapshots,
 }: PhysicalRoomTrialEvidenceOptions): PhysicalRoomTrialEvidence {
+  const profile = trialProfile({ minDevices, requireTdoaSource });
   const ordered = [...snapshots].sort(
     (a, b) => a.capturedAtMs - b.capturedAtMs || a.revision - b.revision,
   );
   const summary = summarizePhysicalRoomValidationTrace(ordered, {
+    minDevices: profile.minDevices,
     requiredReadyStreakMs,
+    requireTdoaSource: profile.requireTdoaSource,
   });
   const first = ordered[0] ?? null;
   const final = ordered[ordered.length - 1] ?? null;
   const finalMetrics = final?.validation.metrics ?? null;
   const finalDeviceCount = finalMetrics?.deviceCount ?? 0;
-  const requiredDevices = 3;
-  const requiredRanges =
-    finalDeviceCount >= 3 ? Math.max(3, finalDeviceCount) : requiredDevices;
-  const requiredDeviceEvidence =
-    finalDeviceCount >= 3 ? finalDeviceCount : requiredDevices;
+  const requiredDevices = profile.minDevices;
+  const requiredRanges = requiredAcousticRanges({
+    deviceCount: finalDeviceCount,
+    minDevices: requiredDevices,
+    requireTdoaSource: profile.requireTdoaSource,
+  });
+  const requiredDeviceEvidence = requiredEvidenceDevices({
+    deviceCount: finalDeviceCount,
+    minDevices: requiredDevices,
+  });
   const gates: PhysicalRoomTrialEvidenceGate[] = [
     {
       id: "sustained_ready",
@@ -181,13 +205,15 @@ export function createPhysicalRoomTrialEvidence({
       observed: summary.peakAudioTimestampReadyDeviceCount,
       required: requiredDeviceEvidence,
     },
-    {
+  ];
+  if (profile.requireTdoaSource) {
+    gates.push({
       id: "tdoa_source",
       passed: summary.peakTdoaSourceCount >= 1,
       observed: summary.peakTdoaSourceCount,
       required: 1,
-    },
-  ];
+    });
+  }
   const failedGateIds = gates
     .filter((gate) => !gate.passed)
     .map((gate) => gate.id);
@@ -198,7 +224,9 @@ export function createPhysicalRoomTrialEvidence({
     baseUrl,
     sessionUrl,
     sessionKey: final?.sessionKey ?? first?.sessionKey ?? null,
+    minDevices: profile.minDevices,
     requiredReadyStreakMs,
+    requireTdoaSource: profile.requireTdoaSource,
     passed: gates.every((gate) => gate.passed),
     sampleWindow: {
       firstCapturedAtMs: first?.capturedAtMs ?? null,
@@ -210,6 +238,7 @@ export function createPhysicalRoomTrialEvidence({
     failedGateIds,
     nextActions: createNextActions({
       failedGateIds,
+      minDevices: profile.minDevices,
       summary,
     }),
     summary,
@@ -227,9 +256,11 @@ export function createPhysicalRoomTrialEvidence({
 
 function createNextActions({
   failedGateIds,
+  minDevices,
   summary,
 }: {
   failedGateIds: PhysicalRoomTrialEvidenceGateId[];
+  minDevices: number;
   summary: PhysicalRoomValidationTraceSummary;
 }): PhysicalRoomTrialEvidenceNextAction[] {
   const failed = new Set(failedGateIds);
@@ -243,8 +274,8 @@ function createNextActions({
     actions.push({
       id: "connect_more_phones",
       priority: 10,
-      title: "Connect at least three phones to this session URL.",
-      detail: `Only ${summary.peakDeviceCount} phone(s) appeared in the trace; localization needs at least three active devices.`,
+      title: `Connect at least ${minDevices} phones to this session URL.`,
+      detail: `Only ${summary.peakDeviceCount} phone(s) appeared in the trace; this trial needs at least ${minDevices} active devices.`,
       gates: ["minimum_devices"],
       blockers: relatedBlockers(blockerSet, ["insufficient_devices"]),
       deviceIds: [],
@@ -366,10 +397,108 @@ function devicesMatching(
     .sort();
 }
 
+type TrialProfile = {
+  minDevices: number;
+  requireTdoaSource: boolean;
+};
+
+function trialProfile({
+  minDevices,
+  requireTdoaSource,
+}: {
+  minDevices: number;
+  requireTdoaSource?: boolean;
+}): TrialProfile {
+  if (!Number.isFinite(minDevices) || minDevices < 2) {
+    throw new Error("minDevices must be at least 2");
+  }
+
+  const normalizedMinDevices = Math.floor(minDevices);
+  return {
+    minDevices: normalizedMinDevices,
+    requireTdoaSource: requireTdoaSource ?? normalizedMinDevices >= 3,
+  };
+}
+
+function requiredEvidenceDevices({
+  deviceCount,
+  minDevices,
+}: {
+  deviceCount: number;
+  minDevices: number;
+}) {
+  return Math.max(minDevices, deviceCount);
+}
+
+function requiredAcousticRanges({
+  deviceCount,
+  minDevices,
+  requireTdoaSource,
+}: {
+  deviceCount: number;
+  minDevices: number;
+  requireTdoaSource: boolean;
+}) {
+  if (!requireTdoaSource) {
+    return Math.max(1, minDevices - 1);
+  }
+
+  return deviceCount >= 3 ? Math.max(3, deviceCount) : minDevices;
+}
+
+function isTrialReadySnapshot(
+  snapshot: PhysicalRoomValidationSnapshot,
+  profile: TrialProfile,
+) {
+  if (profile.requireTdoaSource) {
+    return snapshot.validation.status === "ready";
+  }
+
+  const metrics = snapshot.validation.metrics;
+  const requiredDevices = requiredEvidenceDevices({
+    deviceCount: metrics.deviceCount,
+    minDevices: profile.minDevices,
+  });
+  const requiredRanges = requiredAcousticRanges({
+    deviceCount: metrics.deviceCount,
+    minDevices: profile.minDevices,
+    requireTdoaSource: profile.requireTdoaSource,
+  });
+
+  return (
+    snapshot.validation.phoneLayout.status === "ready" &&
+    snapshot.validation.audioCapture.status === "ready" &&
+    snapshot.validation.audioTimestamps.status === "ready" &&
+    metrics.deviceCount >= profile.minDevices &&
+    metrics.localizedDeviceCount >= profile.minDevices &&
+    metrics.rangeCount >= requiredRanges &&
+    metrics.audioCaptureReadyDeviceCount >= requiredDevices &&
+    metrics.audioTimestampReadyDeviceCount >= requiredDevices
+  );
+}
+
+function trialBlockers(
+  snapshot: PhysicalRoomValidationSnapshot,
+  profile: TrialProfile,
+) {
+  if (profile.requireTdoaSource) {
+    return [...snapshot.validation.blockers];
+  }
+
+  return snapshot.validation.blockers.filter(
+    (blocker) => !TDOA_BLOCKERS.has(blocker),
+  );
+}
+
 export function summarizePhysicalRoomValidationTrace(
   snapshots: PhysicalRoomValidationSnapshot[],
-  { requiredReadyStreakMs = 0 }: PhysicalRoomValidationTraceOptions = {},
+  {
+    minDevices = DEFAULT_TRIAL_MIN_DEVICES,
+    requiredReadyStreakMs = 0,
+    requireTdoaSource,
+  }: PhysicalRoomValidationTraceOptions = {},
 ): PhysicalRoomValidationTraceSummary {
+  const profile = trialProfile({ minDevices, requireTdoaSource });
   const ordered = [...snapshots].sort(
     (a, b) => a.capturedAtMs - b.capturedAtMs || a.revision - b.revision,
   );
@@ -379,14 +508,14 @@ export function summarizePhysicalRoomValidationTrace(
 
   const first = ordered[0];
   const last = ordered[ordered.length - 1];
-  const firstReady = ordered.find(
-    (snapshot) => snapshot.validation.status === "ready",
+  const firstReady = ordered.find((snapshot) =>
+    isTrialReadySnapshot(snapshot, profile),
   );
-  const readyStreakMs = trailingReadyStreakMs(ordered);
+  const readyStreakMs = trailingReadyStreakMs(ordered, profile);
   const status =
     firstReady && readyStreakMs >= requiredReadyStreakMs
       ? "ready"
-      : last.validation.status === "ready"
+      : isTrialReadySnapshot(last, profile)
         ? "warming"
         : last.validation.status;
 
@@ -399,8 +528,8 @@ export function summarizePhysicalRoomValidationTrace(
       ? Math.max(0, firstReady.capturedAtMs - first.capturedAtMs)
       : null,
     readyStreakMs,
-    finalBlockers: [...last.validation.blockers],
-    observedBlockers: observedBlockers(ordered),
+    finalBlockers: trialBlockers(last, profile),
+    observedBlockers: observedBlockers(ordered, profile),
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
@@ -542,10 +671,13 @@ function summarizeDevices(
   });
 }
 
-function trailingReadyStreakMs(snapshots: PhysicalRoomValidationSnapshot[]) {
+function trailingReadyStreakMs(
+  snapshots: PhysicalRoomValidationSnapshot[],
+  profile: TrialProfile,
+) {
   let readySinceMs: number | null = null;
   for (const snapshot of snapshots) {
-    if (snapshot.validation.status !== "ready") {
+    if (!isTrialReadySnapshot(snapshot, profile)) {
       readySinceMs = null;
       continue;
     }
@@ -559,11 +691,14 @@ function trailingReadyStreakMs(snapshots: PhysicalRoomValidationSnapshot[]) {
   return Math.max(0, snapshots[snapshots.length - 1].capturedAtMs - readySinceMs);
 }
 
-function observedBlockers(snapshots: PhysicalRoomValidationSnapshot[]) {
+function observedBlockers(
+  snapshots: PhysicalRoomValidationSnapshot[],
+  profile: TrialProfile,
+) {
   const blockers: string[] = [];
   const seen = new Set<string>();
   for (const snapshot of snapshots) {
-    for (const blocker of snapshot.validation.blockers) {
+    for (const blocker of trialBlockers(snapshot, profile)) {
       if (!seen.has(blocker)) {
         seen.add(blocker);
         blockers.push(blocker);

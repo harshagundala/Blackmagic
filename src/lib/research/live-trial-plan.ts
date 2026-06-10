@@ -56,7 +56,7 @@ export function createLivePhysicalRoomTrialPlan({
     !Number.isFinite(intervalMs) ||
     intervalMs < 250 ||
     !Number.isFinite(minDevices) ||
-    minDevices < 3 ||
+    minDevices < 2 ||
     !Number.isFinite(readyStreakMs) ||
     readyStreakMs < 0 ||
     !Number.isFinite(samples) ||
@@ -65,6 +65,7 @@ export function createLivePhysicalRoomTrialPlan({
     throw new Error("Invalid live trial capture settings");
   }
 
+  const normalizedMinDevices = Math.floor(minDevices);
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   const normalizedSlug = normalizeSlug(slug, generatedAtMs);
   const sessionUrl = new URL(`${normalizedSlug}`, `${normalizedBaseUrl}/`).toString();
@@ -87,6 +88,8 @@ export function createLivePhysicalRoomTrialPlan({
     String(intervalMs),
     "--ready-streak-ms",
     String(readyStreakMs),
+    "--min-devices",
+    String(normalizedMinDevices),
     "--out",
     tracePath,
     "--evidence-out",
@@ -97,7 +100,7 @@ export function createLivePhysicalRoomTrialPlan({
     baseUrl: normalizedBaseUrl,
     generatedAtMs,
     intervalMs,
-    minDevices,
+    minDevices: normalizedMinDevices,
     readyStreakMs,
     samples,
     sessionUrl,

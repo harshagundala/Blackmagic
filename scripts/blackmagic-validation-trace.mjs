@@ -7,6 +7,13 @@ const DEFAULT_BASE_URL = "https://blackmagic-rouge.vercel.app";
 const DEFAULT_INTERVAL_MS = 1_500;
 const DEFAULT_SAMPLES = 40;
 const DEFAULT_READY_STREAK_MS = 5_000;
+const DEFAULT_MIN_DEVICES = 3;
+const TDOA_BLOCKERS = new Set([
+  "insufficient_tdoa_devices",
+  "no_tdoa_source",
+  "source_residual_high",
+  "source_confidence_low",
+]);
 
 let options;
 try {
@@ -53,11 +60,13 @@ if (options.out) {
 }
 
 const summary = summarize(snapshots, {
+  minDevices: options.minDevices,
   requiredReadyStreakMs: options.readyStreakMs,
 });
 const evidence = createEvidencePacket({
   baseUrl: options.baseUrl,
   generatedAtMs: Date.now(),
+  minDevices: options.minDevices,
   requiredReadyStreakMs: options.readyStreakMs,
   sessionUrl: options.sessionUrl,
   snapshots,
@@ -79,6 +88,7 @@ function parseArgs(args) {
     intervalMs: DEFAULT_INTERVAL_MS,
     samples: DEFAULT_SAMPLES,
     readyStreakMs: DEFAULT_READY_STREAK_MS,
+    minDevices: DEFAULT_MIN_DEVICES,
     sessionUrl: "",
     out: "",
     from: "",
@@ -100,6 +110,9 @@ function parseArgs(args) {
         break;
       case "--ready-streak-ms":
         parsed.readyStreakMs = Number(requireValue(args, ++index, arg));
+        break;
+      case "--min-devices":
+        parsed.minDevices = Number(requireValue(args, ++index, arg));
         break;
       case "--out":
         parsed.out = requireValue(args, ++index, arg);
@@ -128,12 +141,15 @@ function parseArgs(args) {
     !Number.isFinite(parsed.samples) ||
     parsed.samples < 1 ||
     !Number.isFinite(parsed.readyStreakMs) ||
-    parsed.readyStreakMs < 0
+    parsed.readyStreakMs < 0 ||
+    !Number.isFinite(parsed.minDevices) ||
+    parsed.minDevices < 2
   ) {
     throw new Error("Invalid numeric options");
   }
 
   parsed.samples = Math.floor(parsed.samples);
+  parsed.minDevices = Math.floor(parsed.minDevices);
   return parsed;
 }
 
@@ -181,7 +197,8 @@ async function readTraceSnapshots(path) {
     });
 }
 
-function summarize(snapshots, { requiredReadyStreakMs }) {
+function summarize(snapshots, { minDevices, requiredReadyStreakMs }) {
+  const profile = trialProfile({ minDevices });
   const ordered = [...snapshots].sort(
     (left, right) => left.capturedAtMs - right.capturedAtMs,
   );
@@ -212,16 +229,16 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
 
   const first = ordered[0];
   const last = ordered[ordered.length - 1];
-  const firstReady = ordered.find(
-    (snapshot) => snapshot.validation.status === "ready",
+  const firstReady = ordered.find((snapshot) =>
+    isTrialReadySnapshot(snapshot, profile),
   );
-  const readyStreakMs = trailingReadyStreakMs(ordered);
+  const readyStreakMs = trailingReadyStreakMs(ordered, profile);
 
   return {
     status:
       firstReady && readyStreakMs >= requiredReadyStreakMs
         ? "ready"
-        : last.validation.status === "ready"
+        : isTrialReadySnapshot(last, profile)
           ? "warming"
           : last.validation.status,
     sampleCount: ordered.length,
@@ -231,8 +248,8 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
       ? Math.max(0, firstReady.capturedAtMs - first.capturedAtMs)
       : null,
     readyStreakMs,
-    finalBlockers: last.validation.blockers,
-    observedBlockers: observedBlockers(ordered),
+    finalBlockers: trialBlockers(last, profile),
+    observedBlockers: observedBlockers(ordered, profile),
     peakDeviceCount: peakMetric(ordered, "deviceCount"),
     peakLocalizedDeviceCount: peakMetric(ordered, "localizedDeviceCount"),
     peakRangeCount: peakMetric(ordered, "rangeCount"),
@@ -260,14 +277,82 @@ function summarize(snapshots, { requiredReadyStreakMs }) {
   };
 }
 
+function trialProfile({ minDevices }) {
+  if (!Number.isFinite(minDevices) || minDevices < 2) {
+    throw new Error("minDevices must be at least 2");
+  }
+
+  const normalizedMinDevices = Math.floor(minDevices);
+  return {
+    minDevices: normalizedMinDevices,
+    requireTdoaSource: normalizedMinDevices >= 3,
+  };
+}
+
+function requiredEvidenceDevices({ deviceCount, minDevices }) {
+  return Math.max(minDevices, deviceCount);
+}
+
+function requiredAcousticRanges({
+  deviceCount,
+  minDevices,
+  requireTdoaSource,
+}) {
+  if (!requireTdoaSource) {
+    return Math.max(1, minDevices - 1);
+  }
+
+  return deviceCount >= 3 ? Math.max(3, deviceCount) : minDevices;
+}
+
+function isTrialReadySnapshot(snapshot, profile) {
+  if (profile.requireTdoaSource) {
+    return snapshot.validation.status === "ready";
+  }
+
+  const metrics = snapshot.validation.metrics;
+  const requiredDevices = requiredEvidenceDevices({
+    deviceCount: metrics.deviceCount,
+    minDevices: profile.minDevices,
+  });
+  const requiredRanges = requiredAcousticRanges({
+    deviceCount: metrics.deviceCount,
+    minDevices: profile.minDevices,
+    requireTdoaSource: profile.requireTdoaSource,
+  });
+
+  return (
+    snapshot.validation.phoneLayout.status === "ready" &&
+    snapshot.validation.audioCapture.status === "ready" &&
+    snapshot.validation.audioTimestamps.status === "ready" &&
+    metrics.deviceCount >= profile.minDevices &&
+    metrics.localizedDeviceCount >= profile.minDevices &&
+    metrics.rangeCount >= requiredRanges &&
+    metrics.audioCaptureReadyDeviceCount >= requiredDevices &&
+    metrics.audioTimestampReadyDeviceCount >= requiredDevices
+  );
+}
+
+function trialBlockers(snapshot, profile) {
+  if (profile.requireTdoaSource) {
+    return [...snapshot.validation.blockers];
+  }
+
+  return snapshot.validation.blockers.filter(
+    (blocker) => !TDOA_BLOCKERS.has(blocker),
+  );
+}
+
 function createEvidencePacket({
   baseUrl,
   generatedAtMs,
+  minDevices,
   requiredReadyStreakMs,
   sessionUrl,
   snapshots,
   summary,
 }) {
+  const profile = trialProfile({ minDevices });
   const ordered = [...snapshots].sort(
     (left, right) =>
       left.capturedAtMs - right.capturedAtMs ||
@@ -277,11 +362,16 @@ function createEvidencePacket({
   const final = ordered[ordered.length - 1] ?? null;
   const finalMetrics = final?.validation?.metrics ?? null;
   const finalDeviceCount = finalMetrics?.deviceCount ?? 0;
-  const requiredDevices = 3;
-  const requiredRanges =
-    finalDeviceCount >= 3 ? Math.max(3, finalDeviceCount) : requiredDevices;
-  const requiredDeviceEvidence =
-    finalDeviceCount >= 3 ? finalDeviceCount : requiredDevices;
+  const requiredDevices = profile.minDevices;
+  const requiredRanges = requiredAcousticRanges({
+    deviceCount: finalDeviceCount,
+    minDevices: requiredDevices,
+    requireTdoaSource: profile.requireTdoaSource,
+  });
+  const requiredDeviceEvidence = requiredEvidenceDevices({
+    deviceCount: finalDeviceCount,
+    minDevices: requiredDevices,
+  });
   const gates = [
     {
       id: "sustained_ready",
@@ -320,13 +410,15 @@ function createEvidencePacket({
       observed: summary.peakAudioTimestampReadyDeviceCount,
       required: requiredDeviceEvidence,
     },
-    {
+  ];
+  if (profile.requireTdoaSource) {
+    gates.push({
       id: "tdoa_source",
       passed: summary.peakTdoaSourceCount >= 1,
       observed: summary.peakTdoaSourceCount,
       required: 1,
-    },
-  ];
+    });
+  }
   const failedGateIds = gates
     .filter((gate) => !gate.passed)
     .map((gate) => gate.id);
@@ -337,7 +429,9 @@ function createEvidencePacket({
     baseUrl,
     sessionUrl,
     sessionKey: final?.sessionKey ?? first?.sessionKey ?? null,
+    minDevices: profile.minDevices,
     requiredReadyStreakMs,
+    requireTdoaSource: profile.requireTdoaSource,
     passed: gates.every((gate) => gate.passed),
     sampleWindow: {
       firstCapturedAtMs: first?.capturedAtMs ?? null,
@@ -349,6 +443,7 @@ function createEvidencePacket({
     failedGateIds,
     nextActions: createNextActions({
       failedGateIds,
+      minDevices: profile.minDevices,
       summary,
     }),
     summary,
@@ -364,7 +459,7 @@ function createEvidencePacket({
   };
 }
 
-function createNextActions({ failedGateIds, summary }) {
+function createNextActions({ failedGateIds, minDevices, summary }) {
   const failed = new Set(failedGateIds);
   const blockerSet = new Set([
     ...summary.finalBlockers,
@@ -376,8 +471,8 @@ function createNextActions({ failedGateIds, summary }) {
     actions.push({
       id: "connect_more_phones",
       priority: 10,
-      title: "Connect at least three phones to this session URL.",
-      detail: `Only ${summary.peakDeviceCount} phone(s) appeared in the trace; localization needs at least three active devices.`,
+      title: `Connect at least ${minDevices} phones to this session URL.`,
+      detail: `Only ${summary.peakDeviceCount} phone(s) appeared in the trace; this trial needs at least ${minDevices} active devices.`,
       gates: ["minimum_devices"],
       blockers: relatedBlockers(blockerSet, ["insufficient_devices"]),
       deviceIds: [],
@@ -567,10 +662,10 @@ function summarizeDevices(snapshots) {
   });
 }
 
-function trailingReadyStreakMs(snapshots) {
+function trailingReadyStreakMs(snapshots, profile) {
   let readySinceMs = null;
   for (const snapshot of snapshots) {
-    if (snapshot.validation.status !== "ready") {
+    if (!isTrialReadySnapshot(snapshot, profile)) {
       readySinceMs = null;
       continue;
     }
@@ -582,11 +677,11 @@ function trailingReadyStreakMs(snapshots) {
     : Math.max(0, snapshots[snapshots.length - 1].capturedAtMs - readySinceMs);
 }
 
-function observedBlockers(snapshots) {
+function observedBlockers(snapshots, profile) {
   const blockers = [];
   const seen = new Set();
   for (const snapshot of snapshots) {
-    for (const blocker of snapshot.validation.blockers) {
+    for (const blocker of trialBlockers(snapshot, profile)) {
       if (!seen.has(blocker)) {
         seen.add(blocker);
         blockers.push(blocker);
@@ -637,6 +732,7 @@ Options:
   --samples <count>         Number of samples. Default: ${DEFAULT_SAMPLES}
   --interval-ms <ms>        Delay between samples. Default: ${DEFAULT_INTERVAL_MS}
   --ready-streak-ms <ms>    Required final ready streak. Default: ${DEFAULT_READY_STREAK_MS}
+  --min-devices <count>     Required phones: 2 for pairwise ranging, 3+ for TDOA source validation. Default: ${DEFAULT_MIN_DEVICES}
   --out <path>              Write NDJSON snapshots to a file.
   --from <path>             Read NDJSON snapshots instead of polling.
   --evidence-out <path>     Write a compact JSON trial evidence packet.

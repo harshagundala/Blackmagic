@@ -370,6 +370,68 @@ describe("validation trace", () => {
     expect(evidence.summary.devices).toHaveLength(3);
   });
 
+  test("accepts a two-phone pairwise trial without requiring TDOA speech source", () => {
+    const snapshots = [
+      pairwiseReadySnapshot(1_000),
+      pairwiseReadySnapshot(7_000),
+    ];
+
+    const evidence = createPhysicalRoomTrialEvidence({
+      baseUrl: "https://blackmagic-rouge.vercel.app",
+      generatedAtMs: 8_000,
+      minDevices: 2,
+      requiredReadyStreakMs: 5_000,
+      sessionUrl: "https://blackmagic-rouge.vercel.app/two-phone-lab",
+      snapshots,
+    });
+
+    expect(evidence.passed).toBe(true);
+    expect(evidence.summary.status).toBe("ready");
+    expect(evidence.summary.readyStreakMs).toBe(6_000);
+    expect(evidence.summary.finalBlockers).toEqual([]);
+    expect(evidence.summary.observedBlockers).toEqual([]);
+    expect(evidence.gates).toEqual([
+      expect.objectContaining({
+        id: "sustained_ready",
+        passed: true,
+        observed: 6_000,
+        required: 5_000,
+      }),
+      expect.objectContaining({
+        id: "minimum_devices",
+        passed: true,
+        observed: 2,
+        required: 2,
+      }),
+      expect.objectContaining({
+        id: "localized_devices",
+        passed: true,
+        observed: 2,
+        required: 2,
+      }),
+      expect.objectContaining({
+        id: "acoustic_ranges",
+        passed: true,
+        observed: 1,
+        required: 1,
+      }),
+      expect.objectContaining({
+        id: "audio_capture",
+        passed: true,
+        observed: 2,
+        required: 2,
+      }),
+      expect.objectContaining({
+        id: "audio_timestamps",
+        passed: true,
+        observed: 2,
+        required: 2,
+      }),
+    ]);
+    expect(evidence.failedGateIds).toEqual([]);
+    expect(evidence.gates.map((gate) => gate.id)).not.toContain("tdoa_source");
+  });
+
   test("adds prioritized next actions when trial evidence fails", () => {
     const evidence = createPhysicalRoomTrialEvidence({
       baseUrl: "https://blackmagic-rouge.vercel.app",
@@ -534,6 +596,66 @@ describe("validation trace", () => {
     }
   });
 
+  test("writes two-phone pairwise evidence from an existing NDJSON trace", () => {
+    const directory = mkdtempSync(join(tmpdir(), "blackmagic-two-phone-"));
+    const tracePath = join(directory, "trace.ndjson");
+    const evidencePath = join(directory, "evidence.json");
+    const snapshots = [pairwiseReadySnapshot(1_000), pairwiseReadySnapshot(7_000)];
+
+    writeFileSync(
+      tracePath,
+      snapshots.map((item) => JSON.stringify(item)).join("\n") + "\n",
+    );
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "scripts/blackmagic-validation-trace.mjs",
+          "https://blackmagic-rouge.vercel.app/two-phone-lab",
+          "--from",
+          tracePath,
+          "--evidence-out",
+          evidencePath,
+          "--ready-streak-ms",
+          "5000",
+          "--min-devices",
+          "2",
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status).toBe(0);
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+        passed: boolean;
+        gates: Array<{ id: string; required: number }>;
+        summary: { status: string; readyStreakMs: number };
+      };
+
+      expect(evidence.passed).toBe(true);
+      expect(evidence.summary).toEqual(
+        expect.objectContaining({
+          status: "ready",
+          readyStreakMs: 6_000,
+        }),
+      );
+      expect(evidence.gates.map((gate) => gate.id)).not.toContain(
+        "tdoa_source",
+      );
+      expect(
+        evidence.gates.find((gate) => gate.id === "minimum_devices")?.required,
+      ).toBe(2);
+      expect(
+        evidence.gates.find((gate) => gate.id === "acoustic_ranges")?.required,
+      ).toBe(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("writes next actions for a failed existing NDJSON trace", () => {
     const directory = mkdtempSync(join(tmpdir(), "blackmagic-trace-failed-"));
     const tracePath = join(directory, "trace.ndjson");
@@ -647,6 +769,61 @@ function snapshot(
         bestSourceResidualMs: null,
         bestSourceConfidence: null,
         ...metrics,
+      },
+    },
+  };
+}
+
+function pairwiseReadySnapshot(
+  capturedAtMs: number,
+): PhysicalRoomValidationSnapshot {
+  const status = "ready";
+  const tdoaBlockers = ["insufficient_tdoa_devices", "no_tdoa_source"];
+
+  return {
+    capturedAtMs,
+    sessionKey: "https://blackmagic.app/two-phone-lab",
+    revision: capturedAtMs,
+    updatedAt: capturedAtMs + 100,
+    validation: {
+      status: "warming",
+      phoneLayout: { status, blockers: [] },
+      audioCapture: { status, blockers: [] },
+      audioTimestamps: { status, blockers: [] },
+      spokenSource: { status: "warming", blockers: tdoaBlockers },
+      blockers: tdoaBlockers,
+      devices: [
+        device("host", {
+          role: "host",
+          localized: true,
+          distanceMeters: null,
+        }),
+        device("phone-a", {
+          localized: true,
+          distanceMeters: 2.12,
+        }),
+      ],
+      metrics: {
+        deviceCount: 2,
+        localizedDeviceCount: 2,
+        rangeCount: 1,
+        layoutStressMeters: 0.01,
+        clockStatus: "ready",
+        worstClockErrorMs: 1.2,
+        roomClockConfidence: 0.92,
+        audioCaptureReadyDeviceCount: 2,
+        rawCaptureVerifiedDeviceCount: 2,
+        unverifiedCaptureDeviceCount: 0,
+        runningAudioContextDeviceCount: 2,
+        filteredCaptureDeviceCount: 0,
+        suspendedAudioContextDeviceCount: 0,
+        audioTimestampDeviceCount: 2,
+        audioTimestampReadyDeviceCount: 2,
+        worstAudioTimestampErrorMs: 1.2,
+        lowestAudioTimingConfidence: 0.93,
+        tdoaSourceCount: 0,
+        bestSourceResidualMs: null,
+        bestSourceConfidence: null,
       },
     },
   };

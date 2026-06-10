@@ -44,6 +44,8 @@ describe("live trial plan", () => {
       "1250",
       "--ready-streak-ms",
       "6000",
+      "--min-devices",
+      "3",
       "--out",
       "artifacts/live-trials/office-table-first-pass/validation-trace.ndjson",
       "--evidence-out",
@@ -54,6 +56,23 @@ describe("live trial plan", () => {
       minDevices: 3,
       sessionUrl: plan.sessionUrl,
     });
+  });
+
+  test("creates a two-phone pairwise trial plan", () => {
+    const plan = createLivePhysicalRoomTrialPlan({
+      artifactRoot: "artifacts/live-trials",
+      baseUrl: "https://blackmagic-rouge.vercel.app",
+      generatedAtMs: Date.UTC(2026, 5, 10, 1, 2, 3),
+      minDevices: 2,
+      slug: "two phones",
+    });
+
+    expect(plan.sessionUrl).toBe(
+      "https://blackmagic-rouge.vercel.app/two-phones",
+    );
+    expect(plan.manifest.minDevices).toBe(2);
+    expect(plan.traceCommand).toContain("--min-devices");
+    expect(plan.traceCommand).toContain("2");
   });
 
   test("prints the live trial plan without polling in dry-run mode", () => {
@@ -99,7 +118,7 @@ describe("live trial plan", () => {
         baseUrl: "https://blackmagic-rouge.vercel.app",
         generatedAtMs: Date.UTC(2026, 5, 10),
         intervalMs: 100,
-        minDevices: 2,
+        minDevices: 1,
         samples: 0,
         slug: "bad-plan",
       }),
