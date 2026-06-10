@@ -3,6 +3,7 @@ import type {
   RealtimeClockProbeMessage,
   RealtimeDataChannelMessage,
   RealtimeSensorFrameMessage,
+  RealtimeWaveChunk,
 } from "./contracts";
 import type { AcousticObservation } from "../session/registry";
 import type { ClockExchange } from "../timing/clock-sync";
@@ -14,6 +15,7 @@ export type RealtimeSensorFrameInput = {
   deviceId: string;
   sequence: number;
   sentAtClientPerfMs: number;
+  wave?: RealtimeWaveChunk | null;
   snapshot: {
     micLevel?: number | null;
     sampleRate?: number | null;
@@ -140,6 +142,7 @@ export function createRealtimeSensorFrame({
   deviceId,
   sequence,
   sentAtClientPerfMs,
+  wave,
   snapshot,
 }: RealtimeSensorFrameInput): RealtimeSensorFrameMessage {
   const audioFrame = snapshot.audioFrame;
@@ -158,6 +161,7 @@ export function createRealtimeSensorFrame({
     sentAtClientPerfMs,
     hostEstimatedEpochMs: audioHostEpochMs,
     micLevel: clamp(finiteNumberOrNull(snapshot.micLevel) ?? 0, 0, 1),
+    wave: sanitizeWaveChunk(wave),
     sampleRate: finiteNumberOrNull(snapshot.sampleRate),
     headingDegrees: finiteNumberOrNull(snapshot.headingDegrees),
     motionStability: finiteNumberOrNull(snapshot.motionStability),
@@ -261,7 +265,8 @@ export function isRealtimeDataChannelMessage(
         finiteNumber(value.sequence) &&
         finiteNumber(value.sentAtClientPerfMs) &&
         nullableFiniteNumber(value.hostEstimatedEpochMs) &&
-        finiteNumber(value.micLevel)
+        finiteNumber(value.micLevel) &&
+        isValidWaveChunkField(value.wave)
       );
     case "chirp-schedule":
       return nonEmptyString(value.fromDeviceId) && isRecord(value.pulse);
@@ -270,6 +275,47 @@ export function isRealtimeDataChannelMessage(
     default:
       return false;
   }
+}
+
+const MAX_WAVE_CHUNK_LEVELS = 64;
+
+function sanitizeWaveChunk(
+  wave: RealtimeWaveChunk | null | undefined,
+): RealtimeWaveChunk | null {
+  if (
+    !wave ||
+    !finiteNumber(wave.endHostEpochMs) ||
+    !finiteNumber(wave.bucketMs) ||
+    wave.bucketMs <= 0 ||
+    !Array.isArray(wave.levels) ||
+    wave.levels.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    endHostEpochMs: wave.endHostEpochMs,
+    bucketMs: wave.bucketMs,
+    levels: wave.levels
+      .slice(0, MAX_WAVE_CHUNK_LEVELS)
+      .map((level) => clamp(finiteNumberOrNull(level) ?? 0, 0, 1)),
+  };
+}
+
+function isValidWaveChunkField(value: unknown) {
+  if (value === undefined || value === null) {
+    return true;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    finiteNumber(value.endHostEpochMs) &&
+    finiteNumber(value.bucketMs) &&
+    Array.isArray(value.levels) &&
+    value.levels.length <= MAX_WAVE_CHUNK_LEVELS &&
+    value.levels.every((level) => finiteNumber(level))
+  );
 }
 
 function finiteNumberOrNull(value: unknown) {

@@ -98,6 +98,14 @@ export type RealtimeClockProbeAckMessage = {
   ackSentAtEpochMs?: number | null;
 };
 
+export type RealtimeWaveChunk = {
+  // Host-epoch timestamp of the newest bucket; earlier buckets step back by
+  // bucketMs each. Receivers merge chunks onto the shared host timeline.
+  endHostEpochMs: number;
+  bucketMs: number;
+  levels: number[];
+};
+
 export type RealtimeSensorFrameMessage = {
   type: "sensor-frame";
   version: 1;
@@ -106,6 +114,7 @@ export type RealtimeSensorFrameMessage = {
   sentAtClientPerfMs: number;
   hostEstimatedEpochMs: number | null;
   micLevel: number;
+  wave?: RealtimeWaveChunk | null;
   sampleRate: number | null;
   headingDegrees: number | null;
   motionStability: number | null;

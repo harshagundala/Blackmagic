@@ -34,6 +34,7 @@ import {
 } from "@/lib/acoustics/voice-activity";
 import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
 import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
+import { buildWaveChunk, WaveSeries } from "@/lib/waveform/wave-series";
 import type {
   AcousticObservation,
   AcousticPulse,
@@ -119,6 +120,11 @@ const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
 // route after an interruption), so it gets rebuilt on a fresh context.
 const SILENT_CAPTURE_REBUILD_MS = 3_000;
 const MAX_CAPTURE_REBUILDS = 3;
+// Envelope series shared with peers: 25 ms buckets, 16 per chunk (400 ms),
+// sent every sensor frame (~220 ms) so one dropped frame costs nothing.
+const WAVE_HISTORY_MS = 8_000;
+const WAVE_BUCKET_MS = 25;
+const WAVE_CHUNK_BUCKETS = 16;
 const MAX_CLOCK_SEARCH_SLACK_MS = 120;
 const ANALYSER_WINDOW_SAMPLES = 4096;
 const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
@@ -158,6 +164,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const lifecycleCleanupRef = useRef<(() => void) | null>(null);
   const motionRetryCleanupRef = useRef<(() => void) | null>(null);
   const captureGraphRef = useRef<CaptureGraph | null>(null);
+  const waveSeriesRef = useRef(new WaveSeries(WAVE_HISTORY_MS));
   const captureSilentSincePerfMsRef = useRef<number | null>(null);
   const captureRebuildCountRef = useRef(0);
   const captureRebuildInFlightRef = useRef(false);
@@ -230,6 +237,14 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   // inside the user gesture, so iOS lets it keep running.
   const getAudioContext = useCallback(() => audioContextRef.current, []);
 
+  // Live mic-envelope series on the host-clock timeline, for waveform
+  // rendering and for sharing with peers over the data channel.
+  const getWaveSeries = useCallback(() => waveSeriesRef.current, []);
+  const getWaveChunk = useCallback(
+    () => buildWaveChunk(waveSeriesRef.current, WAVE_BUCKET_MS, WAVE_CHUNK_BUCKETS),
+    [],
+  );
+
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
       cancelAnimationFrame(animationRef.current);
@@ -249,6 +264,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     motionRetryCleanupRef.current?.();
     motionRetryCleanupRef.current = null;
     captureGraphRef.current = null;
+    waveSeriesRef.current = new WaveSeries(WAVE_HISTORY_MS);
     captureSilentSincePerfMsRef.current = null;
     captureRebuildCountRef.current = 0;
     captureRebuildInFlightRef.current = false;
@@ -426,6 +442,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     offerClockExchange,
     setClockAuthority,
     getAudioContext,
+    getWaveSeries,
+    getWaveChunk,
   };
 
   function handleOrientation(event: DeviceOrientationEvent) {
@@ -562,6 +580,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         rollingAudioRef.current,
         clockModelRef.current,
       );
+      const waveTimestampMs = timing.audioFrame?.hostEstimatedEpochMs;
+      if (typeof waveTimestampMs === "number") {
+        waveSeriesRef.current.appendSample(waveTimestampMs, micLevel);
+      }
       const voiceActivity = detectVoiceActivityEvent({
         gate: voiceGateRef.current,
         micLevel,

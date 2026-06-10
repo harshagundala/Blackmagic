@@ -1,5 +1,5 @@
-import { BlackmagicApp } from "@/components/blackmagic/blackmagic-app";
+import { WaveformApp } from "@/components/blackmagic/waveform-app";
 
 export default function Home() {
-  return <BlackmagicApp />;
+  return <WaveformApp />;
 }

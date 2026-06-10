@@ -18,6 +18,7 @@ import type {
   RealtimeSensorFrameMessage,
 } from "@/lib/realtime/contracts";
 import type { ClockExchange } from "@/lib/timing/clock-sync";
+import type { RealtimeWaveChunk } from "@/lib/realtime/contracts";
 import type {
   AcousticObservation,
   AcousticPulse,
@@ -31,6 +32,7 @@ type WebRtcRoomOptions = {
   snapshot: SensorSnapshot;
   getAcousticPulse?: () => AcousticPulse | null;
   getAcousticObservation?: () => AcousticObservation | null;
+  getWaveChunk?: () => RealtimeWaveChunk | null;
   onChirpSchedule?: (pulse: AcousticPulse, fromDeviceId: string) => void;
   onPulseObservation?: (observation: AcousticObservation, fromDeviceId: string) => void;
   // Fired when a clock probe to the room host completes; the exchange is in
@@ -74,6 +76,7 @@ export function useWebRtcRoom({
   snapshot,
   getAcousticPulse,
   getAcousticObservation,
+  getWaveChunk,
   onChirpSchedule,
   onPulseObservation,
   onClockExchange,
@@ -81,6 +84,7 @@ export function useWebRtcRoom({
   const snapshotRef = useRef(snapshot);
   const getAcousticPulseRef = useRef(getAcousticPulse);
   const getAcousticObservationRef = useRef(getAcousticObservation);
+  const getWaveChunkRef = useRef(getWaveChunk);
   const onChirpScheduleRef = useRef(onChirpSchedule);
   const onPulseObservationRef = useRef(onPulseObservation);
   const onClockExchangeRef = useRef(onClockExchange);
@@ -121,6 +125,10 @@ export function useWebRtcRoom({
   useEffect(() => {
     getAcousticObservationRef.current = getAcousticObservation;
   }, [getAcousticObservation]);
+
+  useEffect(() => {
+    getWaveChunkRef.current = getWaveChunk;
+  }, [getWaveChunk]);
 
   useEffect(() => {
     onChirpScheduleRef.current = onChirpSchedule;
@@ -346,6 +354,7 @@ export function useWebRtcRoom({
         deviceId,
         sequence,
         sentAtClientPerfMs,
+        wave: getWaveChunkRef.current?.() ?? null,
         snapshot: snapshotRef.current,
       });
       const pulse = getAcousticPulseRef.current?.() ?? null;
