@@ -10,7 +10,7 @@ export type RoomStateWaitOptions = {
 };
 
 const DEFAULT_TIMEOUT_MS = 4_500;
-const DEFAULT_POLL_INTERVAL_MS = 180;
+const DEFAULT_POLL_INTERVAL_MS = 650;
 
 export async function waitForRoomStateRevision(
   store: SessionStore,
@@ -27,12 +27,22 @@ export async function waitForRoomStateRevision(
   let latest = await store.state(url);
 
   while (latest.revision <= afterRevision) {
-    if (now() - startedAt >= timeoutMs) {
+    const elapsedMs = now() - startedAt;
+    if (elapsedMs >= timeoutMs) {
       return latest;
     }
 
-    await sleep(Math.max(1, Math.min(pollIntervalMs, timeoutMs)));
-    latest = await store.state(url);
+    await sleep(Math.max(1, Math.min(pollIntervalMs, timeoutMs - elapsedMs)));
+
+    if (!store.revision) {
+      latest = await store.state(url);
+      continue;
+    }
+
+    const revision = await store.revision(url);
+    if (revision > afterRevision) {
+      latest = await store.state(url);
+    }
   }
 
   return latest;

@@ -23,6 +23,7 @@ export type SessionStore = {
     heartbeat?: DeviceHeartbeat,
   ): Promise<RoomState>;
   state(url: string): Promise<RoomState>;
+  revision?(url: string): Promise<number>;
 };
 
 export type RedisHashResponse = Record<string, string> | string[] | null;
@@ -71,6 +72,9 @@ export function createMemorySessionStore(options: SessionStoreOptions = {}) {
     },
     async state(url: string) {
       return registry.state(url);
+    },
+    async revision(url: string) {
+      return registry.state(url).revision;
     },
   } satisfies SessionStore;
 }
@@ -168,6 +172,11 @@ export function createRedisSessionStore(
         updatedAt: timestamp,
       };
     },
+    async revision(url: string) {
+      const sessionKey = normalizeSessionKey(url);
+      const keys = redisSessionKeys(sessionKey);
+      return parseRedisNumber(await redis.get(keys.revision));
+    },
   } satisfies SessionStore;
 }
 
@@ -203,11 +212,7 @@ export function createResilientSessionStore(
         () => fallback.claim(url, deviceId),
       );
     },
-    heartbeat(
-      url: string,
-      deviceId: string,
-      heartbeat: DeviceHeartbeat = {},
-    ) {
+    heartbeat(url: string, deviceId: string, heartbeat: DeviceHeartbeat = {}) {
       return run(
         () => primary.heartbeat(url, deviceId, heartbeat),
         () => fallback.heartbeat(url, deviceId, heartbeat),
@@ -217,6 +222,16 @@ export function createResilientSessionStore(
       return run(
         () => primary.state(url),
         () => fallback.state(url),
+      );
+    },
+    revision(url: string) {
+      return run(
+        () =>
+          primary.revision?.(url) ??
+          primary.state(url).then((state) => state.revision),
+        () =>
+          fallback.revision?.(url) ??
+          fallback.state(url).then((state) => state.revision),
       );
     },
   } satisfies SessionStore;
@@ -282,12 +297,15 @@ export function createUpstashRestRedisClient({
       body: JSON.stringify(args),
       cache: "no-store",
     });
-    const body = (await response.json().catch(() => null)) as
-      | { result?: T; error?: string }
-      | null;
+    const body = (await response.json().catch(() => null)) as {
+      result?: T;
+      error?: string;
+    } | null;
 
     if (!response.ok || !body || body.error) {
-      throw new Error(body?.error ?? `Redis command failed: ${response.status}`);
+      throw new Error(
+        body?.error ?? `Redis command failed: ${response.status}`,
+      );
     }
 
     return body.result as T;
@@ -395,7 +413,10 @@ async function pruneRedisSession(
   }
 
   let hostDeviceId = await redis.get(keys.host);
-  if (!hostDeviceId || !activeDevices.some((device) => device.deviceId === hostDeviceId)) {
+  if (
+    !hostDeviceId ||
+    !activeDevices.some((device) => device.deviceId === hostDeviceId)
+  ) {
     if (hostDeviceId) {
       await redis.del(keys.host);
       changed = true;
@@ -405,7 +426,7 @@ async function pruneRedisSession(
     hostDeviceId =
       claimedHost === 1
         ? nextHost.deviceId
-        : (await redis.get(keys.host)) ?? nextHost.deviceId;
+        : ((await redis.get(keys.host)) ?? nextHost.deviceId);
     changed = true;
   }
 
@@ -421,9 +442,7 @@ async function pruneRedisSession(
   );
   if (changed) {
     await touchRedisSession(redis, keys, timestamp, ttlSeconds);
-    return;
   }
-  await refreshRedisSessionTtl(redis, keys, ttlSeconds);
 }
 
 async function readRedisDevices(

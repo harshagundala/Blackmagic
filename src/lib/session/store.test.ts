@@ -11,12 +11,12 @@ describe("session stores", () => {
   test("memory store keeps the existing first-host behavior", async () => {
     const store = createMemorySessionStore();
 
-    await expect(store.claim("https://blackmagic.app/", "host")).resolves.toEqual(
-      expect.objectContaining({ role: "host" }),
-    );
-    await expect(store.claim("https://blackmagic.app/", "phone")).resolves.toEqual(
-      expect.objectContaining({ role: "phone" }),
-    );
+    await expect(
+      store.claim("https://blackmagic.app/", "host"),
+    ).resolves.toEqual(expect.objectContaining({ role: "host" }));
+    await expect(
+      store.claim("https://blackmagic.app/", "phone"),
+    ).resolves.toEqual(expect.objectContaining({ role: "phone" }));
   });
 
   test("redis store persists room presence across fresh store instances", async () => {
@@ -106,6 +106,31 @@ describe("session stores", () => {
 
     expect(heartbeatState.revision).toBeGreaterThan(secondRead.revision);
     expect(heartbeatState.changedAt).toBe(250);
+  });
+
+  test("redis store reads revisions without hydrating room state", async () => {
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => 100 });
+    await store.claim("https://blackmagic.app/", "host");
+    const state = await store.state("https://blackmagic.app/");
+
+    redis.resetCalls();
+
+    await expect(store.revision?.("https://blackmagic.app/")).resolves.toBe(
+      state.revision,
+    );
+    expect(redis.calls).toEqual([expect.stringContaining(":revision")]);
+  });
+
+  test("redis state reads do not refresh room ttls when nothing changed", async () => {
+    const redis = new FakeRedisSessionClient();
+    const store = createRedisSessionStore(redis, { now: () => 100 });
+    await store.claim("https://blackmagic.app/", "host");
+
+    redis.resetCalls();
+    await store.state("https://blackmagic.app/");
+
+    expect(redis.calls.some((call) => call.startsWith("expire:"))).toBe(false);
   });
 
   test("redis store publishes the next calibration turn from persisted room state", async () => {
@@ -242,6 +267,20 @@ describe("session stores", () => {
       store.claim("https://blackmagic.app/fallback", "phone-a"),
     ).resolves.toEqual(expect.objectContaining({ role: "phone" }));
   });
+
+  test("resilient store falls back when a redis revision probe fails", async () => {
+    const fallback = createMemorySessionStore();
+    await fallback.claim("https://blackmagic.app/fallback", "host");
+    const store = createResilientSessionStore(
+      createRedisSessionStore(new FailingRedisSessionClient()),
+      fallback,
+    );
+
+    await expect(
+      store.revision?.("https://blackmagic.app/fallback"),
+    ).resolves.toBeGreaterThan(0);
+    expect(store.kind).toBe("memory");
+  });
 });
 
 function audioFrame() {
@@ -267,19 +306,27 @@ function audioFrame() {
 }
 
 class FakeRedisSessionClient implements RedisSessionClient {
+  readonly calls: string[] = [];
   private readonly strings = new Map<string, string>();
   private readonly hashes = new Map<string, Map<string, string>>();
 
+  resetCalls() {
+    this.calls.length = 0;
+  }
+
   async get(key: string) {
+    this.calls.push(`get:${key}`);
     return this.strings.get(key) ?? null;
   }
 
   async set(key: string, value: string) {
+    this.calls.push(`set:${key}`);
     this.strings.set(key, value);
     return "OK" as const;
   }
 
   async setnx(key: string, value: string) {
+    this.calls.push(`setnx:${key}`);
     if (this.strings.has(key)) {
       return 0;
     }
@@ -288,12 +335,14 @@ class FakeRedisSessionClient implements RedisSessionClient {
   }
 
   async incr(key: string) {
+    this.calls.push(`incr:${key}`);
     const next = Number(this.strings.get(key) ?? "0") + 1;
     this.strings.set(key, String(next));
     return next;
   }
 
   async del(...keys: string[]) {
+    this.calls.push(...keys.map((key) => `del:${key}`));
     let deleted = 0;
     for (const key of keys) {
       if (this.strings.delete(key)) {
@@ -307,10 +356,12 @@ class FakeRedisSessionClient implements RedisSessionClient {
   }
 
   async hget(key: string, field: string) {
+    this.calls.push(`hget:${key}:${field}`);
     return this.hashes.get(key)?.get(field) ?? null;
   }
 
   async hset(key: string, field: string, value: string) {
+    this.calls.push(`hset:${key}:${field}`);
     const hash = this.hashes.get(key) ?? new Map<string, string>();
     const isNew = !hash.has(field);
     hash.set(field, value);
@@ -319,6 +370,7 @@ class FakeRedisSessionClient implements RedisSessionClient {
   }
 
   async hgetall(key: string) {
+    this.calls.push(`hgetall:${key}`);
     const hash = this.hashes.get(key);
     if (!hash) {
       return null;
@@ -327,6 +379,7 @@ class FakeRedisSessionClient implements RedisSessionClient {
   }
 
   async hdel(key: string, ...fields: string[]) {
+    this.calls.push(...fields.map((field) => `hdel:${key}:${field}`));
     const hash = this.hashes.get(key);
     if (!hash) {
       return 0;
@@ -340,7 +393,8 @@ class FakeRedisSessionClient implements RedisSessionClient {
     return deleted;
   }
 
-  async expire() {
+  async expire(key: string) {
+    this.calls.push(`expire:${key}`);
     return 1;
   }
 }
