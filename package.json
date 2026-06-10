@@ -10,6 +10,7 @@
     "test": "vitest run",
     "trace:validation": "node scripts/blackmagic-validation-trace.mjs",
     "trial:live": "tsx scripts/blackmagic-live-trial.ts",
+    "trial:report": "tsx scripts/blackmagic-trial-report.ts",
     "trial:simulate": "tsx scripts/blackmagic-simulated-trial.ts",
     "test:watch": "vitest"
   },
