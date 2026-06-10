@@ -58,6 +58,8 @@ export type SessionStoreOptions = {
 };
 
 export type SessionEnvironment = Readonly<{
+  BLACKMAGIC_KV_REST_API_URL?: string;
+  BLACKMAGIC_KV_REST_API_TOKEN?: string;
   KV_REST_API_URL?: string;
   KV_REST_API_TOKEN?: string;
   UPSTASH_REDIS_REST_URL?: string;
@@ -309,6 +311,14 @@ export function createSessionStoreFromEnvironment(
 }
 
 export function redisRestCredentials(env: SessionEnvironment = process.env) {
+  if (env.BLACKMAGIC_KV_REST_API_URL && env.BLACKMAGIC_KV_REST_API_TOKEN) {
+    return {
+      url: env.BLACKMAGIC_KV_REST_API_URL,
+      token: env.BLACKMAGIC_KV_REST_API_TOKEN,
+      source: "blackmagic-vercel-marketplace-kv" as const,
+    };
+  }
+
   if (env.KV_REST_API_URL && env.KV_REST_API_TOKEN) {
     return {
       url: env.KV_REST_API_URL,

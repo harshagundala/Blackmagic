@@ -12,8 +12,9 @@ describe("session store readiness", () => {
       durable: false,
       kind: "memory",
       status: "degraded",
-      missing: ["KV_REST_API_URL", "KV_REST_API_TOKEN"],
-      detail: "Production room state is process-local until Redis env is configured.",
+      missing: ["BLACKMAGIC_KV_REST_API_URL", "BLACKMAGIC_KV_REST_API_TOKEN"],
+      detail:
+        "Production room state is process-local until Redis env is configured.",
     });
   });
 
@@ -53,6 +54,35 @@ describe("session store readiness", () => {
     });
   });
 
+  test("reports durable readiness for the Blackmagic-specific Redis env prefix", () => {
+    expect(
+      sessionStoreReadiness({
+        env: {
+          BLACKMAGIC_KV_REST_API_URL: "https://fresh.upstash.io",
+          BLACKMAGIC_KV_REST_API_TOKEN: "fresh-secret",
+          KV_REST_API_URL: "https://exhausted.upstash.io",
+          KV_REST_API_TOKEN: "old-secret",
+        },
+        nodeEnv: "production",
+      }),
+    ).toEqual({
+      durable: true,
+      kind: "redis",
+      status: "ready",
+      missing: [],
+      detail: "Production room state is backed by Redis.",
+    });
+  });
+
+  test("reports the preferred Redis env pair as missing in production", () => {
+    expect(
+      sessionStoreReadiness({
+        env: {},
+        nodeEnv: "production",
+      }).missing,
+    ).toEqual(["BLACKMAGIC_KV_REST_API_URL", "BLACKMAGIC_KV_REST_API_TOKEN"]);
+  });
+
   test("reports degraded readiness when Redis is configured but unavailable at runtime", () => {
     expect(
       sessionStoreReadiness({
@@ -68,7 +98,8 @@ describe("session store readiness", () => {
       kind: "memory",
       status: "degraded",
       missing: [],
-      detail: "Redis is configured but unavailable; using process-local memory.",
+      detail:
+        "Redis is configured but unavailable; using process-local memory.",
     });
   });
 

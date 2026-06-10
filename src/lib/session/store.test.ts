@@ -4,6 +4,7 @@ import {
   createRedisSessionStore,
   createResilientSessionStore,
   createSessionStoreFromEnvironment,
+  redisRestCredentials,
   type RedisSessionClient,
 } from "./store";
 
@@ -297,6 +298,21 @@ describe("session stores", () => {
         KV_REST_API_TOKEN: "secret",
       }).kind,
     ).toBe("redis");
+  });
+
+  test("redis credentials prefer the Blackmagic-specific store prefix", () => {
+    expect(
+      redisRestCredentials({
+        KV_REST_API_URL: "https://exhausted.upstash.io",
+        KV_REST_API_TOKEN: "old-secret",
+        BLACKMAGIC_KV_REST_API_URL: "https://fresh.upstash.io",
+        BLACKMAGIC_KV_REST_API_TOKEN: "fresh-secret",
+      }),
+    ).toEqual({
+      url: "https://fresh.upstash.io",
+      token: "fresh-secret",
+      source: "blackmagic-vercel-marketplace-kv",
+    });
   });
 
   test("resilient store falls back to memory when redis is quota exhausted", async () => {

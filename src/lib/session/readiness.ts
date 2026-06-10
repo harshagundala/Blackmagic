@@ -13,8 +13,8 @@ export type SessionStoreReadiness = {
 };
 
 const redisEnvKeys = [
-  "KV_REST_API_URL",
-  "KV_REST_API_TOKEN",
+  "BLACKMAGIC_KV_REST_API_URL",
+  "BLACKMAGIC_KV_REST_API_TOKEN",
 ] as const;
 
 export function sessionStoreReadiness({
@@ -35,7 +35,8 @@ export function sessionStoreReadiness({
         kind: "memory",
         status: "degraded",
         missing: [],
-        detail: "Redis is configured but unavailable; using process-local memory.",
+        detail:
+          "Redis is configured but unavailable; using process-local memory.",
       };
     }
 
