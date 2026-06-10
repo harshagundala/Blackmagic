@@ -70,7 +70,8 @@ export function createPulseToneScheduler({
     if (!context || context.state === "closed") {
       context = createContext();
     }
-    if (context.state === "suspended" && context.resume) {
+    // "suspended" or iOS's non-standard "interrupted": both need a resume.
+    if (context.state !== "running" && context.state !== "closed" && context.resume) {
       await context.resume().catch(() => undefined);
     }
     return context;

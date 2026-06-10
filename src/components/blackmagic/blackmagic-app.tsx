@@ -487,8 +487,8 @@ export function BlackmagicApp() {
         style={{
           background:
             "linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(0,122,255,0.13) 36%, rgba(0,61,160,0.43) 66%, rgba(2,4,9,0.96) 100%)",
-          opacity: 0.78 + pulse * 0.18,
-          transform: `translateY(${18 - pulse * 18}px) scaleY(${0.82 + pulse * 0.24})`,
+          opacity: 0.6 + pulse * 0.4,
+          transform: `translateY(${24 - pulse * 28}px) scaleY(${0.76 + pulse * 0.38})`,
           transformOrigin: "bottom",
           transition:
             "opacity 160ms linear, transform 180ms cubic-bezier(.2,.8,.2,1)",
@@ -500,9 +500,9 @@ export function BlackmagicApp() {
         style={{
           animation: "bottom-current 7.5s ease-in-out infinite",
           background: `linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(0,122,255,${
-            0.16 + pulse * 0.18
-          }) 28%, rgba(0,0,0,${0.58 + pulse * 0.24}) 52%, rgba(0,86,255,${
-            0.2 + pulse * 0.18
+            0.12 + pulse * 0.34
+          }) 28%, rgba(0,0,0,${0.5 + pulse * 0.36}) 52%, rgba(0,86,255,${
+            0.16 + pulse * 0.34
           }) 76%, rgba(255,255,255,0) 100%)`,
           transformOrigin: "bottom",
         }}
@@ -513,7 +513,7 @@ export function BlackmagicApp() {
         style={{
           background:
             "linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(0,0,0,0.2) 72%, rgba(0,0,0,0.82) 100%)",
-          opacity: 0.32 + pulse * 0.38,
+          opacity: 0.24 + pulse * 0.56,
         }}
       />
 
@@ -532,6 +532,9 @@ export function BlackmagicApp() {
           <span>{syncLabel}</span>
           {sensors.snapshot.mic === "blocked" ? (
             <span className="text-[#b45309]">mic off — tap to enable</span>
+          ) : sensors.snapshot.audioContextState &&
+            sensors.snapshot.audioContextState !== "running" ? (
+            <span className="text-[#b45309]">audio paused — tap</span>
           ) : captureFiltered ? (
             <span className="text-[#b45309]">filtered mic</span>
           ) : null}

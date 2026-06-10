@@ -37,6 +37,7 @@ import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
 import type {
   AcousticObservation,
   AcousticPulse,
+  AudioContextRunState,
   CaptureProcessingReport,
 } from "@/lib/session/registry";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
@@ -112,6 +113,12 @@ const idleSnapshot: SensorSnapshot = {
 const CLOCK_SYNC_INTERVAL_MS = 1_000;
 const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
+// A live microphone never reads as exact digital silence for seconds — even
+// a quiet room has a noise floor. Sustained zeros from a "running" context
+// mean the capture graph is broken (iOS sample-rate mismatch, or a dead
+// route after an interruption), so it gets rebuilt on a fresh context.
+const SILENT_CAPTURE_REBUILD_MS = 3_000;
+const MAX_CAPTURE_REBUILDS = 3;
 const MAX_CLOCK_SEARCH_SLACK_MS = 120;
 const ANALYSER_WINDOW_SAMPLES = 4096;
 const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
@@ -119,6 +126,13 @@ const STREAMING_MATCH_MAX_LATE_MS = 45;
 
 type PermissionEventConstructor = {
   requestPermission?: () => Promise<"granted" | "denied" | "default">;
+};
+
+type CaptureGraph = {
+  audioContext: AudioContext;
+  analyser: AnalyserNode;
+  source: MediaStreamAudioSourceNode;
+  samples: Float32Array;
 };
 
 export function useSensorSuite(activePulse: AcousticPulse | null = null) {
@@ -142,6 +156,11 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const activePulseRef = useRef<AcousticPulse | null>(activePulse);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const lifecycleCleanupRef = useRef<(() => void) | null>(null);
+  const motionRetryCleanupRef = useRef<(() => void) | null>(null);
+  const captureGraphRef = useRef<CaptureGraph | null>(null);
+  const captureSilentSincePerfMsRef = useRef<number | null>(null);
+  const captureRebuildCountRef = useRef(0);
+  const captureRebuildInFlightRef = useRef(false);
   const voiceGateRef = useRef<VoiceActivityGate>({
     open: false,
     lastEventHostEpochMs: null,
@@ -227,6 +246,12 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     clockSyncRunRef.current += 1;
     lifecycleCleanupRef.current?.();
     lifecycleCleanupRef.current = null;
+    motionRetryCleanupRef.current?.();
+    motionRetryCleanupRef.current = null;
+    captureGraphRef.current = null;
+    captureSilentSincePerfMsRef.current = null;
+    captureRebuildCountRef.current = 0;
+    captureRebuildInFlightRef.current = false;
     void wakeLockRef.current?.release().catch(() => undefined);
     wakeLockRef.current = null;
 
@@ -281,9 +306,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     // Created synchronously inside the user gesture so iOS lets it run.
     let audioContext = new AudioContextClass();
     audioContextRef.current = audioContext;
-    if (audioContext.state === "suspended") {
-      await audioContext.resume().catch(() => undefined);
-    }
+    await resumeAudioContextIfNeeded(audioContext);
 
     try {
       const stream = await mediaStreamPromise;
@@ -319,112 +342,24 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         audioContextRef.current = audioContext;
       }
 
-      if (audioContext.state === "suspended") {
-        await audioContext.resume().catch(() => undefined);
-      }
+      await resumeAudioContextIfNeeded(audioContext);
       setSnapshot((current) => ({
         ...current,
         captureProcessing,
         audioContextState: audioContext.state,
       }));
-      const detachLifecycle = attachAudioLifecycle({
-        audioContext,
-        audioTrack,
-        wakeLockRef,
-        setSnapshot,
-        resyncClock: () =>
-          void syncServerClock(serverClockExchangesRef, refreshClockModel),
-      });
+      attachCaptureLifecycle(audioContext, audioTrack);
       // Opportunistic: succeeds on platforms where the activation survived
       // the mic prompt; iOS will reject it quietly.
       void requestMotionPermission();
       // Deterministic: the next tap anywhere re-requests inside a fresh
       // gesture. Once granted, iOS answers without showing the dialog again.
-      const disarmMotionRequest = armMotionPermissionRetry();
-      lifecycleCleanupRef.current = () => {
-        detachLifecycle();
-        disarmMotionRequest();
-      };
-      const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
-      rollingAudioRef.current = rollingAudio;
-      const streamingMatcher = new StreamingPulseMatcher({
-        sampleRate: audioContext.sampleRate,
-        historySamples: ROLLING_AUDIO_HISTORY_SAMPLES,
-        minScore: 0.5,
-        minPeakRatio: 2.2,
-      });
-      streamingMatcherRef.current = streamingMatcher;
-      updateStreamingMatcherPulse(
-        activePulseRef.current,
-        audioContext,
-        clockModelRef.current,
-        streamingMatcher,
-      );
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = ANALYSER_WINDOW_SAMPLES;
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(analyser);
-      audioWorkletRef.current = await startAudioWorkletCapture(
-        audioContext,
-        source,
-        rollingAudio,
-        streamingMatcher,
-        (detection, window) => {
-          const clock = clockModelRef.current;
-          if (!clock) {
-            return;
-          }
-          const timing = audioWindowFromRollingWindow(audioContext, window, clock);
-          setSnapshot((current) => ({
-            ...current,
-            ...timing,
-            pulseObservation:
-              createPulseObservationFromStreamingDetection({
-                detection,
-                audioWindow: timing.audioWindow,
-                pulse: activePulseRef.current,
-              }) ?? current.pulseObservation,
-          }));
-        },
-      );
-      const samples = new Float32Array(analyser.fftSize);
-
-      const read = () => {
-        analyser.getFloatTimeDomainData(samples);
-        let sum = 0;
-        for (const sample of samples) {
-          sum += sample * sample;
-        }
-        const micLevel = Math.sqrt(sum / samples.length);
-        const timing = timestampCurrentAudioWindow(
-          audioContext,
-          samples,
-          rollingAudioRef.current,
-          clockModelRef.current,
-        );
-        const voiceActivity = detectVoiceActivityEvent({
-          gate: voiceGateRef.current,
-          micLevel,
-          frame: timing.audioFrame,
-          motionStability: motionMetadataRef.current.motionStability,
-        });
-        voiceGateRef.current = voiceActivity.gate;
-        const voiceEvent = voiceActivity.event
-          ? attachSpeechFingerprint(voiceActivity.event, timing.audioWindow)
-          : null;
-        setSnapshot((current) => ({
-          ...current,
-          mic: "active",
-          micLevel,
-          sampleRate: audioContext.sampleRate,
-          ...timing,
-          voiceEvent: voiceEvent ?? current.voiceEvent,
-          motion: motionActiveRef.current ? "active" : current.motion,
-          heading: headingActiveRef.current ? "active" : current.heading,
-        }));
-        animationRef.current = requestAnimationFrame(read);
-      };
-      read();
+      motionRetryCleanupRef.current?.();
+      motionRetryCleanupRef.current = armMotionPermissionRetry();
+      await wireCaptureGraph(audioContext, stream);
+      captureRebuildCountRef.current = 0;
+      captureSilentSincePerfMsRef.current = null;
+      startCaptureReadLoop();
 
       void syncServerClock(serverClockExchangesRef, refreshClockModel);
       void warmServerClockSync(
@@ -472,6 +407,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         { enableHighAccuracy: true, maximumAge: 15_000, timeout: 5_000 },
       );
     }
+    // attachCaptureLifecycle/startCaptureReadLoop are hoisted helpers that
+    // only touch refs and the stable setSnapshot, so their per-render
+    // identity is irrelevant here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshClockModel]);
 
   useEffect(() => stop, [stop]);
@@ -520,6 +459,185 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       ...metadata,
     }));
   }
+
+  function attachCaptureLifecycle(
+    audioContext: AudioContext,
+    audioTrack: MediaStreamTrack | null,
+  ) {
+    lifecycleCleanupRef.current?.();
+    lifecycleCleanupRef.current = attachAudioLifecycle({
+      audioContext,
+      audioTrack,
+      wakeLockRef,
+      setSnapshot,
+      resyncClock: () =>
+        void syncServerClock(serverClockExchangesRef, refreshClockModel),
+    });
+  }
+
+  // Builds (or rebuilds) the analyser/worklet/matcher graph for a context and
+  // stream. Kept separate from start() so the silent-capture watchdog can
+  // re-wire everything onto a fresh context without touching permissions.
+  async function wireCaptureGraph(audioContext: AudioContext, stream: MediaStream) {
+    audioWorkletRef.current?.disconnect();
+    audioWorkletRef.current = null;
+    captureGraphRef.current?.source.disconnect();
+    captureGraphRef.current = null;
+
+    const rollingAudio = new RollingSampleBuffer(ROLLING_AUDIO_HISTORY_SAMPLES);
+    rollingAudioRef.current = rollingAudio;
+    const streamingMatcher = new StreamingPulseMatcher({
+      sampleRate: audioContext.sampleRate,
+      historySamples: ROLLING_AUDIO_HISTORY_SAMPLES,
+      minScore: 0.5,
+      minPeakRatio: 2.2,
+    });
+    streamingMatcherRef.current = streamingMatcher;
+    updateStreamingMatcherPulse(
+      activePulseRef.current,
+      audioContext,
+      clockModelRef.current,
+      streamingMatcher,
+    );
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = ANALYSER_WINDOW_SAMPLES;
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    audioWorkletRef.current = await startAudioWorkletCapture(
+      audioContext,
+      source,
+      rollingAudio,
+      streamingMatcher,
+      (detection, window) => {
+        const clock = clockModelRef.current;
+        if (!clock) {
+          return;
+        }
+        const timing = audioWindowFromRollingWindow(audioContext, window, clock);
+        setSnapshot((current) => ({
+          ...current,
+          ...timing,
+          pulseObservation:
+            createPulseObservationFromStreamingDetection({
+              detection,
+              audioWindow: timing.audioWindow,
+              pulse: activePulseRef.current,
+            }) ?? current.pulseObservation,
+        }));
+      },
+    );
+    captureGraphRef.current = {
+      audioContext,
+      analyser,
+      source,
+      samples: new Float32Array(analyser.fftSize),
+    };
+  }
+
+  function startCaptureReadLoop() {
+    if (animationRef.current !== null) {
+      cancelAnimationFrame(animationRef.current);
+    }
+
+    const read = () => {
+      const graph = captureGraphRef.current;
+      if (!graph) {
+        animationRef.current = requestAnimationFrame(read);
+        return;
+      }
+
+      const { audioContext, analyser, samples } = graph;
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) {
+        sum += sample * sample;
+      }
+      const micLevel = Math.sqrt(sum / samples.length);
+      maybeRecoverSilentCapture(micLevel, audioContext);
+      const timing = timestampCurrentAudioWindow(
+        audioContext,
+        samples,
+        rollingAudioRef.current,
+        clockModelRef.current,
+      );
+      const voiceActivity = detectVoiceActivityEvent({
+        gate: voiceGateRef.current,
+        micLevel,
+        frame: timing.audioFrame,
+        motionStability: motionMetadataRef.current.motionStability,
+      });
+      voiceGateRef.current = voiceActivity.gate;
+      const voiceEvent = voiceActivity.event
+        ? attachSpeechFingerprint(voiceActivity.event, timing.audioWindow)
+        : null;
+      setSnapshot((current) => ({
+        ...current,
+        mic: "active",
+        micLevel,
+        sampleRate: audioContext.sampleRate,
+        audioContextState: audioContext.state,
+        ...timing,
+        voiceEvent: voiceEvent ?? current.voiceEvent,
+        motion: motionActiveRef.current ? "active" : current.motion,
+        heading: headingActiveRef.current ? "active" : current.heading,
+      }));
+      animationRef.current = requestAnimationFrame(read);
+    };
+    read();
+  }
+
+  function maybeRecoverSilentCapture(
+    micLevel: number,
+    audioContext: AudioContext,
+  ) {
+    if ((audioContext.state as AudioContextRunState) !== "running" || micLevel > 0) {
+      captureSilentSincePerfMsRef.current = null;
+      return;
+    }
+
+    const now = performance.now();
+    captureSilentSincePerfMsRef.current ??= now;
+    if (now - captureSilentSincePerfMsRef.current < SILENT_CAPTURE_REBUILD_MS) {
+      return;
+    }
+
+    captureSilentSincePerfMsRef.current = null;
+    if (
+      captureRebuildInFlightRef.current ||
+      captureRebuildCountRef.current >= MAX_CAPTURE_REBUILDS
+    ) {
+      return;
+    }
+    captureRebuildCountRef.current += 1;
+    captureRebuildInFlightRef.current = true;
+    void rebuildCaptureGraph().finally(() => {
+      captureRebuildInFlightRef.current = false;
+    });
+  }
+
+  async function rebuildCaptureGraph() {
+    const stream = mediaStreamRef.current;
+    const audioTrack = stream?.getAudioTracks()[0] ?? null;
+    if (!stream || !audioTrack || audioTrack.readyState !== "live") {
+      return;
+    }
+
+    const previousContext = audioContextRef.current;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    // Default rate: WebKit picks the hardware rate of the now-active mic
+    // route, which is the thing the original context may have guessed wrong.
+    const audioContext = new AudioContextClass();
+    audioContextRef.current = audioContext;
+    await resumeAudioContextIfNeeded(audioContext);
+    attachCaptureLifecycle(audioContext, audioTrack);
+    await wireCaptureGraph(audioContext, stream);
+    setSnapshot((current) => ({
+      ...current,
+      sampleRate: audioContext.sampleRate,
+      audioContextState: audioContext.state,
+    }));
+    void previousContext?.close().catch(() => undefined);
+  }
 }
 
 // iOS Safari suspends the audio context on tab backgrounding, phone calls,
@@ -555,18 +673,14 @@ function attachAudioLifecycle({
       ...current,
       audioContextState: audioContext.state,
     }));
-    if (audioContext.state === "suspended") {
-      void audioContext.resume().catch(() => undefined);
-    }
+    void resumeAudioContextIfNeeded(audioContext);
   };
 
   const onVisibilityChange = () => {
     if (document.visibilityState !== "visible") {
       return;
     }
-    if (audioContext.state === "suspended") {
-      void audioContext.resume().catch(() => undefined);
-    }
+    void resumeAudioContextIfNeeded(audioContext);
     void requestWakeLock();
     resyncClock();
   };
@@ -578,9 +692,7 @@ function attachAudioLifecycle({
   // Backstop for contexts that ended up suspended outside a gesture (e.g.
   // the sample-rate-mismatch recreation): any subsequent tap revives them.
   const onPointerDown = () => {
-    if (audioContext.state === "suspended") {
-      void audioContext.resume().catch(() => undefined);
-    }
+    void resumeAudioContextIfNeeded(audioContext);
   };
 
   audioContext.addEventListener("statechange", onAudioStateChange);
@@ -605,6 +717,18 @@ function finitePositiveNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
     : null;
+}
+
+// iOS reports a non-standard "interrupted" state after audio route changes,
+// phone calls, and Siri — and getUserMedia itself triggers a route change.
+// Treat anything that is not running (and not closed) as resumable; only
+// resuming on "suspended" leaves interrupted contexts silently dead.
+async function resumeAudioContextIfNeeded(context: AudioContext) {
+  const state = context.state as AudioContextRunState;
+  if (state === "running" || state === "closed") {
+    return;
+  }
+  await context.resume().catch(() => undefined);
 }
 
 function armMotionPermissionRetry() {

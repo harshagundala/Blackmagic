@@ -29,11 +29,16 @@ export function roomSoundEnergy({
   return clamp(Math.max(micEnergy, sourceEnergy), 0, 1);
 }
 
+// Raw capture (AGC off) on a quiet iPhone idles around 0.001-0.004 RMS;
+// subtracting the floor keeps the surface still in silence so speech motion
+// reads against a calm baseline instead of a permanent glow.
+const MIC_NOISE_FLOOR_RMS = 0.004;
+
 function microphoneEnergyFor(level: number) {
   // iPhone Safari often reports ordinary nearby speech at low RMS levels
-  // (~0.01-0.02). Use a saturating visual curve so speech visibly breathes
+  // (~0.01-0.03). Use a saturating visual curve so speech visibly breathes
   // without making low room noise dominate the surface.
-  return 1 - Math.exp(-level * 55);
+  return 1 - Math.exp(-Math.max(0, level - MIC_NOISE_FLOOR_RMS) * 90);
 }
 
 function sourceEnergyFor(source: RoomSoundEnergySource) {

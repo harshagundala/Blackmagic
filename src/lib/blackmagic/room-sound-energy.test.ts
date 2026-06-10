@@ -22,6 +22,16 @@ describe("blackmagic room sound energy", () => {
     ).toBeGreaterThan(0.45);
   });
 
+  test("idle room noise below the capture floor leaves the surface calm", () => {
+    expect(
+      roomSoundEnergy({
+        localMicLevel: 0.003,
+        devices: [],
+        audioSources: [],
+      }),
+    ).toBeLessThan(0.05);
+  });
+
   test("keeps a recent reconciled voice source visible between heartbeats", () => {
     expect(
       roomSoundEnergy({
