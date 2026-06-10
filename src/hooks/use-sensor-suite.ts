@@ -489,8 +489,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     const streamingMatcher = new StreamingPulseMatcher({
       sampleRate: audioContext.sampleRate,
       historySamples: ROLLING_AUDIO_HISTORY_SAMPLES,
-      minScore: 0.5,
-      minPeakRatio: 2.2,
+      // Room-scale chirps on phone transducers arrive weak; the consensus and
+      // outlier layers in ranging absorb the occasional marginal detection.
+      minScore: 0.45,
+      minPeakRatio: 2,
     });
     streamingMatcherRef.current = streamingMatcher;
     updateStreamingMatcherPulse(

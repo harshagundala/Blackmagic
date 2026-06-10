@@ -19,9 +19,9 @@ describe("active acoustic pulse metadata", () => {
     ).toEqual({
       id: "host-a:7:22200",
       emittedAtHostEpochMs: 22_200,
-      durationMs: 48,
-      frequencyHz: 17_200,
-      endFrequencyHz: 19_200,
+      durationMs: 80,
+      frequencyHz: 16_500,
+      endFrequencyHz: 19_000,
     });
   });
 

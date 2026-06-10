@@ -12,6 +12,7 @@ import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
 import { useWebRtcRoom } from "@/hooks/use-webrtc-room";
 import { createPhoneMarkers } from "@/lib/blackmagic/phone-markers";
+import { describeRangingProgress } from "@/lib/blackmagic/ranging-progress";
 import { roomSoundEnergy } from "@/lib/blackmagic/room-sound-energy";
 import {
   calibrationEventKey,
@@ -88,15 +89,28 @@ export function BlackmagicApp() {
   // server round trip. Derived ranges live in state so render never touches
   // the mutable evidence store.
   const edgeEvidenceRef = useRef(createEdgeEvidence());
-  const [edgeRanges, setEdgeRanges] = useState<AcousticRange[]>([]);
+  const [edgeView, setEdgeView] = useState<EdgeReconciliationView>({
+    ranges: [],
+    pulseCount: 0,
+    observationCount: 0,
+  });
   const refreshEdgeRanges = useCallback(() => {
-    const next = deriveEdgeRanges(edgeEvidenceRef.current, {
-      hostEpochNowMs: hostEpochNow(snapshotRef.current),
-    });
-    // Keep the previous array identity when nothing changed so the periodic
+    const evidence = edgeEvidenceRef.current;
+    const next: EdgeReconciliationView = {
+      ranges: deriveEdgeRanges(evidence, {
+        hostEpochNowMs: hostEpochNow(snapshotRef.current),
+      }),
+      pulseCount: countEdgeItems(evidence.pulses),
+      observationCount: countEdgeItems(evidence.observations),
+    };
+    // Keep the previous identity when nothing changed so the periodic
     // refresh does not re-solve the constellation for free.
-    setEdgeRanges((current) =>
-      acousticRangesEqual(current, next) ? current : next,
+    setEdgeView((current) =>
+      current.pulseCount === next.pulseCount &&
+      current.observationCount === next.observationCount &&
+      acousticRangesEqual(current.ranges, next.ranges)
+        ? current
+        : next,
     );
   }, []);
   const recordPulseEvidence = useCallback(
@@ -161,24 +175,29 @@ export function BlackmagicApp() {
     onPulseObservation: handleRealtimeObservation,
     onClockExchange: offerClockExchange,
   });
+  const mergedRanges = useMemo(() => {
+    if (!roomState) {
+      return [] as AcousticRange[];
+    }
+    return edgeView.ranges.length > 0
+      ? mergeAcousticRanges(roomState.ranges, edgeView.ranges)
+      : roomState.ranges;
+  }, [edgeView.ranges, roomState]);
   const constellation = useMemo(() => {
     if (!roomState) {
       return null;
     }
 
     return solveConstellationWithTemporalSeed(
-      edgeRanges.length > 0
-        ? {
-            ...roomState,
-            ranges: mergeAcousticRanges(roomState.ranges, edgeRanges),
-          }
-        : roomState,
+      mergedRanges === roomState.ranges
+        ? roomState
+        : { ...roomState, ranges: mergedRanges },
       {
         perspectiveDeviceId: deviceId,
         headingDegrees: sensors.snapshot.headingDegrees,
       },
     );
-  }, [deviceId, edgeRanges, roomState, sensors.snapshot.headingDegrees]);
+  }, [deviceId, mergedRanges, roomState, sensors.snapshot.headingDegrees]);
 
   useEffect(() => {
     snapshotRef.current = sensors.snapshot;
@@ -462,6 +481,31 @@ export function BlackmagicApp() {
   );
   const peerCount = Math.max(0, (roomState?.devices.length ?? 1) - 1);
   const syncLabel = describeTimeSync(roomState?.timeSync ?? null, peerCount);
+  const serverPulseCount =
+    roomState?.devices.reduce(
+      (count, device) =>
+        count + (device.acousticPulses?.length ?? (device.acousticPulse ? 1 : 0)),
+      0,
+    ) ?? 0;
+  const serverObservationCount =
+    roomState?.devices.reduce(
+      (count, device) =>
+        count +
+        (device.acousticObservations?.length ??
+          (device.acousticObservation ? 1 : 0)),
+      0,
+    ) ?? 0;
+  const rangingLabel = listening
+    ? describeRangingProgress({
+        peerCount,
+        pulseCount: Math.max(edgeView.pulseCount, serverPulseCount),
+        observationCount: Math.max(
+          edgeView.observationCount,
+          serverObservationCount,
+        ),
+        ranges: mergedRanges,
+      })
+    : null;
   const captureStatus = captureProcessingState(
     sensors.snapshot.captureProcessing,
   );
@@ -521,12 +565,17 @@ export function BlackmagicApp() {
         className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between px-6 pt-[max(20px,env(safe-area-inset-top))] font-mono text-[10px] uppercase tracking-[0.14em] text-black/45 transition-opacity duration-700"
         style={{ opacity: listening ? 1 : 0 }}
       >
-        <span className="flex items-center gap-2">
-          {reconnecting
-            ? "reconnecting"
-            : peerCount === 0
-              ? "alone so far"
-              : `${peerCount} ${peerCount === 1 ? "phone" : "phones"} nearby`}
+        <span className="flex flex-col gap-1">
+          <span>
+            {reconnecting
+              ? "reconnecting"
+              : peerCount === 0
+                ? "alone so far"
+                : `${peerCount} ${peerCount === 1 ? "phone" : "phones"} nearby`}
+          </span>
+          {rangingLabel ? (
+            <span className="text-black/35">{rangingLabel}</span>
+          ) : null}
         </span>
         <span className="flex flex-col items-end gap-1 text-right">
           <span>{syncLabel}</span>
@@ -563,8 +612,8 @@ export function BlackmagicApp() {
                   marker.localized
                     ? "block h-10 w-5 rounded-[6px] border border-black/15 bg-[linear-gradient(180deg,#06070a_0%,#061935_48%,#007aff_100%)] shadow-[0_18px_38px_rgba(0,77,190,0.24)]"
                     : marker.coarse
-                      ? "block h-9 w-[18px] rounded-[6px] border border-[#007aff]/20 bg-white/80 shadow-[0_14px_30px_rgba(0,92,210,0.16)] backdrop-blur-md"
-                      : "block h-9 w-[18px] rounded-[6px] border border-black/10 bg-white/76 shadow-[0_12px_28px_rgba(0,88,180,0.10)] backdrop-blur-md"
+                      ? "block h-9 w-[18px] rounded-[6px] border-2 border-[#007aff]/55 bg-white/90 shadow-[0_14px_30px_rgba(0,92,210,0.22)] backdrop-blur-md"
+                      : "block h-9 w-[18px] rounded-[6px] border border-black/30 bg-white/85 shadow-[0_12px_28px_rgba(0,88,180,0.14)] backdrop-blur-md"
                 }
                 style={{
                   transform: `rotate(${marker.rotationDeg}deg)`,
@@ -691,8 +740,8 @@ function maybeCreateObservation(
     pulse,
     audioWindow: snapshot.audioWindow,
     ...pulseSearchBounds(pulse, snapshot),
-    minScore: 0.5,
-    minPeakRatio: 2.2,
+    minScore: 0.45,
+    minPeakRatio: 2,
   });
 }
 
@@ -762,6 +811,20 @@ function scheduleOutputPulse(
   void schedulerRef.current
     .schedule(pulse, { hostEpochNowMs: now })
     .catch(() => undefined);
+}
+
+type EdgeReconciliationView = {
+  ranges: AcousticRange[];
+  pulseCount: number;
+  observationCount: number;
+};
+
+function countEdgeItems(store: Map<string, unknown[]>) {
+  let count = 0;
+  for (const items of store.values()) {
+    count += items.length;
+  }
+  return count;
 }
 
 function acousticRangesEqual(left: AcousticRange[], right: AcousticRange[]) {

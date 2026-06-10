@@ -54,7 +54,7 @@ const DEFAULT_MINIMUM_LEAD_SECONDS = 0.02;
 // The chirp band (17-19 kHz) is near-inaudible, but phone speakers and mics
 // both roll off hard up there. A timid gain leaves the matched filter with
 // nothing to correlate beyond arm's length, so drive the tone hard.
-const DEFAULT_PEAK_GAIN = 0.55;
+const DEFAULT_PEAK_GAIN = 0.8;
 const FLOOR_GAIN = 0.0001;
 const ATTACK_SECONDS = 0.008;
 

@@ -13,9 +13,14 @@ import {
 } from "../timing/clock-sync";
 
 const DEFAULT_LEAD_MS = 2_200;
-const DEFAULT_DURATION_MS = 48;
-const DEFAULT_FREQUENCY_HZ = 17_200;
-const DEFAULT_END_FREQUENCY_HZ = 19_200;
+// Phone speakers and mics roll off steeply above ~17 kHz; a 17.2-19.2 kHz
+// sweep arrives at the matched filter with almost no energy at arm's length.
+// Start the sweep at 16.5 kHz (still near-inaudible to most adults) and run
+// it longer: correlation gain scales with duration x bandwidth, and 80 ms at
+// 2.5 kHz of sweep is detectable across a room on real phone transducers.
+const DEFAULT_DURATION_MS = 80;
+const DEFAULT_FREQUENCY_HZ = 16_500;
+const DEFAULT_END_FREQUENCY_HZ = 19_000;
 const MIN_OBSERVATION_LEVEL = 0.012;
 const MAX_PROPAGATION_MS = 45;
 

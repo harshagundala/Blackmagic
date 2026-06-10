@@ -49,11 +49,13 @@ export function createPhoneMarkers(
       : device.coarse
         ? 0.78 + confidence * 0.12
         : 0.82;
+    // Pre-localization markers must still read against the white canvas —
+    // they are the only visible signal that the ranging process is underway.
     const opacity = device.localized
       ? 0.54 + confidence * 0.42
       : device.coarse
-        ? 0.34 + confidence * 0.28
-        : 0.24;
+        ? 0.52 + confidence * 0.28
+        : 0.42;
 
     return {
       id: device.deviceId,

@@ -99,7 +99,7 @@ export function selectUpcomingCalibrationTurn(
   const slotDurationMs = options.slotDurationMs ?? 5_000;
   const pulseOffsetMs = options.pulseOffsetMs ?? 3_400;
   const minLeadMs = options.minLeadMs ?? 2_500;
-  const pulseDurationMs = options.pulseDurationMs ?? 48;
+  const pulseDurationMs = options.pulseDurationMs ?? 80;
   if (
     slotDurationMs <= 0 ||
     pulseOffsetMs < 0 ||

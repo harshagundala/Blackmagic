@@ -79,7 +79,7 @@ describe("session registry", () => {
       sequence: 0,
       slotStartsAtHostEpochMs: 0,
       pulseEmittedAtHostEpochMs: 3_400,
-      pulseDurationMs: 48,
+      pulseDurationMs: 80,
     });
   });
 
