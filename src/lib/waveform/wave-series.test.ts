@@ -47,6 +47,21 @@ describe("wave series", () => {
     expect(window[3]).toBeCloseTo(0.6, 5);
   });
 
+  test("rebases the series when the clock domain jumps backward", () => {
+    const series = new WaveSeries();
+    // Samples stamped via the HTTP server prior...
+    series.appendSample(10_000, 0.5);
+    series.appendSample(10_020, 0.6);
+    // ...then the data-channel host sync lands and "now" moves back 2 s.
+    series.appendSample(8_000, 0.3);
+    series.appendSample(8_020, 0.4);
+
+    expect(series.latestMs()).toBe(8_020);
+    const window = series.window(8_030, 40, 2);
+    expect(window[0]).toBeCloseTo(0.3, 5);
+    expect(window[1]).toBeCloseTo(0.4, 5);
+  });
+
   test("trims history beyond capacity", () => {
     const series = new WaveSeries(1_000);
     series.appendSample(0, 0.9);

@@ -15,6 +15,13 @@ type WaveSample = {
   level: number;
 };
 
+// A device's host-epoch estimate can jump when its clock source switches
+// (HTTP server prior -> data-channel host sync). A backward jump bigger than
+// this is a timeline rebase: keep stale samples and every new sample would be
+// "non-increasing" and silently dropped until wall time caught up — a dead
+// waveform for seconds. Restart the series instead.
+const TIMELINE_REBASE_MS = 1_500;
+
 export class WaveSeries {
   private samples: WaveSample[] = [];
 
@@ -27,7 +34,11 @@ export class WaveSeries {
 
     const last = this.samples[this.samples.length - 1];
     if (last && tMs <= last.tMs) {
-      return;
+      if (last.tMs - tMs > TIMELINE_REBASE_MS) {
+        this.samples = [];
+      } else {
+        return;
+      }
     }
     this.samples.push({ tMs, level: Math.max(0, level) });
     this.trim(tMs);

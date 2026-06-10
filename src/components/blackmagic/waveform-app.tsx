@@ -10,6 +10,7 @@ import {
 import { useWebRtcRoom } from "@/hooks/use-webrtc-room";
 import { WaveSeries } from "@/lib/waveform/wave-series";
 import { projectClockModel } from "@/lib/timing/clock-sync";
+import type { RealtimeSensorFrameMessage } from "@/lib/realtime/contracts";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
 import type { DeviceTimeSyncState } from "@/lib/session/timing-health";
 
@@ -151,6 +152,10 @@ export function WaveformApp() {
       device,
     ]),
   );
+  const frameByDevice = new Map(
+    realtime.peerFrames.map((frame) => [frame.fromDeviceId, frame]),
+  );
+  const nowHostMs = hostEpochNow(sensors.snapshot);
   const isHost = roomState?.hostDeviceId === deviceId;
   const reconnecting = connection === "reconnecting";
 
@@ -217,10 +222,17 @@ export function WaveformApp() {
                     ) : null}
                   </span>
                   <span className="text-black/40">
-                    {describeDeviceSync(
-                      syncByDevice.get(device.deviceId) ?? null,
-                      device.role === "host",
-                    )}
+                    {self
+                      ? describeDeviceSync(
+                          syncByDevice.get(device.deviceId) ?? null,
+                          device.role === "host",
+                        )
+                      : describePeerLink(
+                          frameByDevice.get(device.deviceId) ?? null,
+                          syncByDevice.get(device.deviceId) ?? null,
+                          device.role === "host",
+                          nowHostMs,
+                        )}
                   </span>
                 </div>
                 <canvas
@@ -299,6 +311,31 @@ function describeDeviceSync(
     return "syncing";
   }
   return `±${Math.max(1, Math.round(sync.maxErrorMs))}ms`;
+}
+
+// Link health for a peer row: the peer's own reported mic level (is its
+// capture alive?) and how old its newest wave bucket is on this device's
+// host-clock timeline (is the timeline aligned?). "Δ" far from ~1s or
+// negative means the clocks disagree; "lvl 0" means the peer's mic is dead.
+function describePeerLink(
+  frame: RealtimeSensorFrameMessage | null,
+  sync: DeviceTimeSyncState | null,
+  isHost: boolean,
+  nowHostMs: number | null,
+) {
+  const syncLabel = describeDeviceSync(sync, isHost);
+  if (!frame) {
+    return `${syncLabel} · no stream`;
+  }
+
+  const level =
+    frame.micLevel > 0 ? frame.micLevel.toExponential(0) : "0";
+  const ageMs =
+    frame.wave && nowHostMs !== null
+      ? Math.round(nowHostMs - frame.wave.endHostEpochMs)
+      : null;
+  const age = ageMs === null ? "" : ` · Δ${ageMs}ms`;
+  return `${syncLabel} · lvl ${level}${age}`;
 }
 
 function shortId(deviceId: string) {
