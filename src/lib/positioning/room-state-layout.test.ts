@@ -61,7 +61,7 @@ describe("room state constellation", () => {
     ]);
   });
 
-  test("does not assign precise peer coordinates before range evidence exists", () => {
+  test("gives two active phones a coarse relative placement before range evidence exists", () => {
     const room = makeRoomState({
       sessionKey: "room",
       hostDeviceId: "host",
@@ -73,6 +73,8 @@ describe("room state constellation", () => {
           lastSeenAt: 10_000,
           role: "host",
           sessionKey: "room",
+          mic: "active",
+          audioContextState: "running",
         },
         {
           deviceId: "phone-a",
@@ -80,6 +82,8 @@ describe("room state constellation", () => {
           lastSeenAt: 10_000,
           role: "phone",
           sessionKey: "room",
+          mic: "active",
+          audioContextState: "running",
         },
       ],
       ranges: [],
@@ -91,6 +95,7 @@ describe("room state constellation", () => {
       expect.objectContaining({
         deviceId: "host",
         localized: false,
+        coarse: true,
         x: 0,
         y: 0,
         distanceMeters: null,
@@ -98,8 +103,9 @@ describe("room state constellation", () => {
       expect.objectContaining({
         deviceId: "phone-a",
         localized: false,
+        coarse: true,
         x: 0,
-        y: 0,
+        y: -1.4,
         distanceMeters: null,
       }),
     ]);
@@ -891,6 +897,7 @@ function constellationDevice(
     y: 0,
     distanceMeters: null,
     confidence: 0.86,
+    coarse: false,
     localized: true,
     ...overrides,
   };

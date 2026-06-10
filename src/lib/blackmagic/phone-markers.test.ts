@@ -9,6 +9,15 @@ describe("blackmagic phone markers", () => {
   });
 
   test("only exposes distance labels for localized acoustic ranges", () => {
+    const coarsePeer = {
+      deviceId: "phone-b",
+      x: 1.2,
+      y: -0.4,
+      confidence: 0.2,
+      distanceMeters: null,
+      localized: false,
+      coarse: true,
+    };
     const markers = createPhoneMarkers([
       {
         deviceId: "phone-a",
@@ -18,14 +27,7 @@ describe("blackmagic phone markers", () => {
         distanceMeters: 2.36,
         localized: true,
       },
-      {
-        deviceId: "phone-b",
-        x: 0,
-        y: 0,
-        confidence: 0.12,
-        distanceMeters: null,
-        localized: false,
-      },
+      coarsePeer,
     ]);
 
     expect(markers[0]).toEqual(
@@ -43,5 +45,7 @@ describe("blackmagic phone markers", () => {
         localized: false,
       }),
     );
+    expect(markers[1].xPx).toBeGreaterThan(0);
+    expect(markers[1].yPx).toBeLessThan(0);
   });
 });

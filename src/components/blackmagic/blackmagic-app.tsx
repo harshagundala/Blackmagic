@@ -11,6 +11,7 @@ import {
 import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
 import { createPhoneMarkers } from "@/lib/blackmagic/phone-markers";
+import { roomSoundEnergy } from "@/lib/blackmagic/room-sound-energy";
 import {
   calibrationEventKey,
   shouldFlushCalibrationEvent,
@@ -65,6 +66,7 @@ export function BlackmagicApp() {
   const observablePulseRef = useRef<AcousticPulse | null>(null);
   const publishedObservationRef = useRef<AcousticObservation | null>(null);
   const flushedCalibrationEventRef = useRef("");
+  const flushedVoiceEventRef = useRef("");
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
   const constellation = useMemo(
     () =>
@@ -210,6 +212,20 @@ export function BlackmagicApp() {
   }, [deviceId, phase, roomState, sensors]);
 
   useEffect(() => {
+    const voiceEventId = sensors.snapshot.voiceEvent?.id;
+    if (
+      phase !== "listening" ||
+      !voiceEventId ||
+      voiceEventId === flushedVoiceEventRef.current
+    ) {
+      return;
+    }
+
+    flushedVoiceEventRef.current = voiceEventId;
+    void heartbeat(snapshotRef.current, calibrationRef.current);
+  }, [heartbeat, phase, sensors.snapshot.voiceEvent?.id]);
+
+  useEffect(() => {
     const pulse = observablePulseRef.current;
     if (phase !== "listening" || !pulse) {
       return;
@@ -248,9 +264,12 @@ export function BlackmagicApp() {
   }, [flushCalibrationEvent, phase, sensors.snapshot]);
 
   const listening = phase === "listening";
-  const pulse = listening
-    ? Math.min(1, Math.max(0.12, sensors.snapshot.micLevel * 24))
-    : 0.16;
+  const soundEnergy = roomSoundEnergy({
+    localMicLevel: sensors.snapshot.micLevel,
+    devices: roomState?.devices ?? [],
+    audioSources: constellation?.audioSources ?? [],
+  });
+  const pulse = listening ? Math.min(1, Math.max(0.12, soundEnergy)) : 0.16;
   const phoneMarkers = createPhoneMarkers(
     constellation?.devices.filter(
       (device) => device.deviceId !== deviceId,
@@ -353,7 +372,9 @@ export function BlackmagicApp() {
                 className={
                   marker.localized
                     ? "block h-10 w-5 rounded-[6px] border border-black/15 bg-[linear-gradient(180deg,#06070a_0%,#061935_48%,#007aff_100%)] shadow-[0_18px_38px_rgba(0,77,190,0.24)]"
-                    : "block h-9 w-[18px] rounded-[6px] border border-black/10 bg-white/76 shadow-[0_12px_28px_rgba(0,88,180,0.10)] backdrop-blur-md"
+                    : marker.coarse
+                      ? "block h-9 w-[18px] rounded-[6px] border border-[#007aff]/20 bg-white/80 shadow-[0_14px_30px_rgba(0,92,210,0.16)] backdrop-blur-md"
+                      : "block h-9 w-[18px] rounded-[6px] border border-black/10 bg-white/76 shadow-[0_12px_28px_rgba(0,88,180,0.10)] backdrop-blur-md"
                 }
                 style={{
                   transform: `rotate(${marker.rotationDeg}deg)`,

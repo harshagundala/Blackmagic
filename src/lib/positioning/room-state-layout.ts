@@ -15,6 +15,7 @@ export type RoomConstellationDevice = {
   y: number;
   distanceMeters: number | null;
   confidence: number;
+  coarse: boolean;
   localized: boolean;
 };
 
@@ -73,12 +74,13 @@ export function estimateRoomConstellation(
     previousPoints: options.previousCanonicalPoints ?? null,
   });
   const localizedDeviceIds = localizedDevicesFor(ranges);
+  const coarseDeviceIds = coarseTwoDeviceIdsFor(room, ranges);
   const honestLayout = {
     ...layout,
     points: Object.fromEntries(
       participantIds.map((deviceId) => [
         deviceId,
-        localizedDeviceIds.has(deviceId)
+        localizedDeviceIds.has(deviceId) || coarseDeviceIds.has(deviceId)
           ? (layout.points[deviceId] ?? { x: 0, y: 0 })
           : { x: 0, y: 0 },
       ]),
@@ -95,6 +97,7 @@ export function estimateRoomConstellation(
       distanceAnchorDeviceId,
     );
     const localized = localizedDeviceIds.has(device.deviceId);
+    const coarse = !localized && coarseDeviceIds.has(device.deviceId);
     return {
       deviceId: device.deviceId,
       role: device.role,
@@ -102,7 +105,12 @@ export function estimateRoomConstellation(
       y: point.y,
       distanceMeters: distanceRange?.meters ?? null,
       confidence:
-        localized && confidenceRange ? rangeLayoutWeight(confidenceRange) : 0.12,
+        localized && confidenceRange
+          ? rangeLayoutWeight(confidenceRange)
+          : coarse
+            ? 0.22
+            : 0.12,
+      coarse,
       localized,
     };
   });
@@ -131,6 +139,26 @@ function localizedDevicesFor(ranges: AcousticRange[]) {
     ids.add(range.to);
   }
   return ids;
+}
+
+function coarseTwoDeviceIdsFor(room: RoomState, ranges: AcousticRange[]) {
+  if (room.devices.length !== 2 || ranges.length > 0) {
+    return new Set<string>();
+  }
+
+  if (!room.devices.every(isCoarseLinkReadyDevice)) {
+    return new Set<string>();
+  }
+
+  return new Set(room.devices.map((device) => device.deviceId));
+}
+
+function isCoarseLinkReadyDevice(device: RoomState["devices"][number]) {
+  return (
+    device.mic === "active" ||
+    device.audioContextState === "running" ||
+    (typeof device.micLevel === "number" && device.micLevel > 0)
+  );
 }
 
 const LAYOUT_STRESS_TRUST_THRESHOLD_METERS = 0.35;

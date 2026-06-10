@@ -4,6 +4,7 @@ export type PhoneMarkerDevice = {
   y: number;
   distanceMeters: number | null;
   confidence: number;
+  coarse?: boolean;
   localized: boolean;
 };
 
@@ -15,6 +16,7 @@ export type PhoneMarker = {
   opacity: number;
   rotationDeg: number;
   distanceLabel: string | null;
+  coarse: boolean;
   localized: boolean;
 };
 
@@ -35,24 +37,36 @@ export function createPhoneMarkers(
   return devices.map((device, index) => {
     const confidence = clamp(device.confidence, 0, 1);
     const parked = parkedPeerPosition(index);
-    const xPx = device.localized
+    const positioned = device.localized || device.coarse === true;
+    const xPx = positioned
       ? clamp(device.x * scalePxPerMeter, -maxX, maxX)
       : parked.x;
-    const yPx = device.localized
+    const yPx = positioned
       ? clamp(device.y * scalePxPerMeter, -maxY, maxY)
       : parked.y;
+    const scale = device.localized
+      ? 0.9 + confidence * 0.18
+      : device.coarse
+        ? 0.78 + confidence * 0.12
+        : 0.82;
+    const opacity = device.localized
+      ? 0.54 + confidence * 0.42
+      : device.coarse
+        ? 0.34 + confidence * 0.28
+        : 0.24;
 
     return {
       id: device.deviceId,
       xPx: round(xPx, 1),
       yPx: round(yPx, 1),
-      scale: round(device.localized ? 0.9 + confidence * 0.18 : 0.82, 3),
-      opacity: round(device.localized ? 0.54 + confidence * 0.42 : 0.24, 3),
-      rotationDeg: round(device.localized ? clamp(device.x * 3, -8, 8) : 0, 1),
+      scale: round(scale, 3),
+      opacity: round(opacity, 3),
+      rotationDeg: round(positioned ? clamp(device.x * 3, -8, 8) : 0, 1),
       distanceLabel:
         device.localized && device.distanceMeters !== null
           ? formatDistanceLabel(device.distanceMeters)
           : null,
+      coarse: device.coarse === true,
       localized: device.localized,
     };
   });
