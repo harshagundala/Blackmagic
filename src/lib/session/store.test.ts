@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   createMemorySessionStore,
   createRedisSessionStore,
+  createResilientSessionStore,
   createSessionStoreFromEnvironment,
   type RedisSessionClient,
 } from "./store";
@@ -218,6 +219,29 @@ describe("session stores", () => {
       }).kind,
     ).toBe("redis");
   });
+
+  test("resilient store falls back to memory when redis is quota exhausted", async () => {
+    const store = createResilientSessionStore(
+      createRedisSessionStore(new FailingRedisSessionClient()),
+      createMemorySessionStore(),
+    );
+
+    await expect(
+      store.heartbeat("https://blackmagic.app/fallback", "host", {
+        mic: "active",
+        sampleRate: 48_000,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        hostDeviceId: "host",
+        devices: [expect.objectContaining({ deviceId: "host" })],
+      }),
+    );
+    expect(store.kind).toBe("memory");
+    await expect(
+      store.claim("https://blackmagic.app/fallback", "phone-a"),
+    ).resolves.toEqual(expect.objectContaining({ role: "phone" }));
+  });
 });
 
 function audioFrame() {
@@ -318,5 +342,51 @@ class FakeRedisSessionClient implements RedisSessionClient {
 
   async expire() {
     return 1;
+  }
+}
+
+class FailingRedisSessionClient implements RedisSessionClient {
+  private fail(): never {
+    throw new Error("ERR max requests limit exceeded. Limit: 500000");
+  }
+
+  async get() {
+    return this.fail();
+  }
+
+  async set() {
+    return this.fail();
+  }
+
+  async setnx() {
+    return this.fail();
+  }
+
+  async incr() {
+    return this.fail();
+  }
+
+  async del() {
+    return this.fail();
+  }
+
+  async hget() {
+    return this.fail();
+  }
+
+  async hset() {
+    return this.fail();
+  }
+
+  async hgetall() {
+    return this.fail();
+  }
+
+  async hdel() {
+    return this.fail();
+  }
+
+  async expire() {
+    return this.fail();
   }
 }

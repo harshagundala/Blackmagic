@@ -1,4 +1,8 @@
-import { redisRestCredentials, type SessionEnvironment } from "./store";
+import {
+  redisRestCredentials,
+  type SessionEnvironment,
+  type SessionStore,
+} from "./store";
 
 export type SessionStoreReadiness = {
   durable: boolean;
@@ -16,13 +20,25 @@ const redisEnvKeys = [
 export function sessionStoreReadiness({
   env = process.env,
   nodeEnv = process.env.NODE_ENV,
+  runtimeKind,
 }: {
   env?: SessionEnvironment;
   nodeEnv?: string;
+  runtimeKind?: SessionStore["kind"];
 } = {}): SessionStoreReadiness {
   const credentials = redisRestCredentials(env);
   const missing = redisEnvKeys.filter((key) => !env[key]);
   if (credentials) {
+    if (runtimeKind === "memory") {
+      return {
+        durable: false,
+        kind: "memory",
+        status: "degraded",
+        missing: [],
+        detail: "Redis is configured but unavailable; using process-local memory.",
+      };
+    }
+
     return {
       durable: true,
       kind: "redis",

@@ -53,6 +53,25 @@ describe("session store readiness", () => {
     });
   });
 
+  test("reports degraded readiness when Redis is configured but unavailable at runtime", () => {
+    expect(
+      sessionStoreReadiness({
+        env: {
+          KV_REST_API_URL: "https://example.upstash.io",
+          KV_REST_API_TOKEN: "secret",
+        },
+        nodeEnv: "production",
+        runtimeKind: "memory",
+      }),
+    ).toEqual({
+      durable: false,
+      kind: "memory",
+      status: "degraded",
+      missing: [],
+      detail: "Redis is configured but unavailable; using process-local memory.",
+    });
+  });
+
   test("keeps local memory fallback explicit in development", () => {
     expect(
       sessionStoreReadiness({

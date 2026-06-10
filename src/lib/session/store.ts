@@ -171,18 +171,72 @@ export function createRedisSessionStore(
   } satisfies SessionStore;
 }
 
+export function createResilientSessionStore(
+  primary: SessionStore,
+  fallback: SessionStore,
+) {
+  let usingFallback = false;
+
+  async function run<T>(
+    primaryOperation: () => Promise<T>,
+    fallbackOperation: () => Promise<T>,
+  ) {
+    if (usingFallback) {
+      return fallbackOperation();
+    }
+
+    try {
+      return await primaryOperation();
+    } catch {
+      usingFallback = true;
+      return fallbackOperation();
+    }
+  }
+
+  return {
+    get kind() {
+      return usingFallback ? fallback.kind : primary.kind;
+    },
+    claim(url: string, deviceId: string) {
+      return run(
+        () => primary.claim(url, deviceId),
+        () => fallback.claim(url, deviceId),
+      );
+    },
+    heartbeat(
+      url: string,
+      deviceId: string,
+      heartbeat: DeviceHeartbeat = {},
+    ) {
+      return run(
+        () => primary.heartbeat(url, deviceId, heartbeat),
+        () => fallback.heartbeat(url, deviceId, heartbeat),
+      );
+    },
+    state(url: string) {
+      return run(
+        () => primary.state(url),
+        () => fallback.state(url),
+      );
+    },
+  } satisfies SessionStore;
+}
+
 export function createSessionStoreFromEnvironment(
   env: SessionEnvironment = process.env,
   options: SessionStoreOptions = {},
 ): SessionStore {
   const credentials = redisRestCredentials(env);
   if (credentials) {
-    return createRedisSessionStore(
-      createUpstashRestRedisClient({
-        url: credentials.url,
-        token: credentials.token,
-      }),
-      options,
+    return createResilientSessionStore(
+      createRedisSessionStore(
+        createUpstashRestRedisClient({
+          url: credentials.url,
+          token: credentials.token,
+        }),
+        options,
+      ),
+      createMemorySessionStore(options),
     );
   }
 
