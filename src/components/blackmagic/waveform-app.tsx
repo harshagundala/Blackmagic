@@ -191,6 +191,11 @@ export function WaveformApp() {
         </span>
         <span className="flex flex-col items-end gap-1 text-right">
           <span>{isHost ? "hosting" : describeOwnSync(sensors.snapshot)}</span>
+          {iosNonSafariBrowser() ? (
+            <span className="text-[#b45309]">
+              {`ios ${iosNonSafariBrowser()} limits mic capture — use safari`}
+            </span>
+          ) : null}
           {sensors.snapshot.mic === "blocked" ? (
             <span className="text-[#b45309]">mic off — tap to enable</span>
           ) : sensors.snapshot.trackMuted ? (
@@ -366,6 +371,29 @@ function captureDiagnostics(snapshot: SensorSnapshot) {
     snapshot.captureRecoveries > 0 ? ` · fix ${snapshot.captureRecoveries}` : "";
   const muted = snapshot.trackMuted ? " · muted" : "";
   return `${rate} ${contextState} · ${mode} · lvl ${level}${recoveries}${muted}`;
+}
+
+// Chrome/Firefox/Edge on iOS are WKWebView shells where getUserMedia and
+// WebRTC support is limited and microphone capture is unreliable; only
+// Safari runs the full WebKit media stack on iPhone.
+function iosNonSafariBrowser(): string | null {
+  if (typeof navigator === "undefined") {
+    return null;
+  }
+  const ua = navigator.userAgent;
+  if (!/iPhone|iPad|iPod/.test(ua)) {
+    return null;
+  }
+  if (/CriOS/.test(ua)) {
+    return "chrome";
+  }
+  if (/FxiOS/.test(ua)) {
+    return "firefox";
+  }
+  if (/EdgiOS/.test(ua)) {
+    return "edge";
+  }
+  return null;
 }
 
 // Cycle for the capture experiment: raw -> processed -> video-assisted.
