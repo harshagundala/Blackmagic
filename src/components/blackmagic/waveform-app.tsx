@@ -184,6 +184,8 @@ export function WaveformApp() {
           <span>{isHost ? "hosting" : describeOwnSync(sensors.snapshot)}</span>
           {sensors.snapshot.mic === "blocked" ? (
             <span className="text-[#b45309]">mic off — tap to enable</span>
+          ) : sensors.snapshot.trackMuted ? (
+            <span className="text-[#b45309]">mic muted by ios</span>
           ) : sensors.snapshot.audioContextState &&
             sensors.snapshot.audioContextState !== "running" ? (
             <span className="text-[#b45309]">audio paused — tap</span>
@@ -221,6 +223,11 @@ export function WaveformApp() {
                   className="block h-[72px] w-full"
                   ref={registerCanvas(device.deviceId)}
                 />
+                {self ? (
+                  <div className="px-4 pb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-black/30">
+                    {captureDiagnostics(sensors.snapshot)}
+                  </div>
+                ) : null}
               </section>
             );
           })}
@@ -283,6 +290,30 @@ function describeDeviceSync(
 
 function shortId(deviceId: string) {
   return deviceId.slice(0, 4);
+}
+
+// The raw truth of the capture pipeline, on screen, so a silent waveform is
+// diagnosable from the phone itself: context rate and state, which capture
+// path is live, the actual RMS the analyser reads, recovery attempts, and
+// whether iOS has the track muted.
+function captureDiagnostics(snapshot: SensorSnapshot) {
+  const rate = snapshot.sampleRate
+    ? `${(snapshot.sampleRate / 1_000).toFixed(1)}k`
+    : "—";
+  const contextState = snapshot.audioContextState ?? "—";
+  const mode = snapshot.captureProcessing
+    ? snapshot.captureProcessing.rawCaptureVerified
+      ? "raw"
+      : snapshot.captureMode === "processed"
+        ? "processed"
+        : "filtered"
+    : (snapshot.captureMode ?? "—");
+  const level =
+    snapshot.micLevel > 0 ? snapshot.micLevel.toExponential(1) : "0";
+  const recoveries =
+    snapshot.captureRecoveries > 0 ? ` · fix ${snapshot.captureRecoveries}` : "";
+  const muted = snapshot.trackMuted ? " · muted" : "";
+  return `${rate} ${contextState} · ${mode} · lvl ${level}${recoveries}${muted}`;
 }
 
 function hostEpochNow(snapshot: SensorSnapshot) {

@@ -80,7 +80,17 @@ export type SensorSnapshot = MotionSensorMetadata & {
   clock: ClockModel | null;
   captureProcessing: CaptureProcessingReport | null;
   audioContextState: AudioContextState | null;
+  // iOS marks the capture track muted during interruptions (Siri, calls,
+  // route changes); a muted track delivers silence while the system mic
+  // indicator can stay on.
+  trackMuted: boolean | null;
+  // How many times the silent-capture watchdog has rebuilt or re-acquired
+  // the pipeline this session, and the constraint mode currently live.
+  captureRecoveries: number;
+  captureMode: CaptureConstraintMode | null;
 };
+
+export type CaptureConstraintMode = "raw" | "processed";
 
 const idleSnapshot: SensorSnapshot = {
   ...idleMotionMetadata,
@@ -109,17 +119,27 @@ const idleSnapshot: SensorSnapshot = {
   clock: null,
   captureProcessing: null,
   audioContextState: null,
+  trackMuted: null,
+  captureRecoveries: 0,
+  captureMode: null,
 };
 
 const CLOCK_SYNC_INTERVAL_MS = 1_000;
 const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
-// A live microphone never reads as exact digital silence for seconds — even
-// a quiet room has a noise floor. Sustained zeros from a "running" context
-// mean the capture graph is broken (iOS sample-rate mismatch, or a dead
-// route after an interruption), so it gets rebuilt on a fresh context.
+// A live microphone never reads near digital silence for seconds — even a
+// quiet room has a noise floor well above 1e-4 RMS. Sustained near-zeros
+// from a "running" context mean the capture pipeline is broken: iOS
+// sample-rate mismatch, a track muted by an interruption, or WebKit's
+// "capture failure" states where the track silently never recovers. The
+// recovery ladder follows what production WebRTC SDKs ship for iOS Safari:
+// rebuild the graph on a fresh context, then stop the tracks and call
+// getUserMedia again (no re-prompt), then fall back to processed (default
+// constraint) capture, which uses a different iOS capture path.
+const SILENT_CAPTURE_RMS = 1e-5;
+const HEALTHY_CAPTURE_RMS = 1e-4;
 const SILENT_CAPTURE_REBUILD_MS = 3_000;
-const MAX_CAPTURE_REBUILDS = 3;
+const MAX_CAPTURE_RECOVERIES = 5;
 // Envelope series shared with peers: 25 ms buckets, 16 per chunk (400 ms),
 // sent every sensor frame (~220 ms) so one dropped frame costs nothing.
 const WAVE_HISTORY_MS = 8_000;
@@ -168,6 +188,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const captureSilentSincePerfMsRef = useRef<number | null>(null);
   const captureRebuildCountRef = useRef(0);
   const captureRebuildInFlightRef = useRef(false);
+  const captureModeRef = useRef<CaptureConstraintMode>("raw");
   const voiceGateRef = useRef<VoiceActivityGate>({
     open: false,
     lastEventHostEpochMs: null,
@@ -310,13 +331,9 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     // consumes the gesture's user activation, and getUserMedia called without
     // activation is rejected WITHOUT ever showing a prompt. Motion permission
     // (which also consumes an activation) is requested on a later tap instead.
-    const mediaStreamPromise = navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    });
+    const mediaStreamPromise = navigator.mediaDevices.getUserMedia(
+      captureConstraintsFor(captureModeRef.current),
+    );
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     // Created synchronously inside the user gesture so iOS lets it run.
@@ -327,27 +344,15 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     try {
       const stream = await mediaStreamPromise;
       mediaStreamRef.current = stream;
-
-      // Verify what the browser actually granted: iOS Safari treats audio
-      // constraints as best-effort and active voice processing attenuates the
-      // near-ultrasound chirp band.
       const audioTrack = stream.getAudioTracks()[0] ?? null;
       const trackSettings = audioTrack?.getSettings?.() ?? null;
-      const captureProcessing: CaptureProcessingReport = {
-        echoCancellation: booleanOrNull(trackSettings?.echoCancellation),
-        noiseSuppression: booleanOrNull(trackSettings?.noiseSuppression),
-        autoGainControl: booleanOrNull(trackSettings?.autoGainControl),
-        rawCaptureVerified:
-          trackSettings?.echoCancellation === false &&
-          trackSettings?.noiseSuppression === false &&
-          trackSettings?.autoGainControl === false,
-      };
 
       // iOS WebKit can run the context at a different hardware rate than the
       // microphone capture route (44.1 kHz context vs 48 kHz mic). A
       // mediastream source with mismatched rates produces silence — the mic
       // looks granted but every sample is zero. Recreate the context at the
-      // track's actual rate when they disagree.
+      // track's actual rate when reported (iOS usually does not report it;
+      // the silent-capture watchdog covers that case by observation).
       const trackSampleRate = finitePositiveNumber(trackSettings?.sampleRate);
       if (
         trackSampleRate !== null &&
@@ -361,7 +366,9 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       await resumeAudioContextIfNeeded(audioContext);
       setSnapshot((current) => ({
         ...current,
-        captureProcessing,
+        captureProcessing: captureProcessingReportFor(trackSettings),
+        captureMode: captureModeRef.current,
+        trackMuted: audioTrack ? audioTrack.muted : null,
         audioContextState: audioContext.state,
       }));
       attachCaptureLifecycle(audioContext, audioTrack);
@@ -614,7 +621,17 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     micLevel: number,
     audioContext: AudioContext,
   ) {
-    if ((audioContext.state as AudioContextRunState) !== "running" || micLevel > 0) {
+    if (micLevel >= HEALTHY_CAPTURE_RMS) {
+      // Real signal observed: the pipeline works, so future interruptions
+      // get a fresh recovery budget.
+      captureRebuildCountRef.current = 0;
+      captureSilentSincePerfMsRef.current = null;
+      return;
+    }
+    if (
+      (audioContext.state as AudioContextRunState) !== "running" ||
+      micLevel > SILENT_CAPTURE_RMS
+    ) {
       captureSilentSincePerfMsRef.current = null;
       return;
     }
@@ -628,13 +645,21 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     captureSilentSincePerfMsRef.current = null;
     if (
       captureRebuildInFlightRef.current ||
-      captureRebuildCountRef.current >= MAX_CAPTURE_REBUILDS
+      captureRebuildCountRef.current >= MAX_CAPTURE_RECOVERIES
     ) {
       return;
     }
     captureRebuildCountRef.current += 1;
+    const attempt = captureRebuildCountRef.current;
     captureRebuildInFlightRef.current = true;
-    void rebuildCaptureGraph().finally(() => {
+    // Recovery ladder: cheapest first. 1) fresh context, same stream;
+    // 2) fresh stream too; 3+) fresh stream with default (processed)
+    // constraints — a different iOS capture path entirely.
+    const recovery =
+      attempt <= 1
+        ? rebuildCaptureGraph()
+        : reacquireCaptureStream(attempt >= 3 ? "processed" : captureModeRef.current);
+    void recovery.finally(() => {
       captureRebuildInFlightRef.current = false;
     });
   }
@@ -659,6 +684,48 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       ...current,
       sampleRate: audioContext.sampleRate,
       audioContextState: audioContext.state,
+      captureRecoveries: captureRebuildCountRef.current,
+    }));
+    void previousContext?.close().catch(() => undefined);
+  }
+
+  // The production-grade iOS recovery: stop the silent tracks and ask for the
+  // microphone again (permission persists, so no prompt), then rebuild the
+  // whole graph on a context created AFTER the stream — the ordering WebKit
+  // handles correctly.
+  async function reacquireCaptureStream(mode: CaptureConstraintMode) {
+    captureModeRef.current = mode;
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+
+    const stream = await navigator.mediaDevices
+      .getUserMedia(captureConstraintsFor(mode))
+      .catch(() => null);
+    if (!stream) {
+      setSnapshot((current) => ({ ...current, mic: "blocked" }));
+      return;
+    }
+
+    mediaStreamRef.current = stream;
+    const audioTrack = stream.getAudioTracks()[0] ?? null;
+    const previousContext = audioContextRef.current;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const audioContext = new AudioContextClass();
+    audioContextRef.current = audioContext;
+    await resumeAudioContextIfNeeded(audioContext);
+    attachCaptureLifecycle(audioContext, audioTrack);
+    await wireCaptureGraph(audioContext, stream);
+    setSnapshot((current) => ({
+      ...current,
+      mic: "active",
+      sampleRate: audioContext.sampleRate,
+      audioContextState: audioContext.state,
+      captureProcessing: captureProcessingReportFor(
+        audioTrack?.getSettings?.() ?? null,
+      ),
+      captureMode: mode,
+      trackMuted: audioTrack ? audioTrack.muted : null,
+      captureRecoveries: captureRebuildCountRef.current,
     }));
     void previousContext?.close().catch(() => undefined);
   }
@@ -713,6 +780,17 @@ function attachAudioLifecycle({
     setSnapshot((current) => ({ ...current, mic: "blocked" }));
   };
 
+  // iOS flags the track muted during interruptions (Siri, calls, route
+  // changes) while the system mic indicator can stay lit; surfacing it lets
+  // the UI explain the silence and the watchdog recover from it.
+  const onTrackMute = () => {
+    setSnapshot((current) => ({ ...current, trackMuted: true }));
+  };
+  const onTrackUnmute = () => {
+    setSnapshot((current) => ({ ...current, trackMuted: false }));
+    resyncClock();
+  };
+
   // Backstop for contexts that ended up suspended outside a gesture (e.g.
   // the sample-rate-mismatch recreation): any subsequent tap revives them.
   const onPointerDown = () => {
@@ -723,6 +801,8 @@ function attachAudioLifecycle({
   document.addEventListener("visibilitychange", onVisibilityChange);
   document.addEventListener("pointerdown", onPointerDown);
   audioTrack?.addEventListener("ended", onTrackEnded);
+  audioTrack?.addEventListener("mute", onTrackMute);
+  audioTrack?.addEventListener("unmute", onTrackUnmute);
   void requestWakeLock();
 
   return () => {
@@ -730,6 +810,43 @@ function attachAudioLifecycle({
     document.removeEventListener("visibilitychange", onVisibilityChange);
     document.removeEventListener("pointerdown", onPointerDown);
     audioTrack?.removeEventListener("ended", onTrackEnded);
+    audioTrack?.removeEventListener("mute", onTrackMute);
+    audioTrack?.removeEventListener("unmute", onTrackUnmute);
+  };
+}
+
+function captureConstraintsFor(
+  mode: CaptureConstraintMode,
+): MediaStreamConstraints {
+  // "raw" disables voice processing for acoustic work; "processed" is the
+  // browser default path, which on iOS is a different (and sometimes the
+  // only working) capture pipeline.
+  return {
+    audio:
+      mode === "raw"
+        ? {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          }
+        : true,
+  };
+}
+
+// Verify what the browser actually granted: iOS Safari treats audio
+// constraints as best-effort and active voice processing attenuates the
+// near-ultrasound chirp band.
+function captureProcessingReportFor(
+  trackSettings: MediaTrackSettings | null,
+): CaptureProcessingReport {
+  return {
+    echoCancellation: booleanOrNull(trackSettings?.echoCancellation),
+    noiseSuppression: booleanOrNull(trackSettings?.noiseSuppression),
+    autoGainControl: booleanOrNull(trackSettings?.autoGainControl),
+    rawCaptureVerified:
+      trackSettings?.echoCancellation === false &&
+      trackSettings?.noiseSuppression === false &&
+      trackSettings?.autoGainControl === false,
   };
 }
 
