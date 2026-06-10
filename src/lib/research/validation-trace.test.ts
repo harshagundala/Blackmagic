@@ -370,6 +370,84 @@ describe("validation trace", () => {
     expect(evidence.summary.devices).toHaveLength(3);
   });
 
+  test("adds prioritized next actions when trial evidence fails", () => {
+    const evidence = createPhysicalRoomTrialEvidence({
+      baseUrl: "https://blackmagic-rouge.vercel.app",
+      generatedAtMs: 8_000,
+      requiredReadyStreakMs: 5_000,
+      sessionUrl: "https://blackmagic-rouge.vercel.app/lab",
+      snapshots: [
+        snapshot(
+          1_000,
+          "warming",
+          [
+            "insufficient_devices",
+            "insufficient_acoustic_ranges",
+            "insufficient_audio_capture",
+            "insufficient_audio_timestamps",
+            "no_tdoa_source",
+          ],
+          {
+            deviceCount: 2,
+            localizedDeviceCount: 1,
+            rangeCount: 0,
+            audioCaptureReadyDeviceCount: 1,
+            audioTimestampReadyDeviceCount: 1,
+            tdoaSourceCount: 0,
+          },
+          [
+            device("host", { role: "host", localized: true }),
+            device("phone-a", {
+              audioCaptureReady: false,
+              audioTimestampReady: false,
+              blockers: ["audio_capture_missing", "audio_timestamp_missing"],
+            }),
+          ],
+        ),
+      ],
+    });
+
+    expect(evidence.passed).toBe(false);
+    expect(evidence.failedGateIds).toEqual([
+      "sustained_ready",
+      "minimum_devices",
+      "localized_devices",
+      "acoustic_ranges",
+      "audio_capture",
+      "audio_timestamps",
+      "tdoa_source",
+    ]);
+    expect(evidence.nextActions).toEqual([
+      expect.objectContaining({
+        id: "connect_more_phones",
+        gates: ["minimum_devices"],
+        deviceIds: [],
+      }),
+      expect.objectContaining({
+        id: "enable_microphone_capture",
+        gates: ["audio_capture"],
+        deviceIds: ["phone-a"],
+      }),
+      expect.objectContaining({
+        id: "stabilize_audio_timestamps",
+        gates: ["audio_timestamps"],
+        deviceIds: ["phone-a"],
+      }),
+      expect.objectContaining({
+        id: "complete_acoustic_calibration",
+        gates: ["localized_devices", "acoustic_ranges"],
+      }),
+      expect.objectContaining({
+        id: "capture_spoken_source",
+        gates: ["tdoa_source"],
+      }),
+      expect.objectContaining({
+        id: "hold_ready_state",
+        gates: ["sustained_ready"],
+      }),
+    ]);
+  });
+
   test("writes an evidence packet from an existing NDJSON trace", () => {
     const directory = mkdtempSync(join(tmpdir(), "blackmagic-trace-"));
     const tracePath = join(directory, "trace.ndjson");
@@ -451,6 +529,61 @@ describe("validation trace", () => {
         "phone-a",
         "phone-b",
       ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("writes next actions for a failed existing NDJSON trace", () => {
+    const directory = mkdtempSync(join(tmpdir(), "blackmagic-trace-failed-"));
+    const tracePath = join(directory, "trace.ndjson");
+    const evidencePath = join(directory, "evidence.json");
+    const snapshots = [
+      snapshot(
+        1_000,
+        "warming",
+        ["insufficient_devices", "insufficient_acoustic_ranges"],
+        {
+          deviceCount: 1,
+          localizedDeviceCount: 0,
+          rangeCount: 0,
+        },
+        [device("host", { role: "host" })],
+      ),
+    ];
+
+    writeFileSync(
+      tracePath,
+      snapshots.map((item) => JSON.stringify(item)).join("\n") + "\n",
+    );
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "scripts/blackmagic-validation-trace.mjs",
+          "https://blackmagic-rouge.vercel.app/lab",
+          "--from",
+          tracePath,
+          "--evidence-out",
+          evidencePath,
+        ],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status).toBe(2);
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+        failedGateIds: string[];
+        nextActions: Array<{ id: string }>;
+      };
+
+      expect(evidence.failedGateIds).toContain("minimum_devices");
+      expect(evidence.nextActions.map((action) => action.id)).toContain(
+        "connect_more_phones",
+      );
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

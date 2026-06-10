@@ -81,6 +81,16 @@ export type PhysicalRoomTrialEvidenceGate = {
   required: number;
 };
 
+export type PhysicalRoomTrialEvidenceNextAction = {
+  id: string;
+  priority: number;
+  title: string;
+  detail: string;
+  gates: PhysicalRoomTrialEvidenceGateId[];
+  blockers: string[];
+  deviceIds: string[];
+};
+
 export type PhysicalRoomTrialEvidence = {
   protocolVersion: 1;
   generatedAtMs: number;
@@ -96,6 +106,8 @@ export type PhysicalRoomTrialEvidence = {
     sampleCount: number;
   };
   gates: PhysicalRoomTrialEvidenceGate[];
+  failedGateIds: PhysicalRoomTrialEvidenceGateId[];
+  nextActions: PhysicalRoomTrialEvidenceNextAction[];
   summary: PhysicalRoomValidationTraceSummary;
   finalSnapshot: {
     capturedAtMs: number | null;
@@ -176,6 +188,9 @@ export function createPhysicalRoomTrialEvidence({
       required: 1,
     },
   ];
+  const failedGateIds = gates
+    .filter((gate) => !gate.passed)
+    .map((gate) => gate.id);
 
   return {
     protocolVersion: 1,
@@ -192,6 +207,11 @@ export function createPhysicalRoomTrialEvidence({
       sampleCount: summary.sampleCount,
     },
     gates,
+    failedGateIds,
+    nextActions: createNextActions({
+      failedGateIds,
+      summary,
+    }),
     summary,
     finalSnapshot: {
       capturedAtMs: final?.capturedAtMs ?? null,
@@ -203,6 +223,147 @@ export function createPhysicalRoomTrialEvidence({
       devices: final ? [...(final.validation.devices ?? [])] : [],
     },
   };
+}
+
+function createNextActions({
+  failedGateIds,
+  summary,
+}: {
+  failedGateIds: PhysicalRoomTrialEvidenceGateId[];
+  summary: PhysicalRoomValidationTraceSummary;
+}): PhysicalRoomTrialEvidenceNextAction[] {
+  const failed = new Set(failedGateIds);
+  const actions: PhysicalRoomTrialEvidenceNextAction[] = [];
+  const blockerSet = new Set([
+    ...summary.finalBlockers,
+    ...summary.observedBlockers,
+  ]);
+
+  if (failed.has("minimum_devices")) {
+    actions.push({
+      id: "connect_more_phones",
+      priority: 10,
+      title: "Connect at least three phones to this session URL.",
+      detail: `Only ${summary.peakDeviceCount} phone(s) appeared in the trace; localization needs at least three active devices.`,
+      gates: ["minimum_devices"],
+      blockers: relatedBlockers(blockerSet, ["insufficient_devices"]),
+      deviceIds: [],
+    });
+  }
+
+  if (failed.has("audio_capture")) {
+    const deviceIds = devicesMatching(summary, (device) => {
+      return !device.finalAudioCaptureReady;
+    });
+    actions.push({
+      id: "enable_microphone_capture",
+      priority: 20,
+      title: "Get every phone to verified raw microphone capture.",
+      detail:
+        "Tap the page on each phone, allow microphone access, keep Safari in the foreground, and confirm no device reports filtered or missing capture.",
+      gates: ["audio_capture"],
+      blockers: relatedBlockers(blockerSet, [
+        "insufficient_audio_capture",
+        "audio_capture_missing",
+        "audio_capture_unverified",
+        "filtered_audio_capture",
+        "audio_context_not_running",
+        "mic_not_active",
+      ]),
+      deviceIds,
+    });
+  }
+
+  if (failed.has("audio_timestamps")) {
+    const deviceIds = devicesMatching(summary, (device) => {
+      return !device.finalAudioTimestampReady;
+    });
+    actions.push({
+      id: "stabilize_audio_timestamps",
+      priority: 30,
+      title: "Wait for precise audio timestamps on every phone.",
+      detail:
+        "Keep phones awake and still while clock sync, audio-frame anchors, and timing confidence settle before judging localization.",
+      gates: ["audio_timestamps"],
+      blockers: relatedBlockers(blockerSet, [
+        "insufficient_audio_timestamps",
+        "audio_timestamp_missing",
+        "audio_timestamp_error_high",
+        "audio_timestamp_confidence_low",
+        "audio_timestamps_not_ready",
+        "clock_not_ready",
+      ]),
+      deviceIds,
+    });
+  }
+
+  const needsCalibration =
+    failed.has("localized_devices") || failed.has("acoustic_ranges");
+  if (needsCalibration) {
+    actions.push({
+      id: "complete_acoustic_calibration",
+      priority: 40,
+      title: "Let reciprocal chirp calibration finish with phones still.",
+      detail:
+        "Keep the devices unmuted and separated in the room until the trace shows enough sample-anchored acoustic ranges and localized phones.",
+      gates: failedGateIds.filter(
+        (gate) => gate === "localized_devices" || gate === "acoustic_ranges",
+      ),
+      blockers: relatedBlockers(blockerSet, [
+        "insufficient_acoustic_ranges",
+        "insufficient_localized_devices",
+        "layout_stress_high",
+        "not_localized",
+      ]),
+      deviceIds: devicesMatching(summary, (device) => !device.finalLocalized),
+    });
+  }
+
+  if (failed.has("tdoa_source")) {
+    actions.push({
+      id: "capture_spoken_source",
+      priority: 50,
+      title: "Capture one clear spoken source after phones are localized.",
+      detail:
+        "Have one person speak for a few seconds near the phones so the TDOA fitter can compare arrival times across at least three devices.",
+      gates: ["tdoa_source"],
+      blockers: relatedBlockers(blockerSet, [
+        "insufficient_tdoa_devices",
+        "no_tdoa_source",
+        "source_residual_high",
+        "source_confidence_low",
+      ]),
+      deviceIds: [],
+    });
+  }
+
+  if (failed.has("sustained_ready")) {
+    actions.push({
+      id: "hold_ready_state",
+      priority: 60,
+      title: "Keep the room ready for the required sustained window.",
+      detail: `The trace only held ready for ${summary.readyStreakMs} ms; keep all phones open until the sustained-ready gate is satisfied.`,
+      gates: ["sustained_ready"],
+      blockers: [...summary.finalBlockers],
+      deviceIds: [],
+    });
+  }
+
+  return actions.sort((left, right) => left.priority - right.priority);
+}
+
+function relatedBlockers(blockers: Set<string>, candidates: string[]) {
+  return candidates.filter((blocker) => blockers.has(blocker));
+}
+
+function devicesMatching(
+  summary: PhysicalRoomValidationTraceSummary,
+  predicate: (device: PhysicalRoomValidationDeviceTraceSummary) => boolean,
+) {
+  return summary.devices
+    .filter(predicate)
+    .map((device) => device.deviceId)
+    .sort();
 }
 
 export function summarizePhysicalRoomValidationTrace(
