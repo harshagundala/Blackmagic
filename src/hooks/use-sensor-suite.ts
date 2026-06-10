@@ -132,7 +132,7 @@ type CaptureGraph = {
   audioContext: AudioContext;
   analyser: AnalyserNode;
   source: MediaStreamAudioSourceNode;
-  samples: Float32Array;
+  samples: Float32Array<ArrayBuffer>;
 };
 
 export function useSensorSuite(activePulse: AcousticPulse | null = null) {
