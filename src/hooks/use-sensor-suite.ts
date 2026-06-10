@@ -166,6 +166,35 @@ type CaptureGraph = {
   samples: Float32Array<ArrayBuffer>;
 };
 
+// The capture mode that actually produces audio is device-specific on iOS
+// (raw capture is broken on some devices/routes). Remember what worked so a
+// reload does not silently reset to a dead pipeline. Default is the
+// browser's processed path — the one that works everywhere; "raw" is an
+// acoustic-precision optimization to opt into once proven on the device.
+const CAPTURE_MODE_STORAGE_KEY = "blackmagic.captureMode";
+
+function loadStoredCaptureMode(): CaptureConstraintMode {
+  if (typeof window === "undefined") {
+    return "processed";
+  }
+  try {
+    const value = window.localStorage.getItem(CAPTURE_MODE_STORAGE_KEY);
+    return value === "raw" || value === "processed" || value === "video"
+      ? value
+      : "processed";
+  } catch {
+    return "processed";
+  }
+}
+
+function storeCaptureMode(mode: CaptureConstraintMode) {
+  try {
+    window.localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Private browsing: the session still works, it just will not remember.
+  }
+}
+
 export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const [snapshot, setSnapshot] = useState<SensorSnapshot>(idleSnapshot);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -193,7 +222,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const captureSilentSincePerfMsRef = useRef<number | null>(null);
   const captureRebuildCountRef = useRef(0);
   const captureRebuildInFlightRef = useRef(false);
-  const captureModeRef = useRef<CaptureConstraintMode>("raw");
+  const captureModeRef = useRef<CaptureConstraintMode>(loadStoredCaptureMode());
+  const lastStoredCaptureModeRef = useRef<CaptureConstraintMode | null>(null);
   const voiceGateRef = useRef<VoiceActivityGate>({
     open: false,
     lastEventHostEpochMs: null,
@@ -278,6 +308,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const requestCaptureMode = useCallback((mode: CaptureConstraintMode) => {
     captureRebuildCountRef.current = 0;
     captureSilentSincePerfMsRef.current = null;
+    lastStoredCaptureModeRef.current = mode;
+    storeCaptureMode(mode);
     void reacquireCaptureStream(mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -640,9 +672,14 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   ) {
     if (micLevel >= HEALTHY_CAPTURE_RMS) {
       // Real signal observed: the pipeline works, so future interruptions
-      // get a fresh recovery budget.
+      // get a fresh recovery budget — and this mode is the device's
+      // known-good capture path, worth remembering across reloads.
       captureRebuildCountRef.current = 0;
       captureSilentSincePerfMsRef.current = null;
+      if (lastStoredCaptureModeRef.current !== captureModeRef.current) {
+        lastStoredCaptureModeRef.current = captureModeRef.current;
+        storeCaptureMode(captureModeRef.current);
+      }
       return;
     }
     if (
