@@ -90,7 +90,12 @@ export type SensorSnapshot = MotionSensorMetadata & {
   captureMode: CaptureConstraintMode | null;
 };
 
-export type CaptureConstraintMode = "raw" | "processed";
+// "raw": voice processing disabled (acoustic work). "processed": browser
+// default voice pipeline. "video": camera requested alongside the mic — on
+// iOS this changes microphone selection/beamforming (the mic follows the
+// camera) and possibly the audio session mode; the video track is held but
+// never rendered.
+export type CaptureConstraintMode = "raw" | "processed" | "video";
 
 const idleSnapshot: SensorSnapshot = {
   ...idleMotionMetadata,
@@ -265,6 +270,17 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     () => buildWaveChunk(waveSeriesRef.current, WAVE_BUCKET_MS, WAVE_CHUNK_BUCKETS),
     [],
   );
+
+  // Switches the live capture pipeline (raw / processed / video-assisted) by
+  // re-acquiring the stream. Call from a user gesture: the "video" mode can
+  // show a camera permission prompt. reacquireCaptureStream is a hoisted
+  // helper that only touches refs, so its identity is irrelevant here.
+  const requestCaptureMode = useCallback((mode: CaptureConstraintMode) => {
+    captureRebuildCountRef.current = 0;
+    captureSilentSincePerfMsRef.current = null;
+    void reacquireCaptureStream(mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
@@ -451,6 +467,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     getAudioContext,
     getWaveSeries,
     getWaveChunk,
+    requestCaptureMode,
   };
 
   function handleOrientation(event: DeviceOrientationEvent) {
@@ -820,17 +837,26 @@ function captureConstraintsFor(
 ): MediaStreamConstraints {
   // "raw" disables voice processing for acoustic work; "processed" is the
   // browser default path, which on iOS is a different (and sometimes the
-  // only working) capture pipeline.
-  return {
-    audio:
-      mode === "raw"
-        ? {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          }
-        : true,
+  // only working) capture pipeline. "video" adds a minimal camera request:
+  // iOS selects and beamforms the microphone differently while a camera
+  // captures, which is worth testing when audio-only capture is filtered.
+  const rawAudio = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
   };
+  if (mode === "video") {
+    return {
+      audio: rawAudio,
+      video: {
+        facingMode: "user",
+        width: { ideal: 320 },
+        height: { ideal: 240 },
+        frameRate: { ideal: 15 },
+      },
+    };
+  }
+  return { audio: mode === "raw" ? rawAudio : true };
 }
 
 // Verify what the browser actually granted: iOS Safari treats audio

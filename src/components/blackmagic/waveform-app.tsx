@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRoomSession } from "@/hooks/use-room-session";
-import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
+import {
+  useSensorSuite,
+  type CaptureConstraintMode,
+  type SensorSnapshot,
+} from "@/hooks/use-sensor-suite";
 import { useWebRtcRoom } from "@/hooks/use-webrtc-room";
 import { WaveSeries } from "@/lib/waveform/wave-series";
 import { projectClockModel } from "@/lib/timing/clock-sync";
@@ -224,9 +228,18 @@ export function WaveformApp() {
                   ref={registerCanvas(device.deviceId)}
                 />
                 {self ? (
-                  <div className="px-4 pb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-black/30">
-                    {captureDiagnostics(sensors.snapshot)}
-                  </div>
+                  <button
+                    className="pointer-events-auto block w-full px-4 pb-2 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-black/30"
+                    onClick={() =>
+                      sensors.requestCaptureMode(
+                        nextCaptureMode(sensors.snapshot.captureMode),
+                      )
+                    }
+                    onPointerDown={(event) => event.stopPropagation()}
+                    type="button"
+                  >
+                    {captureDiagnostics(sensors.snapshot)} · tap to switch
+                  </button>
                 ) : null}
               </section>
             );
@@ -301,19 +314,34 @@ function captureDiagnostics(snapshot: SensorSnapshot) {
     ? `${(snapshot.sampleRate / 1_000).toFixed(1)}k`
     : "—";
   const contextState = snapshot.audioContextState ?? "—";
-  const mode = snapshot.captureProcessing
+  const processing = snapshot.captureProcessing
     ? snapshot.captureProcessing.rawCaptureVerified
       ? "raw"
       : snapshot.captureMode === "processed"
         ? "processed"
         : "filtered"
-    : (snapshot.captureMode ?? "—");
+    : "—";
+  const mode =
+    snapshot.captureMode === "video" ? `video+${processing}` : processing;
   const level =
     snapshot.micLevel > 0 ? snapshot.micLevel.toExponential(1) : "0";
   const recoveries =
     snapshot.captureRecoveries > 0 ? ` · fix ${snapshot.captureRecoveries}` : "";
   const muted = snapshot.trackMuted ? " · muted" : "";
   return `${rate} ${contextState} · ${mode} · lvl ${level}${recoveries}${muted}`;
+}
+
+// Cycle for the capture experiment: raw -> processed -> video-assisted.
+function nextCaptureMode(
+  mode: CaptureConstraintMode | null,
+): CaptureConstraintMode {
+  if (mode === "raw" || mode === null) {
+    return "processed";
+  }
+  if (mode === "processed") {
+    return "video";
+  }
+  return "raw";
 }
 
 function hostEpochNow(snapshot: SensorSnapshot) {
