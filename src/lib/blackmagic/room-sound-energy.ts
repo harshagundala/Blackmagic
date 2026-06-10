@@ -18,14 +18,22 @@ export function roomSoundEnergy({
   devices,
   audioSources,
 }: RoomSoundEnergyInput) {
-  const micEnergy =
+  const micEnergy = microphoneEnergyFor(
     Math.max(
       sanitizeLevel(localMicLevel),
       ...devices.map((device) => sanitizeLevel(device.micLevel)),
-    ) * 18;
+    ),
+  );
   const sourceEnergy = Math.max(0, ...audioSources.map(sourceEnergyFor));
 
   return clamp(Math.max(micEnergy, sourceEnergy), 0, 1);
+}
+
+function microphoneEnergyFor(level: number) {
+  // iPhone Safari often reports ordinary nearby speech at low RMS levels
+  // (~0.01-0.02). Use a saturating visual curve so speech visibly breathes
+  // without making low room noise dominate the surface.
+  return 1 - Math.exp(-level * 55);
 }
 
 function sourceEnergyFor(source: RoomSoundEnergySource) {

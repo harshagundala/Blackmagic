@@ -12,6 +12,16 @@ describe("blackmagic room sound energy", () => {
     ).toBeGreaterThan(0.75);
   });
 
+  test("makes quiet iPhone speech levels visibly move the gradient", () => {
+    expect(
+      roomSoundEnergy({
+        localMicLevel: 0.012,
+        devices: [],
+        audioSources: [],
+      }),
+    ).toBeGreaterThan(0.45);
+  });
+
   test("keeps a recent reconciled voice source visible between heartbeats", () => {
     expect(
       roomSoundEnergy({

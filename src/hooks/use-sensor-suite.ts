@@ -197,43 +197,6 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const start = useCallback(async () => {
     const syncRun = clockSyncRunRef.current + 1;
     clockSyncRunRef.current = syncRun;
-    await requestMotionPermission();
-    await syncClock(setSnapshot, clockExchangesRef, (clock) => {
-      clockModelRef.current = clock;
-      updateStreamingMatcherPulse(
-        activePulseRef.current,
-        audioContextRef.current,
-        clock,
-        streamingMatcherRef.current,
-      );
-    });
-    void warmClockSync(
-      setSnapshot,
-      clockExchangesRef,
-      () => clockSyncRunRef.current === syncRun,
-      (clock) => {
-        clockModelRef.current = clock;
-        updateStreamingMatcherPulse(
-          activePulseRef.current,
-          audioContextRef.current,
-          clock,
-          streamingMatcherRef.current,
-        );
-      },
-    );
-    clockTimerRef.current = window.setInterval(
-      () =>
-        void syncClock(setSnapshot, clockExchangesRef, (clock) => {
-          clockModelRef.current = clock;
-          updateStreamingMatcherPulse(
-            activePulseRef.current,
-            audioContextRef.current,
-            clock,
-            streamingMatcherRef.current,
-          );
-        }),
-      CLOCK_SYNC_INTERVAL_MS,
-    );
     window.addEventListener("deviceorientation", handleOrientation);
     window.addEventListener("devicemotion", handleMotion);
 
@@ -242,6 +205,13 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       motion: "idle",
       heading: "idle",
     }));
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const audioContext = new AudioContextClass();
+    audioContextRef.current = audioContext;
+    if (audioContext.state === "suspended") {
+      await audioContext.resume().catch(() => undefined);
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -268,12 +238,9 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
           trackSettings?.autoGainControl === false,
       };
 
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      const audioContext = new AudioContextClass();
       if (audioContext.state === "suspended") {
         await audioContext.resume().catch(() => undefined);
       }
-      audioContextRef.current = audioContext;
       setSnapshot((current) => ({
         ...current,
         captureProcessing,
@@ -369,11 +336,53 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         animationRef.current = requestAnimationFrame(read);
       };
       read();
+
+      void requestMotionPermission();
+      void syncClock(setSnapshot, clockExchangesRef, (clock) => {
+        clockModelRef.current = clock;
+        updateStreamingMatcherPulse(
+          activePulseRef.current,
+          audioContextRef.current,
+          clock,
+          streamingMatcherRef.current,
+        );
+      });
+      void warmClockSync(
+        setSnapshot,
+        clockExchangesRef,
+        () => clockSyncRunRef.current === syncRun,
+        (clock) => {
+          clockModelRef.current = clock;
+          updateStreamingMatcherPulse(
+            activePulseRef.current,
+            audioContextRef.current,
+            clock,
+            streamingMatcherRef.current,
+          );
+        },
+      );
+      clockTimerRef.current = window.setInterval(
+        () =>
+          void syncClock(setSnapshot, clockExchangesRef, (clock) => {
+            clockModelRef.current = clock;
+            updateStreamingMatcherPulse(
+              activePulseRef.current,
+              audioContextRef.current,
+              clock,
+              streamingMatcherRef.current,
+            );
+          }),
+        CLOCK_SYNC_INTERVAL_MS,
+      );
     } catch {
+      void audioContext.close().catch(() => undefined);
+      audioContextRef.current = null;
       setSnapshot((current) => ({
         ...current,
         mic: "blocked",
+        audioContextState: null,
       }));
+      return;
     }
 
     if ("geolocation" in navigator) {
