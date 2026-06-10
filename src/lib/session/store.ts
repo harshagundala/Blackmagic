@@ -13,6 +13,10 @@ import {
 import { deriveReconciledAudioEvents } from "./audio-events";
 import { deriveAcousticRanges } from "./ranging";
 import { deriveRoomTimeSync } from "./timing-health";
+import type {
+  RealtimeSignal,
+  RealtimeSignalInput,
+} from "../realtime/contracts";
 
 export type SessionStore = {
   kind: "memory" | "redis";
@@ -29,6 +33,15 @@ export type SessionStore = {
   ): Promise<RoomState>;
   state(url: string): Promise<RoomState>;
   revision?(url: string): Promise<number>;
+  publishRealtimeSignal(
+    url: string,
+    signal: RealtimeSignalInput,
+  ): Promise<RealtimeSignal>;
+  realtimeSignals(
+    url: string,
+    deviceId: string,
+    since?: number,
+  ): Promise<RealtimeSignal[]>;
 };
 
 export type SessionHeartbeatReceipt = SessionClaim & {
@@ -69,6 +82,9 @@ export type SessionEnvironment = Readonly<{
 
 export function createMemorySessionStore(options: SessionStoreOptions = {}) {
   const registry = createSessionRegistry(options);
+  const now = options.now ?? Date.now;
+  const signalInboxes = new Map<string, Map<string, RealtimeSignal[]>>();
+  const signalSequences = new Map<string, number>();
 
   return {
     kind: "memory" as const,
@@ -97,6 +113,29 @@ export function createMemorySessionStore(options: SessionStoreOptions = {}) {
     },
     async revision(url: string) {
       return registry.state(url).revision;
+    },
+    async publishRealtimeSignal(url: string, signal: RealtimeSignalInput) {
+      const sessionKey = normalizeSessionKey(url);
+      const nextSeq = (signalSequences.get(sessionKey) ?? 0) + 1;
+      signalSequences.set(sessionKey, nextSeq);
+      const emitted = {
+        ...signal,
+        seq: nextSeq,
+        sessionKey,
+        createdAt: now(),
+      };
+      const sessionInboxes =
+        signalInboxes.get(sessionKey) ?? new Map<string, RealtimeSignal[]>();
+      const inbox = sessionInboxes.get(signal.toDeviceId) ?? [];
+      inbox.push(emitted);
+      sessionInboxes.set(signal.toDeviceId, retainRecentSignals(inbox));
+      signalInboxes.set(sessionKey, sessionInboxes);
+      return emitted;
+    },
+    async realtimeSignals(url: string, deviceId: string, since = 0) {
+      const sessionKey = normalizeSessionKey(url);
+      const inbox = signalInboxes.get(sessionKey)?.get(deviceId) ?? [];
+      return signalsAfter(inbox, since);
     },
   } satisfies SessionStore;
 }
@@ -211,6 +250,40 @@ export function createRedisSessionStore(
       const keys = redisSessionKeys(sessionKey);
       return parseRedisNumber(await redis.get(keys.revision));
     },
+    async publishRealtimeSignal(url: string, signal: RealtimeSignalInput) {
+      const sessionKey = normalizeSessionKey(url);
+      const keys = redisSessionKeys(sessionKey);
+      const seq = await redis.incr(keys.signalSeq);
+      const emitted: RealtimeSignal = {
+        ...signal,
+        seq,
+        sessionKey,
+        createdAt: now(),
+      };
+      await redis.hset(
+        keys.signals(signal.toDeviceId),
+        String(seq),
+        JSON.stringify(emitted),
+      );
+      await Promise.all([
+        redis.expire(keys.signalSeq, ttlSeconds),
+        redis.expire(keys.signals(signal.toDeviceId), ttlSeconds),
+      ]);
+      return emitted;
+    },
+    async realtimeSignals(url: string, deviceId: string, since = 0) {
+      const sessionKey = normalizeSessionKey(url);
+      const keys = redisSessionKeys(sessionKey);
+      const hash = normalizeRedisHash(
+        await redis.hgetall(keys.signals(deviceId)),
+      );
+      return signalsAfter(
+        Object.values(hash)
+          .map(parseRealtimeSignal)
+          .filter((signal): signal is RealtimeSignal => signal !== null),
+        since,
+      );
+    },
   } satisfies SessionStore;
 }
 
@@ -284,6 +357,18 @@ export function createResilientSessionStore(
         () =>
           fallback.revision?.(url) ??
           fallback.state(url).then((state) => state.revision),
+      );
+    },
+    publishRealtimeSignal(url: string, signal: RealtimeSignalInput) {
+      return run(
+        () => primary.publishRealtimeSignal(url, signal),
+        () => fallback.publishRealtimeSignal(url, signal),
+      );
+    },
+    realtimeSignals(url: string, deviceId: string, since = 0) {
+      return run(
+        () => primary.realtimeSignals(url, deviceId, since),
+        () => fallback.realtimeSignals(url, deviceId, since),
       );
     },
   } satisfies SessionStore;
@@ -419,6 +504,9 @@ function redisSessionKeys(sessionKey: string) {
     devices: `${prefix}:devices`,
     revision: `${prefix}:revision`,
     changedAt: `${prefix}:changedAt`,
+    signalSeq: `${prefix}:signalSeq`,
+    signals: (deviceId: string) =>
+      `${prefix}:signals:${createHash("sha256").update(deviceId).digest("base64url")}`,
   };
 }
 
@@ -578,6 +666,36 @@ function parseDevice(raw: string | null): RoomDevice | null {
   }
 }
 
+function parseRealtimeSignal(raw: string | null): RealtimeSignal | null {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<RealtimeSignal>;
+    if (
+      !parsed ||
+      typeof parsed.seq !== "number" ||
+      !Number.isFinite(parsed.seq) ||
+      typeof parsed.sessionKey !== "string" ||
+      typeof parsed.fromDeviceId !== "string" ||
+      typeof parsed.toDeviceId !== "string" ||
+      typeof parsed.createdAt !== "number" ||
+      !Number.isFinite(parsed.createdAt) ||
+      (parsed.kind !== "offer" &&
+        parsed.kind !== "answer" &&
+        parsed.kind !== "ice-candidate") ||
+      typeof parsed.payload !== "object" ||
+      parsed.payload === null
+    ) {
+      return null;
+    }
+    return parsed as RealtimeSignal;
+  } catch {
+    return null;
+  }
+}
+
 function writeRedisDevice(
   redis: RedisSessionClient,
   keys: ReturnType<typeof redisSessionKeys>,
@@ -674,4 +792,18 @@ function compareDevicesForOutput(a: RoomDevice, b: RoomDevice) {
     return a.role === "host" ? -1 : 1;
   }
   return compareDevicesByJoin(a, b);
+}
+
+const MAX_SIGNAL_INBOX_HISTORY = 128;
+
+function signalsAfter(signals: RealtimeSignal[], since: number) {
+  const safeSince = Number.isFinite(since) && since > 0 ? since : 0;
+  return signals
+    .filter((signal) => signal.seq > safeSince)
+    .sort((a, b) => a.seq - b.seq)
+    .slice(-MAX_SIGNAL_INBOX_HISTORY);
+}
+
+function retainRecentSignals(signals: RealtimeSignal[]) {
+  return signals.slice(-MAX_SIGNAL_INBOX_HISTORY);
 }

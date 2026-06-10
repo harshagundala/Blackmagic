@@ -111,6 +111,40 @@ describe("physical room validation", () => {
     expect(report.blockers).toContain("no_tdoa_source");
   });
 
+  test("reports pairwise acoustic progress for a two-phone room", () => {
+    const simulation = simulateAcousticRoom({
+      roomUrl: "https://blackmagic.app/lab-pairwise-progress",
+      devices: [
+        { deviceId: "host", x: 0, y: 0 },
+        { deviceId: "phone-a", x: 2.1, y: 0.2 },
+      ],
+      exchangesPerPair: 2,
+      sampleNoiseStdDev: 0.02,
+    });
+
+    const report = validatePhysicalRoomLocalization(
+      simulation.roomState,
+      simulation.constellation,
+    );
+
+    expect(report.pairs).toEqual([
+      expect.objectContaining({
+        from: "host",
+        to: "phone-a",
+        status: "ready",
+        distanceMeters: expect.closeTo(2.11, 1),
+        reciprocalExchangeCount: expect.any(Number),
+        fromPulseCount: 2,
+        toPulseCount: 2,
+        fromSampleAnchoredObservationCount: 4,
+        toSampleAnchoredObservationCount: 4,
+        missingAnchors: [],
+        blockers: [],
+      }),
+    ]);
+    expect(report.pairs[0]?.reciprocalExchangeCount).toBeGreaterThanOrEqual(2);
+  });
+
   test("pinpoints missing reciprocal acoustic anchors in a two-phone room", () => {
     const simulation = simulateAcousticRoom({
       roomUrl: "https://blackmagic.app/lab-missing-anchors",
@@ -154,6 +188,29 @@ describe("physical room validation", () => {
         "incomplete_reciprocal_anchors",
       ]),
     );
+    expect(report.pairs).toEqual([
+      expect.objectContaining({
+        from: "host",
+        to: "phone-a",
+        status: "warming",
+        distanceMeters: null,
+        reciprocalExchangeCount: 0,
+        fromPulseCount: 1,
+        toPulseCount: 1,
+        fromSampleAnchoredObservationCount: 2,
+        toSampleAnchoredObservationCount: 0,
+        missingAnchors: expect.arrayContaining([
+          "to_sample_anchored_observation",
+          "to_heard_from_observation",
+          "to_self_observation",
+        ]),
+        blockers: expect.arrayContaining([
+          "no_pairwise_range",
+          "missing_pairwise_anchors",
+          "incomplete_reciprocal_anchors",
+        ]),
+      }),
+    ]);
     expect(failingPhone).toEqual(
       expect.objectContaining({
         deviceId: "phone-a",

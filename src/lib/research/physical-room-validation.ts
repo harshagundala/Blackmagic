@@ -67,6 +67,22 @@ export type PhysicalRoomValidationDeviceDiagnostic = {
   blockers: string[];
 };
 
+export type PhysicalRoomValidationPairDiagnostic = {
+  from: string;
+  to: string;
+  status: PhysicalRoomValidationStatus;
+  distanceMeters: number | null;
+  distanceUncertaintyMeters: number | null;
+  confidence: number | null;
+  reciprocalExchangeCount: number;
+  fromPulseCount: number;
+  toPulseCount: number;
+  fromSampleAnchoredObservationCount: number;
+  toSampleAnchoredObservationCount: number;
+  missingAnchors: string[];
+  blockers: string[];
+};
+
 export type PhysicalRoomValidationReport = {
   status: PhysicalRoomValidationStatus;
   phoneLayout: PhysicalRoomValidationSection;
@@ -75,6 +91,7 @@ export type PhysicalRoomValidationReport = {
   spokenSource: PhysicalRoomValidationSection;
   metrics: PhysicalRoomValidationMetrics;
   devices: PhysicalRoomValidationDeviceDiagnostic[];
+  pairs: PhysicalRoomValidationPairDiagnostic[];
   blockers: string[];
 };
 
@@ -104,6 +121,7 @@ export function validatePhysicalRoomLocalization(
     constellation,
     acousticCalibration,
   );
+  const pairs = pairDiagnostics(roomState, acousticCalibration);
   const sections = [phoneLayout, audioCapture, audioTimestamps, spokenSource];
   const blockers = unique([
     ...phoneLayout.blockers,
@@ -120,8 +138,87 @@ export function validatePhysicalRoomLocalization(
     spokenSource,
     metrics,
     devices,
+    pairs,
     blockers,
   };
+}
+
+function pairDiagnostics(
+  roomState: RoomState,
+  acousticCalibration: AcousticCalibrationDiagnostics,
+): PhysicalRoomValidationPairDiagnostic[] {
+  const calibrationPairs = new Map(
+    acousticCalibration.pairs.map((pair) => [`${pair.from}:${pair.to}`, pair]),
+  );
+  const ranges = new Map(
+    roomState.ranges.map((range) => [
+      canonicalPairKey(range.from, range.to, roomState.devices),
+      range,
+    ]),
+  );
+  const pairs: PhysicalRoomValidationPairDiagnostic[] = [];
+
+  for (let leftIndex = 0; leftIndex < roomState.devices.length; leftIndex += 1) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < roomState.devices.length;
+      rightIndex += 1
+    ) {
+      const from = roomState.devices[leftIndex].deviceId;
+      const to = roomState.devices[rightIndex].deviceId;
+      const key = `${from}:${to}`;
+      const calibration = calibrationPairs.get(key);
+      const range = ranges.get(key);
+      const missingAnchors = calibration?.missingAnchors ?? [];
+      const blockers = pairBlockers({
+        missingAnchors,
+        rangeFound: Boolean(range),
+        reciprocalExchangeCount: calibration?.reciprocalExchangeCount ?? 0,
+      });
+
+      pairs.push({
+        from,
+        to,
+        status: blockers.length === 0 ? "ready" : "warming",
+        distanceMeters: roundOrNull(range?.meters),
+        distanceUncertaintyMeters: roundOrNull(range?.distanceUncertaintyMeters),
+        confidence: roundOrNull(range?.confidence),
+        reciprocalExchangeCount: calibration?.reciprocalExchangeCount ?? 0,
+        fromPulseCount: calibration?.fromPulseCount ?? 0,
+        toPulseCount: calibration?.toPulseCount ?? 0,
+        fromSampleAnchoredObservationCount:
+          calibration?.fromSampleAnchoredObservationCount ?? 0,
+        toSampleAnchoredObservationCount:
+          calibration?.toSampleAnchoredObservationCount ?? 0,
+        missingAnchors,
+        blockers,
+      });
+    }
+  }
+
+  return pairs;
+}
+
+function pairBlockers({
+  missingAnchors,
+  rangeFound,
+  reciprocalExchangeCount,
+}: {
+  missingAnchors: string[];
+  rangeFound: boolean;
+  reciprocalExchangeCount: number;
+}) {
+  const blockers: string[] = [];
+  if (!rangeFound) {
+    blockers.push("no_pairwise_range");
+  }
+  if (missingAnchors.length > 0) {
+    blockers.push("missing_pairwise_anchors");
+  }
+  if (reciprocalExchangeCount === 0) {
+    blockers.push("incomplete_reciprocal_anchors");
+  }
+  return blockers;
 }
 
 function deviceDiagnostics(
@@ -569,8 +666,20 @@ type AcousticCalibrationDeviceDiagnostics = {
   sampleAnchoredObservationCount: number;
 };
 
+type AcousticCalibrationPairDiagnostics = {
+  from: string;
+  to: string;
+  reciprocalExchangeCount: number;
+  fromPulseCount: number;
+  toPulseCount: number;
+  fromSampleAnchoredObservationCount: number;
+  toSampleAnchoredObservationCount: number;
+  missingAnchors: string[];
+};
+
 type AcousticCalibrationDiagnostics = {
   devices: AcousticCalibrationDeviceDiagnostics[];
+  pairs: AcousticCalibrationPairDiagnostics[];
   completeReciprocalExchangeCount: number;
 };
 
@@ -618,7 +727,140 @@ function acousticCalibrationDiagnostics(
       pulsesByDevice,
       observationsByDevice,
     ),
+    pairs: acousticPairDiagnostics(
+      devices,
+      pulsesByDevice,
+      observationsByDevice,
+    ),
   };
+}
+
+function acousticPairDiagnostics(
+  devices: RoomDevice[],
+  pulsesByDevice: Map<string, PulseWithDevice[]>,
+  observationsByDevice: Map<
+    string,
+    Map<string, NonNullable<RoomDevice["acousticObservation"]>>
+  >,
+): AcousticCalibrationPairDiagnostics[] {
+  const diagnostics: AcousticCalibrationPairDiagnostics[] = [];
+
+  for (let leftIndex = 0; leftIndex < devices.length; leftIndex += 1) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < devices.length;
+      rightIndex += 1
+    ) {
+      const from = devices[leftIndex];
+      const to = devices[rightIndex];
+      const fromPulses = pulsesByDevice.get(from.deviceId) ?? [];
+      const toPulses = pulsesByDevice.get(to.deviceId) ?? [];
+      const reciprocalPairs = reciprocalPulsePairs(fromPulses, toPulses);
+      const missingAnchors = pairMissingAnchors(
+        from,
+        to,
+        reciprocalPairs,
+        observationsByDevice,
+      );
+
+      diagnostics.push({
+        from: from.deviceId,
+        to: to.deviceId,
+        reciprocalExchangeCount: reciprocalPairs.filter(([first, second]) =>
+          hasCompleteReciprocalAnchors(first, second, observationsByDevice),
+        ).length,
+        fromPulseCount: fromPulses.length,
+        toPulseCount: toPulses.length,
+        fromSampleAnchoredObservationCount: sampleAnchoredObservationCount(
+          from,
+          observationsByDevice,
+        ),
+        toSampleAnchoredObservationCount: sampleAnchoredObservationCount(
+          to,
+          observationsByDevice,
+        ),
+        missingAnchors,
+      });
+    }
+  }
+
+  return diagnostics;
+}
+
+function pairMissingAnchors(
+  from: RoomDevice,
+  to: RoomDevice,
+  reciprocalPairs: Array<[PulseWithDevice, PulseWithDevice]>,
+  observationsByDevice: Map<
+    string,
+    Map<string, NonNullable<RoomDevice["acousticObservation"]>>
+  >,
+) {
+  const missing: string[] = [];
+  const fromObservations = observationsByDevice.get(from.deviceId) ?? new Map();
+  const toObservations = observationsByDevice.get(to.deviceId) ?? new Map();
+
+  if (reciprocalPairs.length === 0) {
+    if (acousticPulseHistory(from).length === 0) {
+      missing.push("from_pulse");
+    }
+    if (acousticPulseHistory(to).length === 0) {
+      missing.push("to_pulse");
+    }
+  }
+
+  if (sampleAnchoredObservationCount(from, observationsByDevice) === 0) {
+    missing.push("from_sample_anchored_observation");
+  }
+  if (sampleAnchoredObservationCount(to, observationsByDevice) === 0) {
+    missing.push("to_sample_anchored_observation");
+  }
+
+  const bestPair = reciprocalPairs[0];
+  if (!bestPair) {
+    return unique(missing);
+  }
+
+  const [first, second] = bestPair;
+  const firstIsFrom = first.device.deviceId === from.deviceId;
+  const fromPulse = firstIsFrom ? first.pulse : second.pulse;
+  const toPulse = firstIsFrom ? second.pulse : first.pulse;
+
+  if (!hasSampleAnchor(fromObservations.get(fromPulse.id))) {
+    missing.push("from_self_observation");
+  }
+  if (!hasSampleAnchor(fromObservations.get(toPulse.id))) {
+    missing.push("from_heard_to_observation");
+  }
+  if (!hasSampleAnchor(toObservations.get(fromPulse.id))) {
+    missing.push("to_heard_from_observation");
+  }
+  if (!hasSampleAnchor(toObservations.get(toPulse.id))) {
+    missing.push("to_self_observation");
+  }
+
+  return unique(missing);
+}
+
+function sampleAnchoredObservationCount(
+  device: RoomDevice,
+  observationsByDevice: Map<
+    string,
+    Map<string, NonNullable<RoomDevice["acousticObservation"]>>
+  >,
+) {
+  return [...(observationsByDevice.get(device.deviceId)?.values() ?? [])].filter(
+    hasSampleAnchor,
+  ).length;
+}
+
+function canonicalPairKey(from: string, to: string, devices: RoomDevice[]) {
+  const deviceOrder = new Map(
+    devices.map((device, index) => [device.deviceId, index]),
+  );
+  const fromOrder = deviceOrder.get(from) ?? Number.MAX_SAFE_INTEGER;
+  const toOrder = deviceOrder.get(to) ?? Number.MAX_SAFE_INTEGER;
+  return fromOrder <= toOrder ? `${from}:${to}` : `${to}:${from}`;
 }
 
 function completeReciprocalExchangeCount(

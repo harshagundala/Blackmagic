@@ -255,6 +255,93 @@ describe("session stores", () => {
     );
   });
 
+  test("memory store delivers realtime signaling inboxes in sequence order", async () => {
+    let now = 10_000;
+    const store = createMemorySessionStore({ now: () => now });
+
+    const offer = await store.publishRealtimeSignal(
+      "https://blackmagic.app/room",
+      {
+        fromDeviceId: "host",
+        toDeviceId: "phone-a",
+        kind: "offer",
+        payload: { type: "offer", sdp: "v=0\r\n" },
+      },
+    );
+    now = 10_020;
+    const candidate = await store.publishRealtimeSignal(
+      "https://blackmagic.app/room",
+      {
+        fromDeviceId: "host",
+        toDeviceId: "phone-a",
+        kind: "ice-candidate",
+        payload: {
+          candidate: "candidate:1 1 udp 1 127.0.0.1 9 typ host",
+          sdpMLineIndex: 0,
+          sdpMid: "0",
+        },
+      },
+    );
+
+    await expect(
+      store.realtimeSignals("https://blackmagic.app/room", "phone-a"),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        seq: offer.seq,
+        createdAt: 10_000,
+        kind: "offer",
+        payload: { type: "offer", sdp: "v=0\r\n" },
+      }),
+      expect.objectContaining({
+        seq: candidate.seq,
+        createdAt: 10_020,
+        kind: "ice-candidate",
+      }),
+    ]);
+    await expect(
+      store.realtimeSignals(
+        "https://blackmagic.app/room",
+        "phone-a",
+        offer.seq,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({ seq: candidate.seq, kind: "ice-candidate" }),
+    ]);
+    await expect(
+      store.realtimeSignals("https://blackmagic.app/room", "host"),
+    ).resolves.toEqual([]);
+  });
+
+  test("redis store persists realtime signaling inboxes across store instances", async () => {
+    let now = 2_000;
+    const redis = new FakeRedisSessionClient();
+    const first = createRedisSessionStore(redis, { now: () => now });
+
+    const offer = await first.publishRealtimeSignal(
+      "https://blackmagic.app/room",
+      {
+        fromDeviceId: "host",
+        toDeviceId: "phone-a",
+        kind: "offer",
+        payload: { type: "offer", sdp: "v=0\r\n" },
+      },
+    );
+
+    now = 2_050;
+    const second = createRedisSessionStore(redis, { now: () => now });
+    await expect(
+      second.realtimeSignals("https://blackmagic.app/room", "phone-a", 0),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        seq: offer.seq,
+        sessionKey: "https://blackmagic.app/room",
+        fromDeviceId: "host",
+        toDeviceId: "phone-a",
+        kind: "offer",
+      }),
+    ]);
+  });
+
   test("redis store releases a stale host across store instances", async () => {
     let now = 1_000;
     const redis = new FakeRedisSessionClient();
@@ -350,6 +437,30 @@ describe("session stores", () => {
       store.revision?.("https://blackmagic.app/fallback"),
     ).resolves.toBeGreaterThan(0);
     expect(store.kind).toBe("memory");
+  });
+
+  test("resilient store falls back for realtime signaling when redis fails", async () => {
+    const store = createResilientSessionStore(
+      createRedisSessionStore(new FailingRedisSessionClient()),
+      createMemorySessionStore({ now: () => 3_000 }),
+    );
+
+    const signal = await store.publishRealtimeSignal(
+      "https://blackmagic.app/fallback",
+      {
+        fromDeviceId: "host",
+        toDeviceId: "phone",
+        kind: "answer",
+        payload: { type: "answer", sdp: "v=0\r\n" },
+      },
+    );
+
+    expect(store.kind).toBe("memory");
+    await expect(
+      store.realtimeSignals("https://blackmagic.app/fallback", "phone"),
+    ).resolves.toEqual([
+      expect.objectContaining({ seq: signal.seq, kind: "answer" }),
+    ]);
   });
 });
 

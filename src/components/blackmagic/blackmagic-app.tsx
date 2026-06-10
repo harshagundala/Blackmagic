@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useRoomSession } from "@/hooks/use-room-session";
 import { useSensorSuite, type SensorSnapshot } from "@/hooks/use-sensor-suite";
+import { useWebRtcRoom } from "@/hooks/use-webrtc-room";
 import { createPhoneMarkers } from "@/lib/blackmagic/phone-markers";
 import { roomSoundEnergy } from "@/lib/blackmagic/room-sound-energy";
 import {
@@ -69,6 +70,33 @@ export function BlackmagicApp() {
   const flushedCalibrationEventRef = useRef("");
   const flushedVoiceEventRef = useRef("");
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
+  const handleRealtimeChirp = useCallback(
+    (pulse: AcousticPulse) => {
+      observablePulseRef.current = pulse;
+      trackSensorPulse(pulse);
+    },
+    [trackSensorPulse],
+  );
+  const getRealtimePulse = useCallback(
+    () =>
+      observablePulseRef.current ?? calibrationRef.current.acousticPulse ?? null,
+    [],
+  );
+  const getRealtimeObservation = useCallback(
+    () =>
+      calibrationRef.current.acousticObservation ??
+      snapshotRef.current.pulseObservation,
+    [],
+  );
+  const realtime = useWebRtcRoom({
+    active: phase === "listening",
+    deviceId,
+    roomState,
+    snapshot: sensors.snapshot,
+    getAcousticPulse: getRealtimePulse,
+    getAcousticObservation: getRealtimeObservation,
+    onChirpSchedule: handleRealtimeChirp,
+  });
   const constellation = useMemo(
     () =>
       roomState
@@ -294,7 +322,14 @@ export function BlackmagicApp() {
     devices: roomState?.devices ?? [],
     audioSources: constellation?.audioSources ?? [],
   });
-  const pulse = listening ? Math.min(1, Math.max(0.12, soundEnergy)) : 0.16;
+  const realtimePeerEnergy = realtime.peerFrames.reduce(
+    (level, frame) => Math.max(level, frame.micLevel),
+    0,
+  );
+  const fusedSoundEnergy = Math.max(soundEnergy, realtimePeerEnergy * 0.92);
+  const pulse = listening
+    ? Math.min(1, Math.max(0.12, fusedSoundEnergy))
+    : 0.16;
   const phoneMarkers = createPhoneMarkers(
     constellation?.devices.filter((device) => device.deviceId !== deviceId) ??
       [],
