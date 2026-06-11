@@ -35,6 +35,7 @@ import {
   type PulseToneScheduler,
 } from "@/lib/calibration/playback";
 import {
+  clearEdgeEvidenceForDevice,
   createEdgeEvidence,
   deriveEdgeRanges,
   recordEdgeObservation,
@@ -178,6 +179,29 @@ export function WaveformApp() {
     );
   }, []);
 
+  // Sustained movement of a device invalidates its chirp evidence: the next
+  // reciprocal exchange re-measures from scratch (the engine's passive
+  // histories reset through engine.noteMotion separately).
+  const motionStreakRef = useRef(new Map<string, number>());
+  const noteChirpMotion = useCallback(
+    (motionDeviceId: string, stability: number | null, atHostEpochMs: number) => {
+      if (typeof stability !== "number" || !Number.isFinite(atHostEpochMs)) {
+        return;
+      }
+      if (stability >= 0.35) {
+        motionStreakRef.current.delete(motionDeviceId);
+        return;
+      }
+      const start = motionStreakRef.current.get(motionDeviceId);
+      if (start === undefined) {
+        motionStreakRef.current.set(motionDeviceId, atHostEpochMs);
+      } else if (atHostEpochMs - start >= 600) {
+        clearEdgeEvidenceForDevice(edgeEvidenceRef.current, motionDeviceId);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     roomDevicesRef.current = roomState?.devices ?? [];
   }, [roomState?.devices]);
@@ -206,8 +230,11 @@ export function WaveformApp() {
       if (changed && isHostRef.current) {
         const nowMs = hostEpochNow(snapshotRef.current);
         if (nowMs !== null) {
+          // Tight freshness so the map follows a moving phone instead of
+          // averaging across where it used to be.
           for (const range of deriveEdgeRanges(edgeEvidenceRef.current, {
             hostEpochNowMs: nowMs,
+            maxRangeAgeMs: 10_000,
           })) {
             hostEngine().setSeedRange({
               from: range.from,
@@ -514,26 +541,30 @@ export function WaveformApp() {
     }
   }, [realtime.peerFrames, roomState?.devices]);
 
-  // Host: a peer's motion stability gates its acoustic evidence — a phone
-  // that moved invalidates the distances it took part in.
+  // A phone's motion stability gates its acoustic evidence — a phone that
+  // moved invalidates the distances it took part in (chirp evidence on every
+  // device, passive histories on the host).
   useEffect(() => {
-    if (!isHost) {
-      return;
-    }
-    const engine = hostEngine();
     for (const frame of realtime.peerFrames) {
       if (
         frame.motionStability !== null &&
         frame.hostEstimatedEpochMs !== null
       ) {
-        engine.noteMotion(
+        noteChirpMotion(
           frame.fromDeviceId,
           frame.motionStability,
           frame.hostEstimatedEpochMs,
         );
+        if (isHost) {
+          hostEngine().noteMotion(
+            frame.fromDeviceId,
+            frame.motionStability,
+            frame.hostEstimatedEpochMs,
+          );
+        }
       }
     }
-  }, [hostEngine, isHost, realtime.peerFrames]);
+  }, [hostEngine, isHost, noteChirpMotion, realtime.peerFrames]);
 
   // Host: feed its own voice events into the engine as they fire.
   const ownVoiceEvent = sensors.snapshot.voiceEvent;
@@ -692,6 +723,7 @@ export function WaveformApp() {
       engine.setRoomDevices(
         roomDevicesRef.current.map((device) => device.deviceId),
       );
+      noteChirpMotion(deviceId, snapshotRef.current.motionStability, nowMs);
       engine.noteMotion(deviceId, snapshotRef.current.motionStability, nowMs);
       const message = reconciliationStateMessage(
         deviceId,
@@ -703,7 +735,7 @@ export function WaveformApp() {
     tick();
     const timer = window.setInterval(tick, 1_000);
     return () => window.clearInterval(timer);
-  }, [deviceId, hostEngine, isHost, phase]);
+  }, [deviceId, hostEngine, isHost, noteChirpMotion, phase]);
 
   // One render loop draws every row from its series, aligned on the shared
   // host-clock timeline.
@@ -1086,9 +1118,16 @@ function ReconciliationPanel({
   useEffect(() => {
     const canvas = mapRef.current;
     if (canvas && points) {
-      drawReconciliationMap(canvas, points, talker, selfDeviceId, stale);
+      drawReconciliationMap(
+        canvas,
+        points,
+        state?.ranges ?? [],
+        talker,
+        selfDeviceId,
+        stale,
+      );
     }
-  }, [points, selfDeviceId, stale, talker]);
+  }, [points, selfDeviceId, stale, state, talker]);
 
   const label = (id: string) => (id === selfDeviceId ? "you" : shortId(id));
 
@@ -1307,6 +1346,7 @@ function describeRangeState(confidence: number, coverage: number) {
 function drawReconciliationMap(
   canvas: HTMLCanvasElement,
   points: Record<string, { x: number; y: number }>,
+  ranges: Array<{ from: string; to: string; meters: number }>,
   talker: { x: number; y: number; confidence: number } | null,
   selfDeviceId: string,
   stale: boolean,
@@ -1354,9 +1394,12 @@ function drawReconciliationMap(
 
   const alpha = stale ? 0.35 : 1;
 
-  // Faint range lines between every pair ground the dots visually.
+  // Faint range lines between every pair ground the dots visually; measured
+  // pairs carry their live distance at the midpoint.
   context.strokeStyle = `rgba(6,17,46,${0.1 * alpha})`;
   context.lineWidth = 1;
+  context.font = "9px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+  context.textAlign = "center";
   for (let i = 0; i < entries.length; i += 1) {
     for (let j = i + 1; j < entries.length; j += 1) {
       const a = toCanvas(entries[i][1]);
@@ -1365,6 +1408,19 @@ function drawReconciliationMap(
       context.moveTo(a.x, a.y);
       context.lineTo(b.x, b.y);
       context.stroke();
+      const range = ranges.find(
+        (entry) =>
+          (entry.from === entries[i][0] && entry.to === entries[j][0]) ||
+          (entry.from === entries[j][0] && entry.to === entries[i][0]),
+      );
+      if (range) {
+        context.fillStyle = `rgba(5,6,10,${0.6 * alpha})`;
+        context.fillText(
+          `${range.meters.toFixed(2)} m · ${(range.meters / 0.3048).toFixed(1)} ft`,
+          (a.x + b.x) / 2,
+          (a.y + b.y) / 2 - 5,
+        );
+      }
     }
   }
 

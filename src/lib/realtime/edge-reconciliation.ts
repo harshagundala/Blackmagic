@@ -19,6 +19,17 @@ export type EdgeAcousticEvidence = {
   observations: Map<string, AcousticObservation[]>;
 };
 
+// A moved device's chirp history describes geometry that no longer exists;
+// dropping its pulses and observations forces the next reciprocal exchange
+// to measure fresh instead of blending pre-move distances into the median.
+export function clearEdgeEvidenceForDevice(
+  evidence: EdgeAcousticEvidence,
+  deviceId: string,
+) {
+  evidence.pulses.delete(deviceId);
+  evidence.observations.delete(deviceId);
+}
+
 export function createEdgeEvidence(): EdgeAcousticEvidence {
   return {
     pulses: new Map(),
