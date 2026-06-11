@@ -4,6 +4,7 @@ import {
   createClockProbeAckMessage,
   createClockProbeMessage,
   createRealtimeSensorFrame,
+  createVoiceEventMessage,
   parseRealtimeDataChannelMessage,
   serializeRealtimeDataChannelMessage,
 } from "./data-channel";
@@ -217,5 +218,115 @@ describe("realtime data channel messages", () => {
       ),
     ).toBeNull();
     expect(parseRealtimeDataChannelMessage("x".repeat(70_000))).toBeNull();
+  });
+
+  test("round-trips voice events carrying audio snippets", () => {
+    const message = createVoiceEventMessage({
+      fromDeviceId: "phone-a",
+      event: {
+        id: "voice-103200-1800000002150",
+        detectedAtHostEpochMs: 1_800_000_002_150,
+        audioContextTimeSeconds: 2.15,
+        sampleIndex: 103_200,
+        sampleRate: 48_000,
+        audioLevel: 0.32,
+        confidence: 0.76,
+        clockOffsetMs: 3.2,
+        clockUncertaintyMs: 1.7,
+        audioSnippet: {
+          sampleRate: 8_000,
+          sourceSampleRate: 48_000,
+          startSampleIndex: 102_000,
+          centerSampleIndex: 103_200,
+          windowMs: 240,
+          peakLevel: 0.6,
+          encodedSamples: "QUJDRA==",
+        },
+      },
+    });
+    expect(message).not.toBeNull();
+    const encoded = serializeRealtimeDataChannelMessage(message!);
+    expect(parseRealtimeDataChannelMessage(encoded)).toEqual(message);
+  });
+
+  test("rejects voice events with corrupt snippets or missing timing", () => {
+    expect(
+      parseRealtimeDataChannelMessage(
+        JSON.stringify({
+          type: "voice-event",
+          version: 1,
+          fromDeviceId: "phone-a",
+          event: { id: "voice-1" },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseRealtimeDataChannelMessage(
+        JSON.stringify({
+          type: "voice-event",
+          version: 1,
+          fromDeviceId: "phone-a",
+          event: {
+            id: "voice-1",
+            detectedAtHostEpochMs: 1,
+            sampleIndex: 2,
+            sampleRate: 48_000,
+            confidence: 0.5,
+            audioSnippet: { encodedSamples: "not base64 ***" },
+          },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("round-trips reconciliation state broadcasts", () => {
+    const message = {
+      type: "reconciliation-state" as const,
+      version: 1 as const,
+      fromDeviceId: "host-device",
+      updatedAtHostEpochMs: 1_800_000_010_000,
+      ranges: [
+        {
+          from: "host-device",
+          to: "phone-b",
+          meters: 2.13,
+          uncertaintyMeters: 0.21,
+          coverage: 0.8,
+          confidence: 0.74,
+          samplesUsed: 41,
+        },
+      ],
+      points: {
+        "host-device": { x: 0, y: 0 },
+        "phone-b": { x: 2.1, y: 0.1 },
+      },
+      layoutQuality: 0.9,
+      talker: {
+        x: 1.4,
+        y: 0.8,
+        residualMs: 0.21,
+        confidence: 0.65,
+        atHostEpochMs: 1_800_000_009_400,
+      },
+    };
+    const encoded = serializeRealtimeDataChannelMessage(message);
+    expect(parseRealtimeDataChannelMessage(encoded)).toEqual(message);
+  });
+
+  test("rejects reconciliation state with non-finite geometry", () => {
+    expect(
+      parseRealtimeDataChannelMessage(
+        JSON.stringify({
+          type: "reconciliation-state",
+          version: 1,
+          fromDeviceId: "host-device",
+          updatedAtHostEpochMs: 1,
+          ranges: [],
+          points: { a: { x: null, y: 0 } },
+          layoutQuality: null,
+          talker: null,
+        }),
+      ),
+    ).toBeNull();
   });
 });

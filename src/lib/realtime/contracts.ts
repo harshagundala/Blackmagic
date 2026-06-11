@@ -2,6 +2,7 @@ import type {
   AcousticObservation,
   AcousticPulse,
 } from "../session/registry";
+import type { VoiceActivityEvent } from "../session/audio-events";
 
 export type RealtimeMode = "demo" | "provider";
 
@@ -155,9 +156,54 @@ export type RealtimePulseObservationMessage = {
   observation: AcousticObservation;
 };
 
+// One per detected voice event (min-spaced by the VAD), carrying the raw
+// audio snippet the host's reconciliation engine cross-correlates. Kept out
+// of the periodic sensor frames on purpose: frames repeat every ~220 ms and
+// must stay snippet-free, while voice events are deduped by id.
+export type RealtimeVoiceEventMessage = {
+  type: "voice-event";
+  version: 1;
+  fromDeviceId: string;
+  event: VoiceActivityEvent;
+};
+
+export type RealtimeReconciliationRange = {
+  from: string;
+  to: string;
+  meters: number;
+  uncertaintyMeters: number;
+  // Convergence quality in [0, 1]; below ~0.5 the distance is still a lower
+  // bound (the talker has not yet swept past the pair's endfire line).
+  coverage: number;
+  confidence: number;
+  samplesUsed: number;
+};
+
+// Host → peers broadcast of the reconciliation result so every phone renders
+// the same distances/constellation the host derived.
+export type RealtimeReconciliationStateMessage = {
+  type: "reconciliation-state";
+  version: 1;
+  fromDeviceId: string;
+  updatedAtHostEpochMs: number;
+  ranges: RealtimeReconciliationRange[];
+  // Anchor-centered layout, present with 2+ ranged devices.
+  points: Record<string, { x: number; y: number }> | null;
+  layoutQuality: number | null;
+  talker: {
+    x: number;
+    y: number;
+    residualMs: number;
+    confidence: number;
+    atHostEpochMs: number;
+  } | null;
+};
+
 export type RealtimeDataChannelMessage =
   | RealtimeClockProbeMessage
   | RealtimeClockProbeAckMessage
   | RealtimeSensorFrameMessage
   | RealtimeChirpScheduleMessage
-  | RealtimePulseObservationMessage;
+  | RealtimePulseObservationMessage
+  | RealtimeVoiceEventMessage
+  | RealtimeReconciliationStateMessage;

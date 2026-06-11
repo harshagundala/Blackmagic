@@ -13,6 +13,7 @@ import {
 import { selectRealtimePeerTargets } from "@/lib/realtime/coordinator";
 import type {
   RealtimeDataChannelMessage,
+  RealtimeReconciliationStateMessage,
   RealtimeSignal,
   RealtimeSignalPayload,
   RealtimeSensorFrameMessage,
@@ -24,6 +25,7 @@ import type {
   AcousticPulse,
   RoomState,
 } from "@/lib/session/registry";
+import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 
 type WebRtcRoomOptions = {
   active: boolean;
@@ -33,8 +35,15 @@ type WebRtcRoomOptions = {
   getAcousticPulse?: () => AcousticPulse | null;
   getAcousticObservation?: () => AcousticObservation | null;
   getWaveChunk?: () => RealtimeWaveChunk | null;
+  // Latest locally detected voice event (with snippet); sent once per id so
+  // the host's reconciliation engine can cross-correlate microphones.
+  getVoiceEvent?: () => VoiceActivityEvent | null;
+  // Host only: latest reconciliation result; broadcast once per update.
+  getReconciliationState?: () => RealtimeReconciliationStateMessage | null;
   onChirpSchedule?: (pulse: AcousticPulse, fromDeviceId: string) => void;
   onPulseObservation?: (observation: AcousticObservation, fromDeviceId: string) => void;
+  onVoiceEvent?: (event: VoiceActivityEvent, fromDeviceId: string) => void;
+  onReconciliationState?: (state: RealtimeReconciliationStateMessage) => void;
   // Fired when a clock probe to the room host completes; the exchange is in
   // the host's wall-clock domain and feeds the device's clock model.
   onClockExchange?: (exchange: ClockExchange) => void;
@@ -56,6 +65,8 @@ type PeerRuntime = {
   clockProbeSequence: number;
   lastPulseId: string;
   lastObservationKey: string;
+  lastVoiceEventId: string;
+  lastReconciliationKey: string;
 };
 
 const SIGNAL_POLL_MS = 420;
@@ -77,16 +88,24 @@ export function useWebRtcRoom({
   getAcousticPulse,
   getAcousticObservation,
   getWaveChunk,
+  getVoiceEvent,
+  getReconciliationState,
   onChirpSchedule,
   onPulseObservation,
+  onVoiceEvent,
+  onReconciliationState,
   onClockExchange,
 }: WebRtcRoomOptions): WebRtcRoomState {
   const snapshotRef = useRef(snapshot);
   const getAcousticPulseRef = useRef(getAcousticPulse);
   const getAcousticObservationRef = useRef(getAcousticObservation);
   const getWaveChunkRef = useRef(getWaveChunk);
+  const getVoiceEventRef = useRef(getVoiceEvent);
+  const getReconciliationStateRef = useRef(getReconciliationState);
   const onChirpScheduleRef = useRef(onChirpSchedule);
   const onPulseObservationRef = useRef(onPulseObservation);
+  const onVoiceEventRef = useRef(onVoiceEvent);
+  const onReconciliationStateRef = useRef(onReconciliationState);
   const onClockExchangeRef = useRef(onClockExchange);
   const peersRef = useRef(new Map<string, PeerRuntime>());
   const lastSignalSeqRef = useRef(0);
@@ -131,8 +150,24 @@ export function useWebRtcRoom({
   }, [getWaveChunk]);
 
   useEffect(() => {
+    getVoiceEventRef.current = getVoiceEvent;
+  }, [getVoiceEvent]);
+
+  useEffect(() => {
+    getReconciliationStateRef.current = getReconciliationState;
+  }, [getReconciliationState]);
+
+  useEffect(() => {
     onChirpScheduleRef.current = onChirpSchedule;
   }, [onChirpSchedule]);
+
+  useEffect(() => {
+    onVoiceEventRef.current = onVoiceEvent;
+  }, [onVoiceEvent]);
+
+  useEffect(() => {
+    onReconciliationStateRef.current = onReconciliationState;
+  }, [onReconciliationState]);
 
   useEffect(() => {
     onPulseObservationRef.current = onPulseObservation;
@@ -282,6 +317,19 @@ export function useWebRtcRoom({
           message.observation,
           message.fromDeviceId,
         );
+        return;
+      }
+
+      if (message.type === "voice-event") {
+        onVoiceEventRef.current?.(message.event, message.fromDeviceId);
+        return;
+      }
+
+      if (message.type === "reconciliation-state") {
+        // Only the room host derives reconciliation state.
+        if (message.fromDeviceId === hostDeviceIdRef.current) {
+          onReconciliationStateRef.current?.(message);
+        }
       }
     }
 
@@ -292,7 +340,8 @@ export function useWebRtcRoom({
       if (
         message.type !== "sensor-frame" &&
         message.type !== "chirp-schedule" &&
-        message.type !== "pulse-observation"
+        message.type !== "pulse-observation" &&
+        message.type !== "voice-event"
       ) {
         return;
       }
@@ -359,6 +408,8 @@ export function useWebRtcRoom({
       });
       const pulse = getAcousticPulseRef.current?.() ?? null;
       const observation = getAcousticObservationRef.current?.() ?? null;
+      const voiceEvent = getVoiceEventRef.current?.() ?? null;
+      const reconciliation = getReconciliationStateRef.current?.() ?? null;
 
       for (const runtime of peersRef.current.values()) {
         sendDataChannelMessage(runtime, frame);
@@ -387,6 +438,29 @@ export function useWebRtcRoom({
             fromDeviceId: deviceId,
             observation,
           });
+        }
+        if (voiceEvent && voiceEvent.id !== runtime.lastVoiceEventId) {
+          if (
+            sendDataChannelMessage(runtime, {
+              type: "voice-event",
+              version: 1,
+              fromDeviceId: deviceId,
+              event: voiceEvent,
+            })
+          ) {
+            runtime.lastVoiceEventId = voiceEvent.id;
+          }
+        }
+        const reconciliationKey = reconciliation
+          ? String(reconciliation.updatedAtHostEpochMs)
+          : "";
+        if (
+          reconciliation &&
+          reconciliationKey !== runtime.lastReconciliationKey
+        ) {
+          if (sendDataChannelMessage(runtime, reconciliation)) {
+            runtime.lastReconciliationKey = reconciliationKey;
+          }
         }
       }
       setPeerFrames(recentPeerFrames(peerFramesRef.current));
@@ -447,6 +521,8 @@ async function createPeerRuntime({
     clockProbeSequence: 0,
     lastPulseId: "",
     lastObservationKey: "",
+    lastVoiceEventId: "",
+    lastReconciliationKey: "",
   };
   peers.set(peerId, runtime);
 

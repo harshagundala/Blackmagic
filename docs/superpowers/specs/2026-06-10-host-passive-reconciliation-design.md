@@ -101,9 +101,20 @@ New message `RealtimeVoiceEventMessage`:
 
   ```ts
   { from, to, meters, uncertaintyMeters, biasMs, driftMsPerSecond,
-    coverage,      // 0..1: how well the τ' support fills [lo, hi]
+    coverage,      // 0..1: convergence quality (see below)
     samplesUsed, confidence, observedAtHostEpochMs }
   ```
+
+  `coverage` measures convergence quality of the extremes (evidence density
+  at both ends of the span, span stability over the window, sample count) —
+  NOT endfire coverage. A broadside-only talker sweep of a far pair is
+  distribution-identical to a full sweep of a nearer pair, so no single-pair
+  statistic can detect under-coverage; the estimate is intrinsically a lower
+  bound and the implementation documents this. Layout stress across 3+
+  devices is the cross-check that exposes under-estimated pairs. Drift
+  correction applies only when the Theil–Sen slope clears its own noise
+  floor (2σ), since subtracting an insignificant slope estimated from the
+  geometric spread distorts more than short-window SRO does.
 
 - `source-locator.ts` — for 3+ devices with a current layout: coarse grid +
   local refinement over bias-corrected per-event TDOAs → talker position

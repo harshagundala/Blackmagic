@@ -6,6 +6,10 @@ Blackmagic is a browser-native research app for turning a cluster of nearby phon
 
 The main routes currently render `WaveformApp`: every phone shows a live mic waveform for **every** connected phone, all drawn on the shared host-clock timeline. This proves the foundation visibly — capture, direct WebRTC links (host as hub), and sync precision (a clap aligns across rows; per-device `±Xms` badges show clock error against the host). The chirp/localization stack below remains in the tree and re-mounts once the plumbing is trusted.
 
+### Host-node passive reconciliation
+
+On top of the waveform plumbing, the host phone now derives inter-device distances and a relative 2D constellation **passively, from ambient speech** — no chirps. Every device streams its voice events (raw-audio snippets cut around each VAD trigger) to the host over the data channel; the host GCC-PHAT-aligns each pair, accumulates per-pair TDOAs, and applies the extreme-TDOA method (`src/lib/reconciliation/`): as a talker moves around the room the geometric delay sweeps `[−d/c, +d/c]` while the per-pair clock/pipeline offset stays put, so the robust spread of the de-drifted TDOA distribution yields the distance and its midpoint yields the offset — distance accuracy does not inherit the millisecond clock-sync error or the un-observable per-device audio input latency. With 3+ phones the pairwise distances feed the stress-minimization layout and each fresh voice event is localized as a talker dot on the room map. Motion-stability gating resets pairs whose phone moved; an ADC sample-rate-offset drift fit (Theil–Sen, significance-gated) keeps long windows honest. The host broadcasts the result so every phone renders the same `room` panel: pairwise meters with uncertainty and lock state, the constellation map, and the live talker position. Design notes and the error budget live in `docs/superpowers/specs/2026-06-10-host-passive-reconciliation-design.md`.
+
 ## Current V1
 
 - Next.js 16 App Router, React 19, TypeScript, Tailwind CSS.

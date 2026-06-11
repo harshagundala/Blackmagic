@@ -2,11 +2,15 @@ import type {
   RealtimeClockProbeAckMessage,
   RealtimeClockProbeMessage,
   RealtimeDataChannelMessage,
+  RealtimeReconciliationStateMessage,
   RealtimeSensorFrameMessage,
+  RealtimeVoiceEventMessage,
   RealtimeWaveChunk,
 } from "./contracts";
 import type { AcousticObservation } from "../session/registry";
 import type { ClockExchange } from "../timing/clock-sync";
+import { isPlausibleAudioSnippet } from "../acoustics/audio-snippet";
+import type { VoiceActivityEvent } from "../session/audio-events";
 
 const DATA_CHANNEL_MESSAGE_VERSION = 1;
 const MAX_DATA_CHANNEL_MESSAGE_CHARS = 64_000;
@@ -206,6 +210,29 @@ export function createRealtimeSensorFrame({
   };
 }
 
+export function createVoiceEventMessage({
+  fromDeviceId,
+  event,
+}: {
+  fromDeviceId: string;
+  event: VoiceActivityEvent;
+}): RealtimeVoiceEventMessage | null {
+  if (
+    !fromDeviceId ||
+    !event?.id ||
+    !finiteNumber(event.detectedAtHostEpochMs) ||
+    !finiteNumber(event.sampleRate)
+  ) {
+    return null;
+  }
+  return {
+    type: "voice-event",
+    version: DATA_CHANNEL_MESSAGE_VERSION,
+    fromDeviceId,
+    event,
+  };
+}
+
 export function serializeRealtimeDataChannelMessage(
   message: RealtimeDataChannelMessage,
 ) {
@@ -272,9 +299,94 @@ export function isRealtimeDataChannelMessage(
       return nonEmptyString(value.fromDeviceId) && isRecord(value.pulse);
     case "pulse-observation":
       return nonEmptyString(value.fromDeviceId) && isRecord(value.observation);
+    case "voice-event":
+      return nonEmptyString(value.fromDeviceId) && isValidVoiceEvent(value.event);
+    case "reconciliation-state":
+      return isValidReconciliationState(value);
     default:
       return false;
   }
+}
+
+function isValidVoiceEvent(value: unknown): value is VoiceActivityEvent {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    !nonEmptyString(value.id) ||
+    !finiteNumber(value.detectedAtHostEpochMs) ||
+    !finiteNumber(value.sampleIndex) ||
+    !finiteNumber(value.sampleRate) ||
+    !finiteNumber(value.confidence)
+  ) {
+    return false;
+  }
+  // A malformed or oversized snippet poisons the GCC alignment downstream;
+  // absent is fine (the event still helps clustering).
+  if (
+    value.audioSnippet !== undefined &&
+    value.audioSnippet !== null &&
+    !isPlausibleAudioSnippet(value.audioSnippet as never)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+const MAX_RECONCILIATION_RANGES = 64;
+
+function isValidReconciliationState(
+  value: Record<string, unknown>,
+): value is RealtimeReconciliationStateMessage & Record<string, unknown> {
+  if (
+    !nonEmptyString(value.fromDeviceId) ||
+    !finiteNumber(value.updatedAtHostEpochMs) ||
+    !Array.isArray(value.ranges) ||
+    value.ranges.length > MAX_RECONCILIATION_RANGES
+  ) {
+    return false;
+  }
+  for (const range of value.ranges) {
+    if (
+      !isRecord(range) ||
+      !nonEmptyString(range.from) ||
+      !nonEmptyString(range.to) ||
+      !finiteNumber(range.meters) ||
+      !finiteNumber(range.uncertaintyMeters) ||
+      !finiteNumber(range.coverage) ||
+      !finiteNumber(range.confidence) ||
+      !finiteNumber(range.samplesUsed)
+    ) {
+      return false;
+    }
+  }
+  if (value.points !== null) {
+    if (!isRecord(value.points)) {
+      return false;
+    }
+    for (const point of Object.values(value.points)) {
+      if (
+        !isRecord(point) ||
+        !finiteNumber(point.x) ||
+        !finiteNumber(point.y)
+      ) {
+        return false;
+      }
+    }
+  }
+  if (value.talker !== null) {
+    if (
+      !isRecord(value.talker) ||
+      !finiteNumber(value.talker.x) ||
+      !finiteNumber(value.talker.y) ||
+      !finiteNumber(value.talker.residualMs) ||
+      !finiteNumber(value.talker.confidence) ||
+      !finiteNumber(value.talker.atHostEpochMs)
+    ) {
+      return false;
+    }
+  }
+  return nullableFiniteNumber(value.layoutQuality);
 }
 
 const MAX_WAVE_CHUNK_LEVELS = 64;

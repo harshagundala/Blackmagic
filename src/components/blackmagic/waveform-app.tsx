@@ -10,9 +10,17 @@ import {
 import { useWebRtcRoom } from "@/hooks/use-webrtc-room";
 import { WaveSeries } from "@/lib/waveform/wave-series";
 import { projectClockModel } from "@/lib/timing/clock-sync";
-import type { RealtimeSensorFrameMessage } from "@/lib/realtime/contracts";
+import type {
+  RealtimeReconciliationStateMessage,
+  RealtimeSensorFrameMessage,
+} from "@/lib/realtime/contracts";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
 import type { DeviceTimeSyncState } from "@/lib/session/timing-health";
+import {
+  ReconciliationEngine,
+  type ReconciliationSnapshot,
+} from "@/lib/reconciliation/engine";
+import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 
 type Phase = "arriving" | "listening";
 
@@ -38,12 +46,55 @@ export function WaveformApp() {
   const peerSeriesRef = useRef(new Map<string, WaveSeries>());
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
 
+  // Reconciliation runs on the host node only: peers stream their voice
+  // events (with raw-audio snippets) to the host, the host cross-correlates
+  // them into distances/positions and broadcasts the result back.
+  const isHost = roomState?.hostDeviceId === deviceId;
+  const isHostRef = useRef(isHost);
+  const reconciliationEngineRef = useRef<ReconciliationEngine | null>(null);
+  const reconciliationMessageRef =
+    useRef<RealtimeReconciliationStateMessage | null>(null);
+  const [reconciliation, setReconciliation] =
+    useState<RealtimeReconciliationStateMessage | null>(null);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
+
+  const hostEngine = useCallback(() => {
+    if (!reconciliationEngineRef.current) {
+      reconciliationEngineRef.current = new ReconciliationEngine();
+    }
+    return reconciliationEngineRef.current;
+  }, []);
+
   const realtime = useWebRtcRoom({
     active: phase === "listening",
     deviceId,
     roomState,
     snapshot: sensors.snapshot,
     getWaveChunk: sensors.getWaveChunk,
+    getVoiceEvent: useCallback(() => snapshotRef.current.voiceEvent, []),
+    getReconciliationState: useCallback(
+      () => reconciliationMessageRef.current,
+      [],
+    ),
+    onVoiceEvent: useCallback(
+      (event: VoiceActivityEvent, fromDeviceId: string) => {
+        if (isHostRef.current) {
+          hostEngine().ingestVoiceEvent(fromDeviceId, event);
+        }
+      },
+      [hostEngine],
+    ),
+    onReconciliationState: useCallback(
+      (state: RealtimeReconciliationStateMessage) => {
+        if (!isHostRef.current) {
+          setReconciliation(state);
+        }
+      },
+      [],
+    ),
     onClockExchange: offerClockExchange,
   });
 
@@ -104,9 +155,63 @@ export function WaveformApp() {
     for (const id of peerSeriesRef.current.keys()) {
       if (!present.has(id)) {
         peerSeriesRef.current.delete(id);
+        reconciliationEngineRef.current?.removeDevice(id);
       }
     }
   }, [realtime.peerFrames, roomState?.devices]);
+
+  // Host: a peer's motion stability gates its acoustic evidence — a phone
+  // that moved invalidates the distances it took part in.
+  useEffect(() => {
+    if (!isHost) {
+      return;
+    }
+    const engine = hostEngine();
+    for (const frame of realtime.peerFrames) {
+      if (
+        frame.motionStability !== null &&
+        frame.hostEstimatedEpochMs !== null
+      ) {
+        engine.noteMotion(
+          frame.fromDeviceId,
+          frame.motionStability,
+          frame.hostEstimatedEpochMs,
+        );
+      }
+    }
+  }, [hostEngine, isHost, realtime.peerFrames]);
+
+  // Host: feed its own voice events into the engine as they fire.
+  const ownVoiceEvent = sensors.snapshot.voiceEvent;
+  useEffect(() => {
+    if (isHost && ownVoiceEvent) {
+      hostEngine().ingestVoiceEvent(deviceId, ownVoiceEvent);
+    }
+  }, [deviceId, hostEngine, isHost, ownVoiceEvent]);
+
+  // Host: recompute the room geometry about once a second and stage the
+  // result for broadcast; peers receive it via onReconciliationState.
+  useEffect(() => {
+    if (phase !== "listening" || !isHost) {
+      reconciliationMessageRef.current = null;
+      return;
+    }
+    const tick = () => {
+      const nowMs = hostEpochNow(snapshotRef.current) ?? Date.now();
+      const engine = hostEngine();
+      engine.setAnchorDevice(deviceId);
+      engine.noteMotion(deviceId, snapshotRef.current.motionStability, nowMs);
+      const message = reconciliationStateMessage(
+        deviceId,
+        engine.snapshot(nowMs),
+      );
+      reconciliationMessageRef.current = message;
+      setReconciliation(message);
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
+    return () => window.clearInterval(timer);
+  }, [deviceId, hostEngine, isHost, phase]);
 
   // One render loop draws every row from its series, aligned on the shared
   // host-clock timeline.
@@ -156,7 +261,6 @@ export function WaveformApp() {
     realtime.peerFrames.map((frame) => [frame.fromDeviceId, frame]),
   );
   const nowHostMs = hostEpochNow(sensors.snapshot);
-  const isHost = roomState?.hostDeviceId === deviceId;
   const reconnecting = connection === "reconnecting";
 
   return (
@@ -265,7 +369,13 @@ export function WaveformApp() {
             <p className="px-1 pt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-black/35">
               open this url on another phone
             </p>
-          ) : null}
+          ) : (
+            <ReconciliationPanel
+              nowHostMs={nowHostMs}
+              selfDeviceId={deviceId}
+              state={reconciliation}
+            />
+          )}
         </div>
       </div>
 
@@ -407,6 +517,249 @@ function nextCaptureMode(
     return "video";
   }
   return "raw";
+}
+
+// The host's engine snapshot, shaped for the wire. Broadcast even when
+// ranges are empty so peers clear stale distances after a motion reset.
+function reconciliationStateMessage(
+  fromDeviceId: string,
+  snapshot: ReconciliationSnapshot,
+): RealtimeReconciliationStateMessage {
+  return {
+    type: "reconciliation-state",
+    version: 1,
+    fromDeviceId,
+    updatedAtHostEpochMs: snapshot.updatedAtHostEpochMs,
+    ranges: snapshot.ranges.map((range) => ({
+      from: range.from,
+      to: range.to,
+      meters: range.meters,
+      uncertaintyMeters: range.uncertaintyMeters,
+      coverage: range.coverage,
+      confidence: range.confidence,
+      samplesUsed: range.samplesUsed,
+    })),
+    points: snapshot.layout?.points ?? null,
+    layoutQuality: snapshot.layout?.quality ?? null,
+    talker: snapshot.talker
+      ? {
+          x: snapshot.talker.x,
+          y: snapshot.talker.y,
+          residualMs: snapshot.talker.residualMs,
+          confidence: snapshot.talker.confidence,
+          atHostEpochMs: snapshot.talker.atHostEpochMs,
+        }
+      : null,
+  };
+}
+
+const TALKER_FRESH_MS = 8_000;
+const RECONCILIATION_STALE_MS = 12_000;
+
+function ReconciliationPanel({
+  state,
+  selfDeviceId,
+  nowHostMs,
+}: {
+  state: RealtimeReconciliationStateMessage | null;
+  selfDeviceId: string;
+  nowHostMs: number | null;
+}) {
+  const mapRef = useRef<HTMLCanvasElement | null>(null);
+  const stale =
+    state !== null &&
+    nowHostMs !== null &&
+    nowHostMs - state.updatedAtHostEpochMs > RECONCILIATION_STALE_MS;
+  const talker =
+    state?.talker &&
+    nowHostMs !== null &&
+    nowHostMs - state.talker.atHostEpochMs <= TALKER_FRESH_MS
+      ? state.talker
+      : null;
+  const points =
+    state?.points && Object.keys(state.points).length >= 2 ? state.points : null;
+
+  useEffect(() => {
+    const canvas = mapRef.current;
+    if (canvas && points) {
+      drawReconciliationMap(canvas, points, talker, selfDeviceId, stale);
+    }
+  }, [points, selfDeviceId, stale, talker]);
+
+  const label = (id: string) => (id === selfDeviceId ? "you" : shortId(id));
+
+  return (
+    <section className="rounded-2xl border border-black/8 bg-white shadow-[0_10px_34px_rgba(8,16,34,0.06)]">
+      <div className="flex items-baseline justify-between px-4 pt-3 font-mono text-[10px] uppercase tracking-[0.14em]">
+        <span className="text-black/60">room</span>
+        <span className="text-black/40">
+          {stale
+            ? "re-listening"
+            : state && state.ranges.length > 0
+              ? `${state.ranges.length} ${state.ranges.length === 1 ? "link" : "links"} ranged`
+              : "listening"}
+        </span>
+      </div>
+      {state && state.ranges.length > 0 ? (
+        <div className="flex flex-col gap-1 px-4 pt-2 font-mono text-[11px] tracking-[0.05em]">
+          {state.ranges.map((range) => (
+            <div
+              className="flex items-baseline justify-between"
+              key={`${range.from}|${range.to}`}
+              style={{ opacity: stale ? 0.4 : 1 }}
+            >
+              <span className="text-black/55">
+                {label(range.from)} ↔ {label(range.to)}
+              </span>
+              <span className="text-black/80">
+                {range.coverage < 0.5 ? "≥ " : ""}
+                {range.meters.toFixed(2)} m
+                <span className="text-black/35">
+                  {" "}
+                  ±{range.uncertaintyMeters.toFixed(2)} ·{" "}
+                  {describeRangeState(range.confidence, range.coverage)}
+                </span>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="px-4 pt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-black/35">
+          say something — distances appear as sound crosses the room
+        </p>
+      )}
+      {points ? (
+        <canvas className="block h-[150px] w-full" ref={mapRef} />
+      ) : (
+        <div className="h-3" />
+      )}
+      <p className="px-4 pb-3 pt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-black/25">
+        {talker
+          ? "voice located · keep talking while moving to sharpen"
+          : "walk and talk around the phones to sharpen the map"}
+      </p>
+    </section>
+  );
+}
+
+function describeRangeState(confidence: number, coverage: number) {
+  if (confidence >= 0.65 && coverage >= 0.5) {
+    return "locked";
+  }
+  if (confidence >= 0.35) {
+    return "settling";
+  }
+  return "gathering";
+}
+
+// Top-down room map: anchor-centered layout points, the talker as a warm
+// pulse. The frame autoscales to the constellation with margin so phones
+// stay visible however the room is laid out.
+function drawReconciliationMap(
+  canvas: HTMLCanvasElement,
+  points: Record<string, { x: number; y: number }>,
+  talker: { x: number; y: number; confidence: number } | null,
+  selfDeviceId: string,
+  stale: boolean,
+) {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (canvas.width !== Math.round(width * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  const entries = Object.entries(points);
+  const xs = entries.map(([, point]) => point.x);
+  const ys = entries.map(([, point]) => point.y);
+  if (talker) {
+    xs.push(talker.x);
+    ys.push(talker.y);
+  }
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1.2);
+  const spanY = Math.max(maxY - minY, 1.2);
+  const margin = 26;
+  const scale = Math.min(
+    (width - margin * 2) / spanX,
+    (height - margin * 2) / spanY,
+  );
+  const offsetX = (width - spanX * scale) / 2 - minX * scale;
+  const offsetY = (height - spanY * scale) / 2 - minY * scale;
+  const toCanvas = (point: { x: number; y: number }) => ({
+    x: point.x * scale + offsetX,
+    // Flip y so "up" on screen matches +y in the layout frame.
+    y: height - (point.y * scale + offsetY),
+  });
+
+  const alpha = stale ? 0.35 : 1;
+
+  // Faint range lines between every pair ground the dots visually.
+  context.strokeStyle = `rgba(6,17,46,${0.1 * alpha})`;
+  context.lineWidth = 1;
+  for (let i = 0; i < entries.length; i += 1) {
+    for (let j = i + 1; j < entries.length; j += 1) {
+      const a = toCanvas(entries[i][1]);
+      const b = toCanvas(entries[j][1]);
+      context.beginPath();
+      context.moveTo(a.x, a.y);
+      context.lineTo(b.x, b.y);
+      context.stroke();
+    }
+  }
+
+  if (talker) {
+    const spot = toCanvas(talker);
+    const glow = context.createRadialGradient(
+      spot.x,
+      spot.y,
+      0,
+      spot.x,
+      spot.y,
+      16,
+    );
+    glow.addColorStop(0, `rgba(217,119,6,${0.5 * alpha})`);
+    glow.addColorStop(1, "rgba(217,119,6,0)");
+    context.fillStyle = glow;
+    context.beginPath();
+    context.arc(spot.x, spot.y, 16, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = `rgba(180,83,9,${0.9 * alpha})`;
+    context.beginPath();
+    context.arc(spot.x, spot.y, 3.5, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  context.font =
+    "9px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+  context.textAlign = "center";
+  for (const [id, point] of entries) {
+    const spot = toCanvas(point);
+    const self = id === selfDeviceId;
+    context.fillStyle = self
+      ? `rgba(0,122,255,${0.95 * alpha})`
+      : `rgba(6,17,46,${0.8 * alpha})`;
+    context.beginPath();
+    context.arc(spot.x, spot.y, self ? 5 : 4, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = `rgba(5,6,10,${0.45 * alpha})`;
+    context.fillText(
+      self ? "you" : shortId(id),
+      spot.x,
+      spot.y - 9,
+    );
+  }
 }
 
 function hostEpochNow(snapshot: SensorSnapshot) {
