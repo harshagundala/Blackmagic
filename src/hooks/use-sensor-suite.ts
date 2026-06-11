@@ -163,6 +163,12 @@ const WAVE_CHUNK_BUCKETS = 16;
 const MAX_CLOCK_SEARCH_SLACK_MS = 120;
 const ANALYSER_WINDOW_SAMPLES = 4096;
 const ROLLING_AUDIO_HISTORY_SAMPLES = 48_000;
+// React snapshot publish cadence. The read loop still runs per animation
+// frame for capture health, the wave series, and voice-activity detection,
+// but publishing 60 state updates a second re-renders the whole app at
+// 60 fps and the audio-window copy alone churns ~11 MB/s of garbage. Voice
+// events still publish immediately on the frame they fire.
+const SNAPSHOT_PUBLISH_INTERVAL_MS = 100;
 const STREAMING_MATCH_MAX_LATE_MS = 45;
 
 type PermissionEventConstructor = {
@@ -215,6 +221,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const audioWorkletRef = useRef<AudioWorkletNode | null>(null);
   const rollingAudioRef = useRef<RollingSampleBuffer | null>(null);
   const captureRecorderRef = useRef(new CaptureRecorder());
+  const lastSnapshotPublishPerfRef = useRef(0);
   const streamingMatcherRef = useRef<StreamingPulseMatcher | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
@@ -673,23 +680,40 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       }
       const micLevel = Math.sqrt(sum / samples.length);
       maybeRecoverSilentCapture(micLevel, audioContext);
-      const timing = timestampCurrentAudioWindow(
-        audioContext,
-        samples,
-        rollingAudioRef.current,
-        clockModelRef.current,
-      );
-      const waveTimestampMs = timing.audioFrame?.hostEstimatedEpochMs;
+      // The frame timestamp is cheap and feeds the wave series and the voice
+      // gate every frame; the audio WINDOW copies the whole rolling buffer,
+      // so it is only built on frames that actually publish a snapshot.
+      const clock = clockModelRef.current;
+      const audioFrame = clock ? timestampAudioFrame(audioContext, clock) : null;
+      const waveTimestampMs = audioFrame?.hostEstimatedEpochMs;
       if (typeof waveTimestampMs === "number") {
         waveSeriesRef.current.appendSample(waveTimestampMs, micLevel);
       }
       const voiceActivity = detectVoiceActivityEvent({
         gate: voiceGateRef.current,
         micLevel,
-        frame: timing.audioFrame,
+        frame: audioFrame,
         motionStability: motionMetadataRef.current.motionStability,
       });
       voiceGateRef.current = voiceActivity.gate;
+
+      const nowPerfMs = performance.now();
+      if (
+        !voiceActivity.event &&
+        nowPerfMs - lastSnapshotPublishPerfRef.current <
+          SNAPSHOT_PUBLISH_INTERVAL_MS
+      ) {
+        animationRef.current = requestAnimationFrame(read);
+        return;
+      }
+      lastSnapshotPublishPerfRef.current = nowPerfMs;
+
+      const timing = timestampCurrentAudioWindow(
+        audioContext,
+        samples,
+        rollingAudioRef.current,
+        clockModelRef.current,
+      );
       const voiceEvent = voiceActivity.event
         ? attachSpeechFingerprint(voiceActivity.event, timing.audioWindow)
         : null;

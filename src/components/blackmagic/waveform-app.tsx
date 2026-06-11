@@ -140,7 +140,22 @@ export function WaveformApp() {
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
   const matchAttemptsRef = useRef(new Map<string, number>());
   const roomDevicesRef = useRef<RoomDevice[]>([]);
-  const trackSensorPulse = sensors.trackPulse;
+  // Chirps loud enough to range with are loud enough to trip the voice gate;
+  // every scheduled pulse opens a suppression window so chirps never
+  // masquerade as voice events.
+  const recentPulsesRef = useRef<AcousticPulse[]>([]);
+
+  const noteRecentPulse = useCallback((pulse: AcousticPulse) => {
+    recentPulsesRef.current = [...recentPulsesRef.current.slice(-7), pulse];
+  }, []);
+
+  const isChirpWindow = useCallback((hostEpochMs: number) => {
+    return recentPulsesRef.current.some(
+      (pulse) =>
+        hostEpochMs >= pulse.emittedAtHostEpochMs - 150 &&
+        hostEpochMs <= pulse.emittedAtHostEpochMs + pulse.durationMs + 350,
+    );
+  }, []);
 
   useEffect(() => {
     roomDevicesRef.current = roomState?.devices ?? [];
@@ -316,18 +331,27 @@ export function WaveformApp() {
     roomState,
     snapshot: sensors.snapshot,
     getWaveChunk: sensors.getWaveChunk,
-    getVoiceEvent: useCallback(() => snapshotRef.current.voiceEvent, []),
+    getVoiceEvent: useCallback(() => {
+      const event = snapshotRef.current.voiceEvent;
+      if (!event || isChirpWindow(event.detectedAtHostEpochMs)) {
+        return null;
+      }
+      return event;
+    }, [isChirpWindow]),
     getReconciliationState: useCallback(
       () => reconciliationMessageRef.current,
       [],
     ),
     onVoiceEvent: useCallback(
       (event: VoiceActivityEvent, fromDeviceId: string) => {
-        if (isHostRef.current) {
+        if (
+          isHostRef.current &&
+          !isChirpWindow(event.detectedAtHostEpochMs)
+        ) {
           hostEngine().ingestVoiceEvent(fromDeviceId, event);
         }
       },
-      [hostEngine],
+      [hostEngine, isChirpWindow],
     ),
     onReconciliationState: useCallback(
       (state: RealtimeReconciliationStateMessage) => {
@@ -342,6 +366,7 @@ export function WaveformApp() {
     onChirpSchedule: useCallback(
       (pulse: AcousticPulse, fromDeviceId: string) => {
         recordChirpEvidence(fromDeviceId, pulse, null);
+        noteRecentPulse(pulse);
         const nowMs = hostEpochNow(snapshotRef.current);
         if (nowMs === null) {
           return;
@@ -352,11 +377,12 @@ export function WaveformApp() {
           deltaMs < 5_500 &&
           observablePulseRef.current?.id !== pulse.id
         ) {
+          // Armed for the bounded matched-filter search after arrival; the
+          // continuous streaming matcher stays off (main-thread cost).
           observablePulseRef.current = pulse;
-          trackSensorPulse(pulse);
         }
       },
-      [recordChirpEvidence, trackSensorPulse],
+      [noteRecentPulse, recordChirpEvidence],
     ),
     onPulseObservation: useCallback(
       (observation: AcousticObservation, fromDeviceId: string) => {
@@ -485,10 +511,14 @@ export function WaveformApp() {
   // Host: feed its own voice events into the engine as they fire.
   const ownVoiceEvent = sensors.snapshot.voiceEvent;
   useEffect(() => {
-    if (isHost && ownVoiceEvent) {
+    if (
+      isHost &&
+      ownVoiceEvent &&
+      !isChirpWindow(ownVoiceEvent.detectedAtHostEpochMs)
+    ) {
       hostEngine().ingestVoiceEvent(deviceId, ownVoiceEvent);
     }
-  }, [deviceId, hostEngine, isHost, ownVoiceEvent]);
+  }, [deviceId, hostEngine, isChirpWindow, isHost, ownVoiceEvent]);
 
   // Chirp emitter rotation: every capturing device computes the same
   // host-clock turn schedule; on its turn it announces the pulse over the
@@ -533,7 +563,7 @@ export function WaveformApp() {
       publishedPulseIdRef.current = pulse.id;
       activePulseRef.current = pulse;
       observablePulseRef.current = pulse;
-      trackSensorPulse(pulse);
+      noteRecentPulse(pulse);
       recordChirpEvidence(deviceId, pulse, null);
       scheduleOutputPulse(
         pulse,
@@ -547,11 +577,11 @@ export function WaveformApp() {
     return () => window.clearInterval(timer);
   }, [
     deviceId,
+    noteRecentPulse,
     phase,
     recordChirpEvidence,
     roomState,
     sensors.getAudioContext,
-    trackSensorPulse,
   ]);
 
   useEffect(
@@ -1372,23 +1402,47 @@ function maybeCreateMatchedObservation(
     ((pulse.emittedAtHostEpochMs - snapshot.audioFrame.hostEstimatedEpochMs) /
       1_000) *
       snapshot.audioFrame.sampleRate;
+  const searchStartSample = Math.max(
+    0,
+    Math.floor(
+      expectedStartSampleIndex -
+        snapshot.audioWindow.startSampleIndex -
+        (earlyMs / 1_000) * sampleRate,
+    ),
+  );
+  const searchEndSample = Math.min(
+    snapshot.audioWindow.samples.length,
+    Math.ceil(
+      expectedStartSampleIndex -
+        snapshot.audioWindow.startSampleIndex +
+        ((lateMs + pulse.durationMs) / 1_000) * sampleRate,
+    ),
+  );
+
+  // Two-stage search keeps this main-thread-cheap: a 4 ms-hop energy scan
+  // finds the burst, then the full matched filter refines only ±25 ms
+  // around it (the chirp dominates the window's energy at full gain).
+  const samples = snapshot.audioWindow.samples;
+  const hop = Math.max(32, Math.round(0.004 * sampleRate));
+  let bestEnergy = -1;
+  let bestAt = searchStartSample;
+  for (let start = searchStartSample; start + hop <= searchEndSample; start += hop) {
+    let energy = 0;
+    for (let index = start; index < start + hop; index += 1) {
+      energy += samples[index] * samples[index];
+    }
+    if (energy > bestEnergy) {
+      bestEnergy = energy;
+      bestAt = start;
+    }
+  }
+  const refineHalf = Math.round(0.025 * sampleRate);
 
   return createMatchedToneObservation({
     pulse,
     audioWindow: snapshot.audioWindow,
-    searchStartSample: Math.max(
-      0,
-      Math.floor(
-        expectedStartSampleIndex -
-          snapshot.audioWindow.startSampleIndex -
-          (earlyMs / 1_000) * sampleRate,
-      ),
-    ),
-    searchEndSample: Math.ceil(
-      expectedStartSampleIndex -
-        snapshot.audioWindow.startSampleIndex +
-        (lateMs / 1_000) * sampleRate,
-    ),
+    searchStartSample: Math.max(searchStartSample, bestAt - refineHalf),
+    searchEndSample: Math.min(searchEndSample, bestAt + hop + refineHalf),
     minScore: 0.45,
     minPeakRatio: 2,
   });
