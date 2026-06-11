@@ -34,12 +34,15 @@ export type RawAudioOffsetEstimate = {
   // relative to each snippet's own window cut. Matches the fingerprint-offset
   // sign convention used by the audio-event reconciler.
   offsetMs: number;
-  // Pearson correlation of the two windows at the aligned lag; interpretable
-  // confidence in [−1, 1].
+  // |Pearson correlation| of the two windows at the aligned lag, in [0, 1].
+  // iOS voice processing can invert capture polarity outright, so alignment
+  // strength is judged on magnitude; `polarity` carries the sign.
   correlation: number;
-  // Height of the GCC-PHAT peak in [0, 1]; sharpness of the alignment.
+  // Height of the |GCC-PHAT| peak in [0, 1]; sharpness of the alignment.
   phatPeak: number;
   peakRatio: number;
+  // +1 when the captures agree in sign, −1 when one side is inverted.
+  polarity: 1 | -1;
 };
 
 const DEFAULT_WINDOW_MS = 240;
@@ -231,31 +234,36 @@ export function estimateRawAudioOffset(
   }
   fft(crossRe, crossIm, true);
 
+  // Peak picking on |correlation|: voice-processed captures can arrive with
+  // inverted polarity, which flips the true peak negative while leaving its
+  // timing exact.
   const correlationAt = (lag: number) =>
     crossRe[(lag + fftSize) % fftSize] / fftSize;
+  const magnitudeAt = (lag: number) => Math.abs(correlationAt(lag));
 
   let bestLag = 0;
   let bestValue = Number.NEGATIVE_INFINITY;
   for (let lag = -maxLagSamples; lag <= maxLagSamples; lag += 1) {
-    const value = correlationAt(lag);
+    const value = magnitudeAt(lag);
     if (value > bestValue) {
       bestValue = value;
       bestLag = lag;
     }
   }
+  const polarity: 1 | -1 = correlationAt(bestLag) >= 0 ? 1 : -1;
 
   let secondBest = 0;
   for (let lag = -maxLagSamples; lag <= maxLagSamples; lag += 1) {
     if (Math.abs(lag - bestLag) <= 2) {
       continue;
     }
-    secondBest = Math.max(secondBest, correlationAt(lag));
+    secondBest = Math.max(secondBest, magnitudeAt(lag));
   }
 
   const refinedLag = parabolicLag(
-    correlationAt(bestLag - 1),
+    magnitudeAt(bestLag - 1),
     bestValue,
-    correlationAt(bestLag + 1),
+    magnitudeAt(bestLag + 1),
     bestLag,
     maxLagSamples,
   );
@@ -266,12 +274,13 @@ export function estimateRawAudioOffset(
 
   return {
     offsetMs: round((refinedLag / sampleRate) * 1_000, 3),
-    correlation: round(correlation, 3),
+    correlation: round(Math.abs(correlation), 3),
     phatPeak: round(Math.max(0, Math.min(1, bestValue)), 3),
     peakRatio: round(
       secondBest <= 0 ? Number.POSITIVE_INFINITY : bestValue / secondBest,
       3,
     ),
+    polarity,
   };
 }
 

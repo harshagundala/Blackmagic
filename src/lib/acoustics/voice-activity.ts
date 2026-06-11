@@ -29,7 +29,11 @@ export type VoiceActivityDetectionResult = {
 
 const DEFAULT_OPEN_LEVEL = 0.045;
 const DEFAULT_CLOSE_LEVEL = 0.018;
-const DEFAULT_MIN_EVENT_SPACING_MS = 650;
+// Events snap to a shared host-clock grid so every phone cuts its snippet
+// around the SAME instants (clock sync is ±10 ms, the cluster window 80 ms):
+// each grid tick during speech pairs across the whole room instead of
+// devices free-running past each other.
+const DEFAULT_MIN_EVENT_SPACING_MS = 500;
 // Adaptive thresholds: voice is a sustained rise above the learned floor.
 const ADAPTIVE_OPEN_RATIO = 5;
 const ADAPTIVE_CLOSE_RATIO = 2;
@@ -93,14 +97,15 @@ export function detectVoiceActivityEvent({
     };
   }
 
-  // Re-trigger during sustained speech: a long utterance yields an event
-  // every spacing interval, not just one at the onset — each one is another
-  // cross-correlation opportunity for the reconciler.
+  // Re-trigger during sustained speech on host-clock grid crossings: a long
+  // utterance yields an event per grid tick, and because every device uses
+  // the same grid their events cluster and cross-correlate instead of
+  // free-running past each other.
   const canEmit =
     micLevel >= effectiveOpen &&
     (gate.lastEventHostEpochMs === null ||
-      frame.hostEstimatedEpochMs - gate.lastEventHostEpochMs >=
-        minEventSpacingMs);
+      Math.floor(frame.hostEstimatedEpochMs / minEventSpacingMs) >
+        Math.floor(gate.lastEventHostEpochMs / minEventSpacingMs));
 
   if (!canEmit) {
     return { gate: tracked, event: null };

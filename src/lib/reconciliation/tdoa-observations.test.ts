@@ -58,6 +58,8 @@ type SyntheticDevice = {
   vadJitterMs: number;
   // Replace the real signal with unrelated noise (broken mic / wrong room).
   corrupted?: boolean;
+  // iOS voice processing can flip capture polarity outright.
+  inverted?: boolean;
 };
 
 function buildObservation(
@@ -75,9 +77,10 @@ function buildObservation(
   const samples = new Float32Array(windowSamples);
   for (let index = 0; index < windowSamples; index += 1) {
     const t = (startSampleIndex + index) / sampleRate;
-    samples[index] = device.corrupted
+    const value = device.corrupted
       ? (random() - 0.5) * 0.4
       : signal(t - device.delayMs / 1_000) + (random() - 0.5) * 0.01;
+    samples[index] = device.inverted ? -value : value;
   }
 
   const snippet = captureAudioSnippet({
@@ -187,6 +190,22 @@ describe("derivePairTdoaObservations", () => {
     const observations = derivePairTdoaObservations(event);
     expect(observations).toHaveLength(1);
     expect(Math.abs(observations[0].tdoaMs - 5.2)).toBeLessThan(0.3);
+  });
+
+  it("aligns despite one capture being polarity-inverted", () => {
+    // Field regression: iOS voice processing inverted one phone's capture,
+    // flipping the true correlation peak negative; alignment must judge
+    // magnitude, not signed height.
+    const signal = makeSpeechLikeSignal(29);
+    const event = buildEvent([
+      buildObservation(signal, { deviceId: "alpha", delayMs: 2, clockErrorMs: 0, vadJitterMs: 1 }, 81),
+      buildObservation(signal, { deviceId: "bravo", delayMs: 7.3, clockErrorMs: 0, vadJitterMs: -2, inverted: true }, 82),
+    ]);
+
+    const observations = derivePairTdoaObservations(event);
+    expect(observations).toHaveLength(1);
+    expect(Math.abs(observations[0].tdoaMs - 5.3)).toBeLessThan(0.3);
+    expect(observations[0].weight).toBeGreaterThan(0.3);
   });
 
   it("produces all pairs for a three-device event and they close the triangle", () => {
