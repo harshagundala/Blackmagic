@@ -203,6 +203,28 @@ export type RealtimeReconciliationStateMessage = {
   } | null;
 };
 
+// Host → peers: start/stop a synchronized full-resolution capture session.
+// Every device records its own stream locally and uploads when stopped.
+export type RealtimeRecordControlMessage = {
+  type: "record-control";
+  version: 1;
+  fromDeviceId: string;
+  recordingId: string;
+  action: "start" | "stop";
+};
+
+// Any device → room: progress of its recording upload, so the host screen
+// can confirm every stream landed in the cloud.
+export type RealtimeRecordingStatusMessage = {
+  type: "recording-status";
+  version: 1;
+  fromDeviceId: string;
+  recordingId: string;
+  state: "recording" | "uploading" | "uploaded" | "failed";
+  url: string | null;
+  detail: string | null;
+};
+
 export type RealtimeDataChannelMessage =
   | RealtimeClockProbeMessage
   | RealtimeClockProbeAckMessage
@@ -210,4 +232,6 @@ export type RealtimeDataChannelMessage =
   | RealtimeChirpScheduleMessage
   | RealtimePulseObservationMessage
   | RealtimeVoiceEventMessage
-  | RealtimeReconciliationStateMessage;
+  | RealtimeReconciliationStateMessage
+  | RealtimeRecordControlMessage
+  | RealtimeRecordingStatusMessage;

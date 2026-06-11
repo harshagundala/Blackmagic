@@ -66,7 +66,15 @@ describe("ReconciliationEngine", () => {
   it("measures the distance between two phones from a walking talker", () => {
     const devices: SceneDevice[] = [
       { deviceId: "alpha", x: 0, y: 0, clockErrorMs: -6 },
-      { deviceId: "bravo", x: 2.1, y: 0, clockErrorMs: 9 },
+      {
+        deviceId: "bravo",
+        x: 2.1,
+        y: 0,
+        clockErrorMs: 9,
+        // Bravo's capture pipeline came up 1.4 s after alpha's: the
+        // sample-domain bias the estimator must absorb.
+        captureStartEpochMs: SESSION_START + 1_400,
+      },
     ];
     const engine = new ReconciliationEngine({ anchorDeviceId: "alpha" });
     const snapshot = runScenario(engine, {
@@ -78,8 +86,9 @@ describe("ReconciliationEngine", () => {
     expect(snapshot.ranges).toHaveLength(1);
     const [range] = snapshot.ranges;
     expect(Math.abs(range.meters - 2.1)).toBeLessThan(0.3);
-    // The ±15 ms clock split must land in the bias, not the distance.
-    expect(Math.abs(range.biasMs - 15)).toBeLessThan(1.2);
+    // The capture-start gap lands in the bias (start_A − start_B = −1.4 s);
+    // the ±15 ms host-clock split must influence neither bias nor distance.
+    expect(Math.abs(range.biasMs - -1_400)).toBeLessThan(1.2);
     expect(snapshot.layout).not.toBeNull();
     const points = snapshot.layout!.points;
     const separation = Math.hypot(

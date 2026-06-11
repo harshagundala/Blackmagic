@@ -109,8 +109,14 @@ export type SceneDevice = {
   deviceId: string;
   x: number;
   y: number;
+  // Host-clock mapping error: shifts detectedAtHostEpochMs only. Since TDOA
+  // is measured in the sample domain this must NOT shift estimates.
   clockErrorMs: number;
-  // Apparent host-clock drift of this device's audio mapping (SRO), ms/s.
+  // When this device's ADC sample counter started, in true epoch ms. The
+  // pairwise difference of capture starts is the sample-domain bias Δ.
+  captureStartEpochMs?: number;
+  // ADC sample-rate offset: device-local sample time drifts by this many ms
+  // per true second (≈ ppm/1000 · 1000).
   clockDriftMsPerSecond?: number;
 };
 
@@ -142,24 +148,28 @@ export function syntheticVoiceEvent({
   const delaySeconds =
     Math.hypot(talker.x - device.x, talker.y - device.y) / TEST_SPEED_OF_SOUND;
 
-  const driftMsPerSecond = device.clockDriftMsPerSecond ?? 0;
-  const elapsedSeconds = (utteranceEpochMs - sessionStartEpochMs) / 1_000;
-  const clockErrorMs = device.clockErrorMs + driftMsPerSecond * elapsedSeconds;
+  const clockErrorMs = device.clockErrorMs;
+  const captureStartEpochMs = device.captureStartEpochMs ?? sessionStartEpochMs;
+  // True ADC rate differs from nominal by the sample-rate offset; the device
+  // labels indices nominally, so its sample-domain time drifts against true
+  // time at clockDriftMsPerSecond.
+  const rateScale = 1 + (device.clockDriftMsPerSecond ?? 0) / 1_000;
+  const trueEpochOfSample = (sampleIndex: number) =>
+    captureStartEpochMs + (sampleIndex / (SAMPLE_RATE * rateScale)) * 1_000;
+  const sampleAtTrueEpoch = (epochMs: number) =>
+    ((epochMs - captureStartEpochMs) / 1_000) * SAMPLE_RATE * rateScale;
 
-  // The device's sample timeline: sample n sits at true epoch
-  // sessionStart + n/fs · 1000. Sound from the utterance arrives at
-  // utteranceEpochMs + delay; the VAD fires nearby.
+  // Sound from the utterance arrives at utteranceEpochMs + delay; the VAD
+  // fires nearby.
   const arrivalEpochMs = utteranceEpochMs + delaySeconds * 1_000;
   const centerSampleIndex = Math.round(
-    ((arrivalEpochMs + vadJitterMs - sessionStartEpochMs) / 1_000) *
-      SAMPLE_RATE,
+    sampleAtTrueEpoch(arrivalEpochMs + vadJitterMs),
   );
   const windowSamples = Math.round(WINDOW_SECONDS * SAMPLE_RATE);
   const startSampleIndex = centerSampleIndex - windowSamples / 2;
   const samples = new Float32Array(windowSamples);
   for (let index = 0; index < windowSamples; index += 1) {
-    const trueEpochMs =
-      sessionStartEpochMs + ((startSampleIndex + index) / SAMPLE_RATE) * 1_000;
+    const trueEpochMs = trueEpochOfSample(startSampleIndex + index);
     const sourceTimeSeconds =
       (trueEpochMs - delaySeconds * 1_000 - utteranceEpochMs) / 1_000;
     samples[index] = signal(sourceTimeSeconds) + (random() - 0.5) * 0.01;
@@ -173,9 +183,7 @@ export function syntheticVoiceEvent({
   });
 
   const detectedAtHostEpochMs =
-    sessionStartEpochMs +
-    (centerSampleIndex / SAMPLE_RATE) * 1_000 +
-    clockErrorMs;
+    trueEpochOfSample(centerSampleIndex) + clockErrorMs;
 
   return {
     id: `voice-${device.deviceId}-${Math.round(utteranceEpochMs)}`,

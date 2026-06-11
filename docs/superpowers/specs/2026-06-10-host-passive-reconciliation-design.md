@@ -15,17 +15,30 @@ hook for them.
 
 ## Physics and method (from literature)
 
+> **Amendment (2026-06-10, after first field test):** TDOA is measured in the
+> **sample domain**, not the host clock domain. Field testing showed host
+> clock mappings on real iPhones wobble several ms between events (clock
+> model re-estimation + pipeline latency shifts), which the spread estimator
+> reads as phantom distance (a 2 ft pair measured 6+ m). Each device's ADC
+> sample counter is gapless, so `centerSampleIndex / sourceSampleRate` is an
+> exact device-local timestamp; differencing those across devices plus the
+> GCC offset leaves a Δ that is the capture-start gap — large but constant to
+> within the sample-rate offset, with zero per-event clock jitter. Host-epoch
+> stamps are used only for clustering and windowing. Capture restarts jump
+> the origin; a consistent-regime detector re-seeds the pair history when
+> that happens.
+
 Per voice event, per device pair (A, B), the measured arrival-time difference
-in the host clock domain is:
+is:
 
 ```
 τ = (d_B − d_A)/c + Δ_AB(t)
 ```
 
 where `d_X` is talker→device distance and `Δ_AB(t)` is a per-pair nuisance
-term: residual clock-sync error **plus the un-observable per-device audio
-input latency difference (0–20 ms in browsers)**, drifting slowly with the
-ADC sample-rate offset (~20 ppm ≈ 0.7 cm/s of apparent drift).
+term (see amendment: the capture-start gap plus fixed input latency
+difference), drifting slowly with the ADC sample-rate offset (~20 ppm ≈
+0.7 cm/s of apparent drift).
 
 A single τ only constrains a hyperbola. But as the talker moves,
 `(d_B − d_A)/c` sweeps the interval `[−d_AB/c, +d_AB/c]`, while `Δ_AB`

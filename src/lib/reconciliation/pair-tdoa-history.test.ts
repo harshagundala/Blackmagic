@@ -127,6 +127,27 @@ describe("recordPairTdoaObservation", () => {
     expect(history.observations).toHaveLength(before);
   });
 
+  it("re-seeds on a consistent regime jump instead of rejecting forever", () => {
+    let history = historyFrom(
+      syntheticObservations({ distanceMeters: 2, biasMs: 0, count: 30 }),
+    );
+    // Capture restart: the sample-domain origin jumped ~5 s, and the new
+    // observations agree with each other.
+    for (let index = 0; index < 4; index += 1) {
+      history = recordPairTdoaObservation(history, {
+        pairKey: pairKeyFor("alpha", "bravo"),
+        from: "alpha",
+        to: "bravo",
+        tdoaMs: 5_000 + index * 0.5,
+        weight: 1,
+        atHostEpochMs: 1_200_000 + index * 1_000,
+        eventId: `jump-${index}`,
+      });
+    }
+    expect(history.observations).toHaveLength(1);
+    expect(history.observations[0].tdoaMs).toBeCloseTo(5_001.5, 3);
+  });
+
   it("caps the buffer and drops the oldest entries", () => {
     const history = historyFrom(
       syntheticObservations({ distanceMeters: 2, biasMs: 0, count: 400 }),

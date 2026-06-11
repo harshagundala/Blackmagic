@@ -1,11 +1,22 @@
 // Turns one reconciled voice event into pairwise TDOA observations by
-// GCC-PHAT-aligning each pair of raw-audio snippets directly. The snippets
-// are cut around each device's own VAD trigger, so the measured content
-// offset plus the difference of the devices' host-clock detection stamps
-// recovers the arrival-time difference — independent of when each VAD fired:
+// GCC-PHAT-aligning each pair of raw-audio snippets directly.
 //
-//   tdoaMs(A→B) = (t_B − t_A) + gccOffsetMs(snippet_A, snippet_B)
+// Timing lives in the SAMPLE DOMAIN, not the host clock. Each device's ADC
+// sample counter is gapless, so `centerSampleIndex / sourceSampleRate` is an
+// exact device-local timestamp of the snippet cut. Differencing those across
+// devices plus the GCC content offset gives:
+//
+//   tdoaMs(A→B) = (center_B/fs_B − center_A/fs_A) · 1000 + gccOffsetMs
 //               = (d_B − d_A)/c · 1000 + Δ_AB
+//
+// where Δ_AB is now the (large, arbitrary) difference of the two devices'
+// capture-start instants plus their fixed input latencies. Crucially Δ_AB is
+// CONSTANT to within the ADC sample-rate offset: unlike host-epoch mappings
+// it carries no per-event clock-model jitter, which on real phones wobbles
+// by several ms between events and is read by the spread estimator as
+// phantom distance (a 2 ft pair once measured 6+ m through host-clock
+// stamps). The host-epoch stamp is still attached for windowing/clustering,
+// but never enters the TDOA value.
 //
 // For events heard by three or more devices the pairwise delays must close
 // every triangle (τ_AB + τ_BC = τ_AC holds exactly for true arrivals, since
@@ -70,8 +81,12 @@ export function derivePairTdoaObservations(
         continue;
       }
 
-      const tdoaMs =
-        to.detectedAtHostEpochMs - from.detectedAtHostEpochMs + offset.offsetMs;
+      const fromSampleMs = sampleDomainMs(from);
+      const toSampleMs = sampleDomainMs(to);
+      if (fromSampleMs === null || toSampleMs === null) {
+        continue;
+      }
+      const tdoaMs = toSampleMs - fromSampleMs + offset.offsetMs;
       pairs.push({
         pairKey: pairKeyFor(from.deviceId, to.deviceId),
         from: from.deviceId,
@@ -88,6 +103,20 @@ export function derivePairTdoaObservations(
   }
 
   return applyTriangleClosure(pairs, maxClosureResidualMs);
+}
+
+// Device-local snippet-cut time from the gapless ADC sample counter.
+function sampleDomainMs(observation: ReconciledAudioEventObservation) {
+  const snippet = observation.audioSnippet;
+  if (
+    !snippet ||
+    !Number.isFinite(snippet.centerSampleIndex) ||
+    !Number.isFinite(snippet.sourceSampleRate) ||
+    snippet.sourceSampleRate <= 0
+  ) {
+    return null;
+  }
+  return (snippet.centerSampleIndex / snippet.sourceSampleRate) * 1_000;
 }
 
 function dedupeByDevice(observations: ReconciledAudioEventObservation[]) {

@@ -133,9 +133,11 @@ describe("derivePairTdoaObservations", () => {
     expect(pair.pairKey).toBe(pairKeyFor("alpha", "bravo"));
     expect(pair.from).toBe("alpha");
     expect(pair.to).toBe("bravo");
-    // True arrival difference (9.1 − 2.5) plus bias difference (7 − (−4)).
-    expect(pair.tdoaMs).toBeGreaterThan(17.6 - 0.25);
-    expect(pair.tdoaMs).toBeLessThan(17.6 + 0.25);
+    // Sample-domain timing: the true arrival difference (9.1 − 2.5) comes
+    // through exactly, and the devices' host-clock errors (−4 and +7 ms)
+    // must NOT leak in — that immunity is the whole point.
+    expect(pair.tdoaMs).toBeGreaterThan(6.6 - 0.25);
+    expect(pair.tdoaMs).toBeLessThan(6.6 + 0.25);
     expect(pair.weight).toBeGreaterThan(0.3);
     expect(pair.eventId).toBe(event.id);
   });

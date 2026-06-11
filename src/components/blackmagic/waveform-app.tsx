@@ -12,8 +12,11 @@ import { WaveSeries } from "@/lib/waveform/wave-series";
 import { projectClockModel } from "@/lib/timing/clock-sync";
 import type {
   RealtimeReconciliationStateMessage,
+  RealtimeRecordControlMessage,
+  RealtimeRecordingStatusMessage,
   RealtimeSensorFrameMessage,
 } from "@/lib/realtime/contracts";
+import { uploadRecordedTake } from "@/lib/recording/upload";
 import { roomStatePollingIntervalMs } from "@/lib/session/polling";
 import type { DeviceTimeSyncState } from "@/lib/session/timing-health";
 import {
@@ -69,6 +72,125 @@ export function WaveformApp() {
     return reconciliationEngineRef.current;
   }, []);
 
+  // Ground-truth recording sessions: the host's record button starts a
+  // synchronized full-resolution capture on every phone; on stop each phone
+  // uploads its own WAV + metadata sidecar to Blob storage and reports
+  // progress over the data channel.
+  const [activeRecording, setActiveRecording] = useState<{
+    id: string;
+    startedAtPerfMs: number;
+  } | null>(null);
+  const activeRecordingRef = useRef(activeRecording);
+  const [recordingStatuses, setRecordingStatuses] = useState<
+    Record<string, RealtimeRecordingStatusMessage>
+  >({});
+  const recordControlRef = useRef<RealtimeRecordControlMessage | null>(null);
+  const recordingStatusRef = useRef<RealtimeRecordingStatusMessage | null>(null);
+  const sessionKeyRef = useRef<string>("room");
+
+  useEffect(() => {
+    activeRecordingRef.current = activeRecording;
+  }, [activeRecording]);
+
+  useEffect(() => {
+    if (roomState?.sessionKey) {
+      sessionKeyRef.current = roomState.sessionKey;
+    }
+  }, [roomState?.sessionKey]);
+
+  const publishRecordingStatus = useCallback(
+    (
+      recordingId: string,
+      state: RealtimeRecordingStatusMessage["state"],
+      url: string | null,
+      detail: string | null,
+    ) => {
+      const message: RealtimeRecordingStatusMessage = {
+        type: "recording-status",
+        version: 1,
+        fromDeviceId: deviceId,
+        recordingId,
+        state,
+        url,
+        detail,
+      };
+      recordingStatusRef.current = message;
+      setRecordingStatuses((current) => ({ ...current, [deviceId]: message }));
+    },
+    [deviceId],
+  );
+
+  const finishRecording = useCallback(
+    async (recordingId: string) => {
+      const take = sensors.stopRecording();
+      if (!take || take.recordingId !== recordingId) {
+        publishRecordingStatus(recordingId, "failed", null, "no audio captured");
+        return;
+      }
+      publishRecordingStatus(recordingId, "uploading", null, null);
+      try {
+        const snapshot = snapshotRef.current;
+        const result = await uploadRecordedTake(take, {
+          deviceId,
+          sessionKey: sessionKeyRef.current,
+          role: isHostRef.current ? "host" : "phone",
+          sampleRateReported: snapshot.sampleRate,
+          captureMode: snapshot.captureMode,
+          clock: snapshot.clock
+            ? {
+                offsetMs: snapshot.clock.offsetMs,
+                uncertaintyMs: snapshot.clock.uncertaintyMs,
+                maxErrorMs: snapshot.clock.maxErrorMs,
+                samplesUsed: snapshot.clock.samplesUsed,
+              }
+            : null,
+        });
+        publishRecordingStatus(recordingId, "uploaded", result.wavUrl, null);
+      } catch (error) {
+        publishRecordingStatus(
+          recordingId,
+          "failed",
+          null,
+          error instanceof Error ? error.message.slice(0, 120) : "upload failed",
+        );
+      }
+    },
+    [deviceId, publishRecordingStatus, sensors],
+  );
+
+  const toggleRecording = useCallback(() => {
+    if (!isHostRef.current) {
+      return;
+    }
+    const current = activeRecordingRef.current;
+    if (!current) {
+      const id = `take-${Date.now().toString(36)}`;
+      recordControlRef.current = {
+        type: "record-control",
+        version: 1,
+        fromDeviceId: deviceId,
+        recordingId: id,
+        action: "start",
+      };
+      sensors.startRecording(id);
+      setActiveRecording({ id, startedAtPerfMs: performance.now() });
+      setRecordingStatuses({});
+      publishRecordingStatus(id, "recording", null, null);
+    } else {
+      recordControlRef.current = {
+        type: "record-control",
+        version: 1,
+        fromDeviceId: deviceId,
+        recordingId: current.id,
+        action: "stop",
+      };
+      setActiveRecording(null);
+      void finishRecording(current.id);
+    }
+  }, [deviceId, finishRecording, publishRecordingStatus, sensors]);
+
+
+
   const realtime = useWebRtcRoom({
     active: phase === "listening",
     deviceId,
@@ -93,6 +215,38 @@ export function WaveformApp() {
         if (!isHostRef.current) {
           setReconciliation(state);
         }
+      },
+      [],
+    ),
+    getRecordControl: useCallback(() => recordControlRef.current, []),
+    getRecordingStatus: useCallback(() => recordingStatusRef.current, []),
+    onRecordControl: useCallback(
+      (message: RealtimeRecordControlMessage) => {
+        if (isHostRef.current) {
+          return;
+        }
+        if (message.action === "start") {
+          if (activeRecordingRef.current?.id !== message.recordingId) {
+            sensors.startRecording(message.recordingId);
+            setActiveRecording({
+              id: message.recordingId,
+              startedAtPerfMs: performance.now(),
+            });
+            publishRecordingStatus(message.recordingId, "recording", null, null);
+          }
+        } else if (activeRecordingRef.current?.id === message.recordingId) {
+          setActiveRecording(null);
+          void finishRecording(message.recordingId);
+        }
+      },
+      [finishRecording, publishRecordingStatus, sensors],
+    ),
+    onRecordingStatus: useCallback(
+      (message: RealtimeRecordingStatusMessage) => {
+        setRecordingStatuses((current) => ({
+          ...current,
+          [message.fromDeviceId]: message,
+        }));
       },
       [],
     ),
@@ -371,11 +525,20 @@ export function WaveformApp() {
               open this url on another phone
             </p>
           ) : (
-            <ReconciliationPanel
-              nowHostMs={nowHostMs}
-              selfDeviceId={deviceId}
-              state={reconciliation}
-            />
+            <>
+              <ReconciliationPanel
+                nowHostMs={nowHostMs}
+                selfDeviceId={deviceId}
+                state={reconciliation}
+              />
+              <RecordingPanel
+                activeRecording={activeRecording}
+                isHost={isHost}
+                onToggle={toggleRecording}
+                selfDeviceId={deviceId}
+                statuses={recordingStatuses}
+              />
+            </>
           )}
         </div>
       </div>
@@ -675,6 +838,117 @@ function describeReconciliationProgress(
   }
 
   return "say something — distances appear as sound crosses the room";
+}
+
+// Ground-truth capture controls: the host starts/stops a synchronized
+// recording; every phone shows its own capture/upload state, and the host
+// additionally sees each device's reported status so a take is verifiably
+// complete before the room moves.
+function RecordingPanel({
+  isHost,
+  activeRecording,
+  statuses,
+  selfDeviceId,
+  onToggle,
+}: {
+  isHost: boolean;
+  activeRecording: { id: string; startedAtPerfMs: number } | null;
+  statuses: Record<string, RealtimeRecordingStatusMessage>;
+  selfDeviceId: string;
+  onToggle: () => void;
+}) {
+  // Sampled via state so the elapsed readout ticks without impure reads
+  // during render.
+  const [nowPerfMs, setNowPerfMs] = useState(0);
+  useEffect(() => {
+    if (!activeRecording) {
+      return;
+    }
+    // First tick lands after a second; until then the clamp below shows 0:00.
+    const timer = window.setInterval(
+      () => setNowPerfMs(performance.now()),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [activeRecording]);
+
+  const entries = Object.values(statuses);
+  if (!isHost && !activeRecording && entries.length === 0) {
+    return null;
+  }
+
+  const elapsedSeconds = activeRecording
+    ? Math.max(0, (nowPerfMs - activeRecording.startedAtPerfMs) / 1_000)
+    : 0;
+  const label = (id: string) => (id === selfDeviceId ? "you" : shortId(id));
+
+  return (
+    <section className="rounded-2xl border border-black/8 bg-white shadow-[0_10px_34px_rgba(8,16,34,0.06)]">
+      <div className="flex items-center justify-between px-4 py-3">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-black/60">
+          capture
+        </span>
+        {isHost ? (
+          <button
+            className="pointer-events-auto flex items-center gap-2 rounded-full border border-black/10 px-4 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em]"
+            onClick={onToggle}
+            onPointerDown={(event) => event.stopPropagation()}
+            type="button"
+          >
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-full"
+              style={{
+                background: activeRecording ? "#dc2626" : "#9ca3af",
+              }}
+            />
+            {activeRecording
+              ? `stop · ${formatElapsed(elapsedSeconds)}`
+              : "record all phones"}
+          </button>
+        ) : (
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-black/40">
+            {activeRecording
+              ? `recording · ${formatElapsed(elapsedSeconds)}`
+              : "idle"}
+          </span>
+        )}
+      </div>
+      {entries.length > 0 ? (
+        <div className="flex flex-col gap-1 px-4 pb-3 font-mono text-[10px] uppercase tracking-[0.12em]">
+          {entries
+            .sort((a, b) => a.fromDeviceId.localeCompare(b.fromDeviceId))
+            .map((status) => (
+              <div
+                className="flex items-baseline justify-between"
+                key={status.fromDeviceId}
+              >
+                <span className="text-black/50">{label(status.fromDeviceId)}</span>
+                <span
+                  className={
+                    status.state === "failed"
+                      ? "text-[#b45309]"
+                      : status.state === "uploaded"
+                        ? "text-[#047857]"
+                        : "text-black/45"
+                  }
+                >
+                  {status.state}
+                  {status.detail ? ` · ${status.detail}` : ""}
+                </span>
+              </div>
+            ))}
+        </div>
+      ) : (
+        <div className="h-1" />
+      )}
+    </section>
+  );
+}
+
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds % 60);
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
 function describeRangeState(confidence: number, coverage: number) {

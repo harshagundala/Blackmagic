@@ -93,9 +93,11 @@ export function detectVoiceActivityEvent({
     };
   }
 
+  // Re-trigger during sustained speech: a long utterance yields an event
+  // every spacing interval, not just one at the onset — each one is another
+  // cross-correlation opportunity for the reconciler.
   const canEmit =
     micLevel >= effectiveOpen &&
-    !gate.open &&
     (gate.lastEventHostEpochMs === null ||
       frame.hostEstimatedEpochMs - gate.lastEventHostEpochMs >=
         minEventSpacingMs);

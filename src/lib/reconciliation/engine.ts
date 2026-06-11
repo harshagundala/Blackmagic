@@ -60,6 +60,9 @@ const MOTION_SPIKE_RADIUS_MS = 1_000;
 const SUSTAINED_MOTION_MS = 600;
 const MIN_BIAS_CONFIDENCE = 0.25;
 const TALKER_MAX_AGE_MS = 15_000;
+// A solved range outlives a momentary estimator dropout (an outlier burst or
+// a thin window) so the map doesn't flicker away while evidence rebuilds.
+const RANGE_HOLD_MS = 25_000;
 const OBSERVATION_CACHE_LIMIT = 64;
 
 export class ReconciliationEngine {
@@ -69,6 +72,7 @@ export class ReconciliationEngine {
   private observationCache = new Map<string, PairTdoaObservation[]>();
   private motionEpisodeStart = new Map<string, number>();
   private motionResetAt = new Map<string, number>();
+  private lastRanges = new Map<string, PairRangeEstimate>();
   private previousPoints: Record<string, PhonePoint> | null = null;
 
   constructor({ anchorDeviceId = null }: ReconciliationEngineOptions = {}) {
@@ -123,6 +127,7 @@ export class ReconciliationEngine {
       this.motionEpisodeStart.set(deviceId, atHostEpochMs);
     } else if (atHostEpochMs - episodeStart >= SUSTAINED_MOTION_MS) {
       clearPairHistoriesForDevice(this.histories, deviceId);
+      this.dropHeldRangesForDevice(deviceId);
       this.motionResetAt.set(deviceId, atHostEpochMs);
     }
   }
@@ -132,6 +137,7 @@ export class ReconciliationEngine {
     this.motionEpisodeStart.delete(deviceId);
     this.motionResetAt.delete(deviceId);
     clearPairHistoriesForDevice(this.histories, deviceId);
+    this.dropHeldRangesForDevice(deviceId);
     if (this.previousPoints) {
       delete this.previousPoints[deviceId];
     }
@@ -163,10 +169,21 @@ export class ReconciliationEngine {
     }
 
     const ranges: PairRangeEstimate[] = [];
-    for (const history of this.histories.values()) {
+    for (const [pairKey, history] of this.histories) {
       const estimate = derivePairRangeEstimate(history, nowHostEpochMs);
       if (estimate) {
+        this.lastRanges.set(pairKey, estimate);
         ranges.push(estimate);
+        continue;
+      }
+      // Estimator dropout (outlier clip, thin window): hold the last solved
+      // range briefly rather than blanking the map; observedAtHostEpochMs
+      // stays old so consumers can see it is held, not fresh.
+      const held = this.lastRanges.get(pairKey);
+      if (held && nowHostEpochMs - held.observedAtHostEpochMs <= RANGE_HOLD_MS) {
+        ranges.push(held);
+      } else if (held) {
+        this.lastRanges.delete(pairKey);
       }
     }
     ranges.sort((a, b) =>
@@ -295,6 +312,15 @@ export class ReconciliationEngine {
       }
     }
     return false;
+  }
+
+  private dropHeldRangesForDevice(deviceId: string) {
+    for (const key of [...this.lastRanges.keys()]) {
+      const [from, to] = key.split("|");
+      if (from === deviceId || to === deviceId) {
+        this.lastRanges.delete(key);
+      }
+    }
   }
 
   private markUnstable(deviceId: string, atHostEpochMs: number) {

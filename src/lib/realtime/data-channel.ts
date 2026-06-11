@@ -303,6 +303,23 @@ export function isRealtimeDataChannelMessage(
       return nonEmptyString(value.fromDeviceId) && isValidVoiceEvent(value.event);
     case "reconciliation-state":
       return isValidReconciliationState(value);
+    case "record-control":
+      return (
+        nonEmptyString(value.fromDeviceId) &&
+        nonEmptyString(value.recordingId) &&
+        (value.action === "start" || value.action === "stop")
+      );
+    case "recording-status":
+      return (
+        nonEmptyString(value.fromDeviceId) &&
+        nonEmptyString(value.recordingId) &&
+        (value.state === "recording" ||
+          value.state === "uploading" ||
+          value.state === "uploaded" ||
+          value.state === "failed") &&
+        (value.url === null || typeof value.url === "string") &&
+        (value.detail === null || typeof value.detail === "string")
+      );
     default:
       return false;
   }

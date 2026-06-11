@@ -33,6 +33,10 @@ import {
   type VoiceActivityGate,
 } from "@/lib/acoustics/voice-activity";
 import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
+import {
+  CaptureRecorder,
+  type RecordedTake,
+} from "@/lib/recording/capture-recorder";
 import { createSpeechFingerprint } from "@/lib/acoustics/speech-fingerprint";
 import { buildWaveChunk, WaveSeries } from "@/lib/waveform/wave-series";
 import type {
@@ -210,6 +214,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioWorkletRef = useRef<AudioWorkletNode | null>(null);
   const rollingAudioRef = useRef<RollingSampleBuffer | null>(null);
+  const captureRecorderRef = useRef(new CaptureRecorder());
   const streamingMatcherRef = useRef<StreamingPulseMatcher | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
@@ -524,7 +529,20 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     getWaveSeries,
     getWaveChunk,
     requestCaptureMode,
+    startRecording,
+    stopRecording,
   };
+
+  function startRecording(recordingId: string) {
+    captureRecorderRef.current.begin({
+      recordingId,
+      startedAtEpochMs: Date.now(),
+    });
+  }
+
+  function stopRecording(): RecordedTake | null {
+    return captureRecorderRef.current.end(Date.now());
+  }
 
   function handleOrientation(event: DeviceOrientationEvent) {
     headingActiveRef.current = true;
@@ -608,6 +626,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       source,
       rollingAudio,
       streamingMatcher,
+      captureRecorderRef.current,
       (detection, window) => {
         const clock = clockModelRef.current;
         if (!clock) {
@@ -1107,12 +1126,19 @@ function attachSpeechFingerprint(
   // The raw-audio snippet is what lets the room reconciler run GCC-PHAT over
   // what this microphone actually heard; the fingerprint stays as a cheap
   // fallback when a peer cannot provide a snippet.
+  // Center the cut half a window behind the trigger: the trigger sample is
+  // the newest one captured, so a centered window would be half zeros. The
+  // shift is identical in device-local time on every device, so it cancels
+  // in cross-device differences. 16 kHz keeps speech's full TDOA band and
+  // halves the GCC quantization step versus 8 kHz.
   const audioSnippet = captureAudioSnippet({
     samples: audioWindow.samples,
     sampleRate: audioWindow.sampleRate,
     startSampleIndex: audioWindow.startSampleIndex,
-    centerSampleIndex: event.sampleIndex,
+    centerSampleIndex:
+      event.sampleIndex - Math.round(0.12 * audioWindow.sampleRate),
     windowMs: 240,
+    targetSampleRate: 16_000,
   });
 
   return {
@@ -1127,6 +1153,7 @@ async function startAudioWorkletCapture(
   source: MediaStreamAudioSourceNode,
   rollingAudio: RollingSampleBuffer,
   streamingMatcher: StreamingPulseMatcher,
+  recorder: CaptureRecorder | null,
   onDetectionWindow: (
     detection: StreamingPulseDetection,
     window: RollingSampleWindow,
@@ -1157,6 +1184,11 @@ async function startAudioWorkletCapture(
       }
 
       const samples = new Float32Array(event.data.samples);
+      recorder?.append(
+        samples,
+        event.data.startSampleIndex,
+        event.data.sampleRate ?? audioContext.sampleRate,
+      );
       rollingAudio.append(samples, event.data.startSampleIndex);
       const detection = streamingMatcher.append(
         samples,

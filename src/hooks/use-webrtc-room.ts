@@ -14,6 +14,8 @@ import { selectRealtimePeerTargets } from "@/lib/realtime/coordinator";
 import type {
   RealtimeDataChannelMessage,
   RealtimeReconciliationStateMessage,
+  RealtimeRecordControlMessage,
+  RealtimeRecordingStatusMessage,
   RealtimeSignal,
   RealtimeSignalPayload,
   RealtimeSensorFrameMessage,
@@ -40,10 +42,16 @@ type WebRtcRoomOptions = {
   getVoiceEvent?: () => VoiceActivityEvent | null;
   // Host only: latest reconciliation result; broadcast once per update.
   getReconciliationState?: () => RealtimeReconciliationStateMessage | null;
+  // Host only: latest record start/stop command; sent once per action.
+  getRecordControl?: () => RealtimeRecordControlMessage | null;
+  // Latest local recording/upload status; sent once per state change.
+  getRecordingStatus?: () => RealtimeRecordingStatusMessage | null;
   onChirpSchedule?: (pulse: AcousticPulse, fromDeviceId: string) => void;
   onPulseObservation?: (observation: AcousticObservation, fromDeviceId: string) => void;
   onVoiceEvent?: (event: VoiceActivityEvent, fromDeviceId: string) => void;
   onReconciliationState?: (state: RealtimeReconciliationStateMessage) => void;
+  onRecordControl?: (message: RealtimeRecordControlMessage) => void;
+  onRecordingStatus?: (message: RealtimeRecordingStatusMessage) => void;
   // Fired when a clock probe to the room host completes; the exchange is in
   // the host's wall-clock domain and feeds the device's clock model.
   onClockExchange?: (exchange: ClockExchange) => void;
@@ -67,6 +75,8 @@ type PeerRuntime = {
   lastObservationKey: string;
   lastVoiceEventId: string;
   lastReconciliationKey: string;
+  lastRecordControlKey: string;
+  lastRecordingStatusKey: string;
 };
 
 const SIGNAL_POLL_MS = 420;
@@ -90,10 +100,14 @@ export function useWebRtcRoom({
   getWaveChunk,
   getVoiceEvent,
   getReconciliationState,
+  getRecordControl,
+  getRecordingStatus,
   onChirpSchedule,
   onPulseObservation,
   onVoiceEvent,
   onReconciliationState,
+  onRecordControl,
+  onRecordingStatus,
   onClockExchange,
 }: WebRtcRoomOptions): WebRtcRoomState {
   const snapshotRef = useRef(snapshot);
@@ -102,10 +116,14 @@ export function useWebRtcRoom({
   const getWaveChunkRef = useRef(getWaveChunk);
   const getVoiceEventRef = useRef(getVoiceEvent);
   const getReconciliationStateRef = useRef(getReconciliationState);
+  const getRecordControlRef = useRef(getRecordControl);
+  const getRecordingStatusRef = useRef(getRecordingStatus);
   const onChirpScheduleRef = useRef(onChirpSchedule);
   const onPulseObservationRef = useRef(onPulseObservation);
   const onVoiceEventRef = useRef(onVoiceEvent);
   const onReconciliationStateRef = useRef(onReconciliationState);
+  const onRecordControlRef = useRef(onRecordControl);
+  const onRecordingStatusRef = useRef(onRecordingStatus);
   const onClockExchangeRef = useRef(onClockExchange);
   const peersRef = useRef(new Map<string, PeerRuntime>());
   const lastSignalSeqRef = useRef(0);
@@ -158,6 +176,14 @@ export function useWebRtcRoom({
   }, [getReconciliationState]);
 
   useEffect(() => {
+    getRecordControlRef.current = getRecordControl;
+  }, [getRecordControl]);
+
+  useEffect(() => {
+    getRecordingStatusRef.current = getRecordingStatus;
+  }, [getRecordingStatus]);
+
+  useEffect(() => {
     onChirpScheduleRef.current = onChirpSchedule;
   }, [onChirpSchedule]);
 
@@ -168,6 +194,14 @@ export function useWebRtcRoom({
   useEffect(() => {
     onReconciliationStateRef.current = onReconciliationState;
   }, [onReconciliationState]);
+
+  useEffect(() => {
+    onRecordControlRef.current = onRecordControl;
+  }, [onRecordControl]);
+
+  useEffect(() => {
+    onRecordingStatusRef.current = onRecordingStatus;
+  }, [onRecordingStatus]);
 
   useEffect(() => {
     onPulseObservationRef.current = onPulseObservation;
@@ -330,6 +364,19 @@ export function useWebRtcRoom({
         if (message.fromDeviceId === hostDeviceIdRef.current) {
           onReconciliationStateRef.current?.(message);
         }
+        return;
+      }
+
+      if (message.type === "record-control") {
+        // Only the host commands recording sessions.
+        if (message.fromDeviceId === hostDeviceIdRef.current) {
+          onRecordControlRef.current?.(message);
+        }
+        return;
+      }
+
+      if (message.type === "recording-status") {
+        onRecordingStatusRef.current?.(message);
       }
     }
 
@@ -341,7 +388,8 @@ export function useWebRtcRoom({
         message.type !== "sensor-frame" &&
         message.type !== "chirp-schedule" &&
         message.type !== "pulse-observation" &&
-        message.type !== "voice-event"
+        message.type !== "voice-event" &&
+        message.type !== "recording-status"
       ) {
         return;
       }
@@ -410,6 +458,8 @@ export function useWebRtcRoom({
       const observation = getAcousticObservationRef.current?.() ?? null;
       const voiceEvent = getVoiceEventRef.current?.() ?? null;
       const reconciliation = getReconciliationStateRef.current?.() ?? null;
+      const recordControl = getRecordControlRef.current?.() ?? null;
+      const recordingStatus = getRecordingStatusRef.current?.() ?? null;
 
       for (const runtime of peersRef.current.values()) {
         sendDataChannelMessage(runtime, frame);
@@ -460,6 +510,25 @@ export function useWebRtcRoom({
         ) {
           if (sendDataChannelMessage(runtime, reconciliation)) {
             runtime.lastReconciliationKey = reconciliationKey;
+          }
+        }
+        const recordControlKey = recordControl
+          ? `${recordControl.recordingId}:${recordControl.action}`
+          : "";
+        if (recordControl && recordControlKey !== runtime.lastRecordControlKey) {
+          if (sendDataChannelMessage(runtime, recordControl)) {
+            runtime.lastRecordControlKey = recordControlKey;
+          }
+        }
+        const recordingStatusKey = recordingStatus
+          ? `${recordingStatus.recordingId}:${recordingStatus.state}`
+          : "";
+        if (
+          recordingStatus &&
+          recordingStatusKey !== runtime.lastRecordingStatusKey
+        ) {
+          if (sendDataChannelMessage(runtime, recordingStatus)) {
+            runtime.lastRecordingStatusKey = recordingStatusKey;
           }
         }
       }
@@ -523,6 +592,8 @@ async function createPeerRuntime({
     lastObservationKey: "",
     lastVoiceEventId: "",
     lastReconciliationKey: "",
+    lastRecordControlKey: "",
+    lastRecordingStatusKey: "",
   };
   peers.set(peerId, runtime);
 

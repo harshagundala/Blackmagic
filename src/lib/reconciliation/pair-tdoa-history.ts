@@ -37,6 +37,12 @@ export type PairTdoaObservation = {
 export type PairTdoaHistory = {
   // Sorted by atHostEpochMs ascending, unique per eventId.
   observations: PairTdoaObservation[];
+  // Consecutive median-gate rejections that agreed with EACH OTHER: the
+  // signature of a capture restart (the sample-domain origin jumped), not of
+  // stray reverberation. After enough agreement the history re-seeds on the
+  // new regime instead of rejecting forever.
+  rejectedStreak?: number;
+  lastRejectedTdoaMs?: number | null;
 };
 
 export type PairRangeEstimate = {
@@ -78,10 +84,11 @@ const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
 const MAX_OBSERVATIONS = 160;
 const MAX_AGE_MS = 180_000;
 const MAX_MEDIAN_DEVIATION_MS = 40;
-const MAX_ABS_TDOA_MS = 250;
 const MEDIAN_GATE_MIN_SAMPLES = 12;
+const REGIME_JUMP_STREAK = 4;
+const REGIME_AGREEMENT_MS = 40;
 const RANGE_WINDOW_MS = 150_000;
-export const MIN_RANGE_SAMPLES = 8;
+export const MIN_RANGE_SAMPLES = 5;
 const LOW_QUANTILE = 0.06;
 const HIGH_QUANTILE = 0.94;
 // Physical ADC sample-rate offsets sit within ~50 ppm; clamping keeps a
@@ -110,8 +117,7 @@ export function recordPairTdoaObservation(
   if (
     !Number.isFinite(observation.tdoaMs) ||
     !Number.isFinite(observation.atHostEpochMs) ||
-    !(observation.weight > 0) ||
-    Math.abs(observation.tdoaMs) > MAX_ABS_TDOA_MS
+    !(observation.weight > 0)
   ) {
     return history;
   }
@@ -126,7 +132,23 @@ export function recordPairTdoaObservation(
       0.5,
     );
     if (median !== null && Math.abs(observation.tdoaMs - median) > maxMedianDeviationMs) {
-      return history;
+      const agreesWithLastRejection =
+        typeof history.lastRejectedTdoaMs === "number" &&
+        Math.abs(observation.tdoaMs - history.lastRejectedTdoaMs) <=
+          REGIME_AGREEMENT_MS;
+      const rejectedStreak = agreesWithLastRejection
+        ? (history.rejectedStreak ?? 0) + 1
+        : 1;
+      if (rejectedStreak >= REGIME_JUMP_STREAK) {
+        // The world really did change (capture restart / origin jump):
+        // start over on the new regime.
+        return { observations: [observation] };
+      }
+      return {
+        ...history,
+        rejectedStreak,
+        lastRejectedTdoaMs: observation.tdoaMs,
+      };
     }
   }
 
@@ -150,6 +172,7 @@ export function removePairObservationsNear(
   radiusMs: number,
 ): PairTdoaHistory {
   return {
+    ...history,
     observations: history.observations.filter(
       (entry) => Math.abs(entry.atHostEpochMs - hostEpochMs) > radiusMs,
     ),
@@ -219,7 +242,10 @@ export function derivePairRangeEstimate(
   const inliers = deDrifted.filter(
     (entry) => Math.abs(entry.value - median) <= clipMs,
   );
-  if (inliers.length < minSamples) {
+  // Clipping an outlier must not retract an estimate the un-clipped buffer
+  // was allowed to make: require a floor below minSamples, not minSamples
+  // itself, or the range flickers in and out at the boundary.
+  if (inliers.length < Math.max(4, minSamples - 2)) {
     return null;
   }
 
