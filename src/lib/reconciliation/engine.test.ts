@@ -202,6 +202,39 @@ describe("ReconciliationEngine", () => {
     expect(range?.method).toBe("voice");
   }, SCENE_TIMEOUT_MS);
 
+  it("maps the room from chirps alone, before anyone talks", () => {
+    const engine = new ReconciliationEngine({ anchorDeviceId: "alpha" });
+    engine.setRoomDevices(["alpha", "bravo"]);
+
+    // Map appears instantly as a placeholder even with zero measurements.
+    const placeholder = engine.snapshot(1_000_000);
+    expect(placeholder.deviceIds).toEqual(["alpha", "bravo"]);
+    expect(placeholder.layout).not.toBeNull();
+
+    // A reciprocal chirp exchange lands without any voice events.
+    engine.setSeedRange({
+      from: "alpha",
+      to: "bravo",
+      method: "chirp",
+      meters: 0.61,
+      uncertaintyMeters: 0.04,
+      biasMs: 0,
+      driftMsPerSecond: 0,
+      coverage: 1,
+      samplesUsed: 2,
+      confidence: 0.9,
+      observedAtHostEpochMs: 1_002_000,
+    });
+    const ranged = engine.snapshot(1_003_000);
+    expect(ranged.ranges).toHaveLength(1);
+    expect(ranged.ranges[0].method).toBe("chirp");
+    expect(ranged.ranges[0].meters).toBe(0.61);
+    const points = ranged.layout!.points;
+    expect(
+      Math.hypot(points.alpha.x - points.bravo.x, points.alpha.y - points.bravo.y),
+    ).toBeCloseTo(0.61, 1);
+  });
+
   it("forgets pairs that involve a device that moved", () => {
     const devices: SceneDevice[] = [
       { deviceId: "alpha", x: 0, y: 0, clockErrorMs: 0 },

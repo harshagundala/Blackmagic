@@ -80,6 +80,10 @@ export class ReconciliationEngine {
   // by canonical pair, merged into every snapshot while fresh.
   private seedRanges = new Map<string, PairRangeEstimate>();
   private previousPoints: Record<string, PhonePoint> | null = null;
+  // Devices present in the room (from room state), independent of whether
+  // they have produced voice events yet — chirp-only ranging and the instant
+  // placeholder layout must not wait for someone to talk.
+  private roomDeviceIds: string[] = [];
 
   constructor({ anchorDeviceId = null }: ReconciliationEngineOptions = {}) {
     this.anchorDeviceId = anchorDeviceId;
@@ -87,6 +91,10 @@ export class ReconciliationEngine {
 
   setAnchorDevice(deviceId: string | null) {
     this.anchorDeviceId = deviceId;
+  }
+
+  setRoomDevices(deviceIds: string[]) {
+    this.roomDeviceIds = [...new Set(deviceIds.filter(Boolean))];
   }
 
   ingestVoiceEvent(deviceId: string, event: VoiceActivityEvent | null) {
@@ -163,9 +171,11 @@ export class ReconciliationEngine {
 
   snapshot(nowHostEpochMs: number): ReconciliationSnapshot {
     this.pruneVoiceEvents(nowHostEpochMs);
-    const deviceIds = [...this.voiceEvents.keys()].sort();
+    const deviceIds = [
+      ...new Set([...this.voiceEvents.keys(), ...this.roomDeviceIds]),
+    ].sort();
     const events = deriveReconciledAudioEvents(
-      deviceIds.map((deviceId) => ({
+      [...this.voiceEvents.keys()].map((deviceId) => ({
         deviceId,
         voiceEvents: this.voiceEvents.get(deviceId) ?? [],
       })),
@@ -261,9 +271,12 @@ export class ReconciliationEngine {
     deviceIds: string[],
     ranges: PairRangeEstimate[],
   ): ConstellationLayout | null {
-    if (deviceIds.length < 2 || ranges.length === 0) {
+    if (deviceIds.length < 2) {
       return null;
     }
+    // With no ranges yet estimateConstellation falls back to a radial
+    // placeholder: the map appears the instant a second phone joins and
+    // snaps to measured geometry as ranges land.
     const anchorId =
       this.anchorDeviceId && deviceIds.includes(this.anchorDeviceId)
         ? this.anchorDeviceId

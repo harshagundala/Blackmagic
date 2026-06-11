@@ -40,22 +40,48 @@ import {
   recordEdgeObservation,
   recordEdgePulse,
 } from "@/lib/realtime/edge-reconciliation";
-import {
-  selectRoomCalibrationTurn,
-  type AcousticObservation,
-  type AcousticPulse,
+import { selectUpcomingCalibrationTurn } from "@/lib/calibration/session";
+import type {
+  AcousticObservation,
+  AcousticPulse,
+  RoomDevice,
 } from "@/lib/session/registry";
 
 type Phase = "arriving" | "listening";
 
-// Chirp rotation: enough lead for the schedule to reach peers over the data
-// channel before the tone plays.
-const MIN_CHIRP_LEAD_MS = 600;
-const CHIRP_TURN_POLL_MS = 700;
-// Voice-processed iOS capture runs at 24 kHz (Nyquist 12 kHz), where the
-// default 16.5-19 kHz sweep is invisible; drop the band when any phone in
-// the room captures below 40 kHz.
-const LOW_RATE_CHIRP = { frequencyHz: 9_800, endFrequencyHz: 11_600 };
+// Chirp rotation: tight slots so a two-phone reciprocal exchange completes
+// in under four seconds of joining; the lead still covers data-channel
+// delivery of the schedule before the tone plays.
+const MIN_CHIRP_LEAD_MS = 550;
+const CHIRP_TURN_POLL_MS = 400;
+const CHIRP_TURN_OPTIONS = {
+  slotDurationMs: 1_800,
+  pulseOffsetMs: 1_000,
+  minLeadMs: 700,
+  pulseDurationMs: 80,
+};
+// Every device chirps in its own frequency lane so simultaneous or adjacent
+// chirps never confuse the matched filters. All lanes sit below 12 kHz: loud
+// through phone speakers, inside the Nyquist of 24 kHz voice-processed
+// capture, and above the speech band the passive GCC uses.
+const CHIRP_BANDS = [
+  { frequencyHz: 8_500, endFrequencyHz: 9_500 },
+  { frequencyHz: 9_500, endFrequencyHz: 10_500 },
+  { frequencyHz: 10_500, endFrequencyHz: 11_500 },
+  { frequencyHz: 11_500, endFrequencyHz: 11_950 },
+] as const;
+
+function chirpBandFor(deviceId: string) {
+  let hash = 0;
+  for (let index = 0; index < deviceId.length; index += 1) {
+    hash = (hash * 31 + deviceId.charCodeAt(index)) | 0;
+  }
+  return CHIRP_BANDS[Math.abs(hash) % CHIRP_BANDS.length];
+}
+// How many times the matched-filter fallback may re-search the rolling
+// window for one pulse; it is main-thread DSP, so unbounded retries at
+// render cadence freeze the UI.
+const MAX_MATCH_ATTEMPTS_PER_PULSE = 2;
 
 // The trailing window each row renders, and how far behind "now" the right
 // edge sits so remote chunks (sent every ~220 ms) have arrived by the time
@@ -112,7 +138,13 @@ export function WaveformApp() {
   const observablePulseRef = useRef<AcousticPulse | null>(null);
   const lastObservationRef = useRef<AcousticObservation | null>(null);
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
+  const matchAttemptsRef = useRef(new Map<string, number>());
+  const roomDevicesRef = useRef<RoomDevice[]>([]);
   const trackSensorPulse = sensors.trackPulse;
+
+  useEffect(() => {
+    roomDevicesRef.current = roomState?.devices ?? [];
+  }, [roomState?.devices]);
 
   const recordChirpEvidence = useCallback(
     (
@@ -471,22 +503,26 @@ export function WaveformApp() {
       if (nowMs === null) {
         return;
       }
-      const turn = selectRoomCalibrationTurn(roomState.devices, nowMs);
+      // Only devices that are actually capturing take emitter turns: a
+      // suspended phone cannot self-record its chirp.
+      const capableIds = roomDevicesRef.current
+        .filter((device) => device.mic === "active" && device.audioFrame)
+        .map((device) => device.deviceId);
+      const turn = selectUpcomingCalibrationTurn(
+        capableIds,
+        nowMs,
+        CHIRP_TURN_OPTIONS,
+      );
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
-      const lowRate =
-        (snapshotRef.current.sampleRate ?? 48_000) < 40_000 ||
-        realtime.peerFrames.some(
-          (frame) => frame.sampleRate !== null && frame.sampleRate < 40_000,
-        );
       const pulse = createScheduledAcousticPulse({
         deviceId,
         sequence: turn.sequence,
         hostEpochNowMs: nowMs,
         leadMs: turn.pulseEmittedAtHostEpochMs - nowMs,
         durationMs: turn.pulseDurationMs,
-        ...(lowRate ? LOW_RATE_CHIRP : {}),
+        ...chirpBandFor(deviceId),
       });
       if (
         !hasPulseLead(pulse, nowMs, MIN_CHIRP_LEAD_MS) ||
@@ -512,7 +548,6 @@ export function WaveformApp() {
   }, [
     deviceId,
     phase,
-    realtime.peerFrames,
     recordChirpEvidence,
     roomState,
     sensors.getAudioContext,
@@ -529,22 +564,47 @@ export function WaveformApp() {
 
   // Own chirp detections: prefer the streaming matcher's hit; when it
   // missed, re-search the rolling audio window around the pulse's expected
-  // arrival (clock-bounded) with the matched-filter fallback — v1 field
-  // experience says the matcher alone leaves detections on the floor.
+  // arrival with the matched-filter fallback. The fallback is main-thread
+  // DSP, so it is strictly bounded: only after the pulse has fully arrived,
+  // and at most twice per pulse — unbounded retries at snapshot cadence
+  // freeze the UI and starve audio scheduling.
   const ownPulseObservation = sensors.snapshot.pulseObservation;
   useEffect(() => {
     if (phase !== "listening") {
       return;
     }
     const pulse = observablePulseRef.current;
-    const observation =
+    let observation =
       ownPulseObservation && (!pulse || ownPulseObservation.pulseId === pulse.id)
         ? ownPulseObservation
-        : maybeCreateMatchedObservation(
-            pulse,
-            snapshotRef.current,
-            lastObservationRef.current?.pulseId ?? "",
-          );
+        : null;
+
+    if (!observation && pulse) {
+      const nowMs = hostEpochNow(snapshotRef.current);
+      const attempts = matchAttemptsRef.current.get(pulse.id) ?? 0;
+      const arrived =
+        nowMs !== null &&
+        nowMs >= pulse.emittedAtHostEpochMs + pulse.durationMs + 250;
+      if (
+        arrived &&
+        attempts < MAX_MATCH_ATTEMPTS_PER_PULSE &&
+        lastObservationRef.current?.pulseId !== pulse.id
+      ) {
+        matchAttemptsRef.current.set(pulse.id, attempts + 1);
+        if (matchAttemptsRef.current.size > 32) {
+          const oldest = matchAttemptsRef.current.keys().next().value;
+          if (oldest !== undefined) {
+            matchAttemptsRef.current.delete(oldest);
+          }
+        }
+        observation = maybeCreateMatchedObservation(
+          pulse,
+          snapshotRef.current,
+          lastObservationRef.current?.pulseId ?? "",
+        );
+      }
+    }
+
     if (!observation) {
       return;
     }
@@ -563,6 +623,9 @@ export function WaveformApp() {
       const nowMs = hostEpochNow(snapshotRef.current) ?? Date.now();
       const engine = hostEngine();
       engine.setAnchorDevice(deviceId);
+      engine.setRoomDevices(
+        roomDevicesRef.current.map((device) => device.deviceId),
+      );
       engine.noteMotion(deviceId, snapshotRef.current.motionStability, nowMs);
       const message = reconciliationStateMessage(
         deviceId,
@@ -1354,6 +1417,9 @@ function scheduleOutputPulse(
       return captureContext;
     },
     ownsContext: false,
+    // Full scale: the lanes sit at 8.5-12 kHz where phone speakers roll off,
+    // and a chirp the peer cannot hear wastes its whole rotation slot.
+    peakGain: 1,
   });
   void schedulerRef.current
     .schedule(pulse, { hostEpochNowMs: now })

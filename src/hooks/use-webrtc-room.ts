@@ -512,13 +512,11 @@ export function useWebRtcRoom({
             runtime.lastReconciliationKey = reconciliationKey;
           }
         }
-        const recordControlKey = recordControl
-          ? `${recordControl.recordingId}:${recordControl.action}`
-          : "";
-        if (recordControl && recordControlKey !== runtime.lastRecordControlKey) {
-          if (sendDataChannelMessage(runtime, recordControl)) {
-            runtime.lastRecordControlKey = recordControlKey;
-          }
+        // Record control rides an unreliable channel (maxRetransmits: 1), and
+        // a lost start/stop strands a phone's recording — re-send every tick;
+        // receivers are idempotent and late joiners catch up automatically.
+        if (recordControl) {
+          sendDataChannelMessage(runtime, recordControl);
         }
         const recordingStatusKey = recordingStatus
           ? `${recordingStatus.recordingId}:${recordingStatus.state}`
