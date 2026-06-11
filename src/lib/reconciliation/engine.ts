@@ -63,6 +63,9 @@ const TALKER_MAX_AGE_MS = 15_000;
 // A solved range outlives a momentary estimator dropout (an outlier burst or
 // a thin window) so the map doesn't flicker away while evidence rebuilds.
 const RANGE_HOLD_MS = 25_000;
+// Chirp-derived seeds stay authoritative while the chirp rotation keeps
+// refreshing them; if chirping stops they age out and passive takes over.
+const SEED_MAX_AGE_MS = 45_000;
 const OBSERVATION_CACHE_LIMIT = 64;
 
 export class ReconciliationEngine {
@@ -73,6 +76,9 @@ export class ReconciliationEngine {
   private motionEpisodeStart = new Map<string, number>();
   private motionResetAt = new Map<string, number>();
   private lastRanges = new Map<string, PairRangeEstimate>();
+  // Ranges measured outside the passive pipeline (reciprocal chirps): keyed
+  // by canonical pair, merged into every snapshot while fresh.
+  private seedRanges = new Map<string, PairRangeEstimate>();
   private previousPoints: Record<string, PhonePoint> | null = null;
 
   constructor({ anchorDeviceId = null }: ReconciliationEngineOptions = {}) {
@@ -128,8 +134,19 @@ export class ReconciliationEngine {
     } else if (atHostEpochMs - episodeStart >= SUSTAINED_MOTION_MS) {
       clearPairHistoriesForDevice(this.histories, deviceId);
       this.dropHeldRangesForDevice(deviceId);
+      this.dropSeedRangesForDevice(deviceId);
       this.motionResetAt.set(deviceId, atHostEpochMs);
     }
+  }
+
+  // Instant ranges from the active chirp exchange. A chirp measurement is
+  // sample-domain reciprocal timing (clock-free) and usually beats the
+  // passive estimate, so while fresh it takes precedence unless passive has
+  // higher confidence.
+  setSeedRange(range: PairRangeEstimate) {
+    const key = pairKeyFor(range.from, range.to);
+    const [from, to] = key.split("|");
+    this.seedRanges.set(key, { ...range, from, to, method: "chirp" });
   }
 
   removeDevice(deviceId: string) {
@@ -138,6 +155,7 @@ export class ReconciliationEngine {
     this.motionResetAt.delete(deviceId);
     clearPairHistoriesForDevice(this.histories, deviceId);
     this.dropHeldRangesForDevice(deviceId);
+    this.dropSeedRangesForDevice(deviceId);
     if (this.previousPoints) {
       delete this.previousPoints[deviceId];
     }
@@ -185,6 +203,30 @@ export class ReconciliationEngine {
       } else if (held) {
         this.lastRanges.delete(pairKey);
       }
+    }
+    for (const [key, seed] of [...this.seedRanges]) {
+      if (nowHostEpochMs - seed.observedAtHostEpochMs > SEED_MAX_AGE_MS) {
+        this.seedRanges.delete(key);
+        continue;
+      }
+      const passiveIndex = ranges.findIndex(
+        (range) => pairKeyFor(range.from, range.to) === key,
+      );
+      if (passiveIndex < 0) {
+        ranges.push(seed);
+        continue;
+      }
+      const passive = ranges[passiveIndex];
+      if (passive.confidence > seed.confidence) {
+        continue;
+      }
+      // The chirp seed carries no nuisance-offset estimate; keep the passive
+      // bias/drift so talker localization stays calibrated.
+      ranges[passiveIndex] = {
+        ...seed,
+        biasMs: passive.biasMs,
+        driftMsPerSecond: passive.driftMsPerSecond,
+      };
     }
     ranges.sort((a, b) =>
       `${a.from}|${a.to}`.localeCompare(`${b.from}|${b.to}`),
@@ -319,6 +361,15 @@ export class ReconciliationEngine {
       const [from, to] = key.split("|");
       if (from === deviceId || to === deviceId) {
         this.lastRanges.delete(key);
+      }
+    }
+  }
+
+  private dropSeedRangesForDevice(deviceId: string) {
+    for (const key of [...this.seedRanges.keys()]) {
+      const [from, to] = key.split("|");
+      if (from === deviceId || to === deviceId) {
+        this.seedRanges.delete(key);
       }
     }
   }

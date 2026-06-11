@@ -48,6 +48,9 @@ export type PairTdoaHistory = {
 export type PairRangeEstimate = {
   from: string;
   to: string;
+  // How this range was measured: passive ambient-sound TDOA spread, or an
+  // active reciprocal chirp exchange (instant, movement-free).
+  method: "voice" | "chirp";
   meters: number;
   uncertaintyMeters: number;
   // Estimated nuisance offset Δ at `nowHostEpochMs`; what an active
@@ -276,6 +279,7 @@ export function derivePairRangeEstimate(
   return {
     from: windowed[0].from,
     to: windowed[0].to,
+    method: "voice",
     meters: round(meters, 3),
     uncertaintyMeters: round(uncertaintyMeters, 3),
     biasMs: round(biasMs, 3),

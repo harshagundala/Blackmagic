@@ -391,6 +391,7 @@ function isValidReconciliationState(
       !isRecord(range) ||
       !nonEmptyString(range.from) ||
       !nonEmptyString(range.to) ||
+      (range.method !== "voice" && range.method !== "chirp") ||
       !finiteNumber(range.meters) ||
       !finiteNumber(range.uncertaintyMeters) ||
       !finiteNumber(range.coverage) ||

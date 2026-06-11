@@ -25,8 +25,34 @@ import {
 } from "@/lib/reconciliation/engine";
 import { MIN_RANGE_SAMPLES as RANGE_TARGET_SAMPLES } from "@/lib/reconciliation/pair-tdoa-history";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
+import { hasPulseLead } from "@/lib/calibration/cadence";
+import { createScheduledAcousticPulse } from "@/lib/calibration/pulse";
+import {
+  createPulseToneScheduler,
+  type PulseToneScheduler,
+} from "@/lib/calibration/playback";
+import {
+  createEdgeEvidence,
+  deriveEdgeRanges,
+  recordEdgeObservation,
+  recordEdgePulse,
+} from "@/lib/realtime/edge-reconciliation";
+import {
+  selectRoomCalibrationTurn,
+  type AcousticObservation,
+  type AcousticPulse,
+} from "@/lib/session/registry";
 
 type Phase = "arriving" | "listening";
+
+// Chirp rotation: enough lead for the schedule to reach peers over the data
+// channel before the tone plays.
+const MIN_CHIRP_LEAD_MS = 600;
+const CHIRP_TURN_POLL_MS = 700;
+// Voice-processed iOS capture runs at 24 kHz (Nyquist 12 kHz), where the
+// default 16.5-19 kHz sweep is invisible; drop the band when any phone in
+// the room captures below 40 kHz.
+const LOW_RATE_CHIRP = { frequencyHz: 9_800, endFrequencyHz: 11_600 };
 
 // The trailing window each row renders, and how far behind "now" the right
 // edge sits so remote chunks (sent every ~220 ms) have arrived by the time
@@ -71,6 +97,63 @@ export function WaveformApp() {
     }
     return reconciliationEngineRef.current;
   }, []);
+
+  // Active chirp bootstrap: phones take deterministic host-clock turns
+  // emitting short near-ultrasonic sweeps; every phone records every chirp
+  // in its own sample stream, and reciprocal pairs yield instant, clock-free
+  // distances (BeepBeep-style) — no talker movement needed. Passive ambient
+  // ranging keeps refining alongside.
+  const edgeEvidenceRef = useRef(createEdgeEvidence());
+  const publishedPulseIdRef = useRef("");
+  const activePulseRef = useRef<AcousticPulse | null>(null);
+  const observablePulseRef = useRef<AcousticPulse | null>(null);
+  const lastObservationRef = useRef<AcousticObservation | null>(null);
+  const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
+  const trackSensorPulse = sensors.trackPulse;
+
+  const recordChirpEvidence = useCallback(
+    (
+      fromDeviceId: string,
+      pulse: AcousticPulse | null,
+      observation: AcousticObservation | null,
+    ) => {
+      let changed = false;
+      if (pulse) {
+        changed = recordEdgePulse(edgeEvidenceRef.current, fromDeviceId, pulse) || changed;
+      }
+      if (observation) {
+        changed =
+          recordEdgeObservation(edgeEvidenceRef.current, fromDeviceId, observation) ||
+          changed;
+      }
+      if (changed && isHostRef.current) {
+        const nowMs = hostEpochNow(snapshotRef.current);
+        if (nowMs !== null) {
+          for (const range of deriveEdgeRanges(edgeEvidenceRef.current, {
+            hostEpochNowMs: nowMs,
+          })) {
+            hostEngine().setSeedRange({
+              from: range.from,
+              to: range.to,
+              method: "chirp",
+              meters: range.meters,
+              uncertaintyMeters: Math.max(
+                0.03,
+                range.distanceUncertaintyMeters,
+              ),
+              biasMs: 0,
+              driftMsPerSecond: 0,
+              coverage: 1,
+              samplesUsed: range.samplesUsed,
+              confidence: range.confidence,
+              observedAtHostEpochMs: range.observedAtHostEpochMs,
+            });
+          }
+        }
+      }
+    },
+    [hostEngine],
+  );
 
   // Ground-truth recording sessions: the host's record button starts a
   // synchronized full-resolution capture on every phone; on stop each phone
@@ -219,6 +302,33 @@ export function WaveformApp() {
       },
       [],
     ),
+    getAcousticPulse: useCallback(() => activePulseRef.current, []),
+    getAcousticObservation: useCallback(() => lastObservationRef.current, []),
+    onChirpSchedule: useCallback(
+      (pulse: AcousticPulse, fromDeviceId: string) => {
+        recordChirpEvidence(fromDeviceId, pulse, null);
+        const nowMs = hostEpochNow(snapshotRef.current);
+        if (nowMs === null) {
+          return;
+        }
+        const deltaMs = pulse.emittedAtHostEpochMs - nowMs;
+        if (
+          deltaMs > -200 &&
+          deltaMs < 5_500 &&
+          observablePulseRef.current?.id !== pulse.id
+        ) {
+          observablePulseRef.current = pulse;
+          trackSensorPulse(pulse);
+        }
+      },
+      [recordChirpEvidence, trackSensorPulse],
+    ),
+    onPulseObservation: useCallback(
+      (observation: AcousticObservation, fromDeviceId: string) => {
+        recordChirpEvidence(fromDeviceId, null, observation);
+      },
+      [recordChirpEvidence],
+    ),
     getRecordControl: useCallback(() => recordControlRef.current, []),
     getRecordingStatus: useCallback(() => recordingStatusRef.current, []),
     onRecordControl: useCallback(
@@ -344,6 +454,86 @@ export function WaveformApp() {
       hostEngine().ingestVoiceEvent(deviceId, ownVoiceEvent);
     }
   }, [deviceId, hostEngine, isHost, ownVoiceEvent]);
+
+  // Chirp emitter rotation: every capturing device computes the same
+  // host-clock turn schedule; on its turn it announces the pulse over the
+  // data channel, listens for itself, and plays it through the capture
+  // context (created in the tap gesture — an iOS requirement).
+  useEffect(() => {
+    if (phase !== "listening" || !roomState) {
+      return;
+    }
+    const emit = () => {
+      const nowMs = hostEpochNow(snapshotRef.current);
+      if (nowMs === null) {
+        return;
+      }
+      const turn = selectRoomCalibrationTurn(roomState.devices, nowMs);
+      if (!turn || turn.emitterId !== deviceId) {
+        return;
+      }
+      const lowRate =
+        (snapshotRef.current.sampleRate ?? 48_000) < 40_000 ||
+        realtime.peerFrames.some(
+          (frame) => frame.sampleRate !== null && frame.sampleRate < 40_000,
+        );
+      const pulse = createScheduledAcousticPulse({
+        deviceId,
+        sequence: turn.sequence,
+        hostEpochNowMs: nowMs,
+        leadMs: turn.pulseEmittedAtHostEpochMs - nowMs,
+        durationMs: turn.pulseDurationMs,
+        ...(lowRate ? LOW_RATE_CHIRP : {}),
+      });
+      if (
+        !hasPulseLead(pulse, nowMs, MIN_CHIRP_LEAD_MS) ||
+        pulse.id === publishedPulseIdRef.current
+      ) {
+        return;
+      }
+      publishedPulseIdRef.current = pulse.id;
+      activePulseRef.current = pulse;
+      observablePulseRef.current = pulse;
+      trackSensorPulse(pulse);
+      recordChirpEvidence(deviceId, pulse, null);
+      scheduleOutputPulse(
+        pulse,
+        snapshotRef.current,
+        pulseSchedulerRef,
+        sensors.getAudioContext,
+      );
+    };
+    emit();
+    const timer = window.setInterval(emit, CHIRP_TURN_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    deviceId,
+    phase,
+    realtime.peerFrames,
+    recordChirpEvidence,
+    roomState,
+    sensors.getAudioContext,
+    trackSensorPulse,
+  ]);
+
+  useEffect(
+    () => () => {
+      void pulseSchedulerRef.current?.close();
+      pulseSchedulerRef.current = null;
+    },
+    [],
+  );
+
+  // Own chirp detections from the streaming matcher: stage for broadcast
+  // (the hook dedupes per peer) and fold into local evidence.
+  const ownPulseObservation = sensors.snapshot.pulseObservation;
+  useEffect(() => {
+    if (phase !== "listening" || !ownPulseObservation) {
+      return;
+    }
+    lastObservationRef.current = ownPulseObservation;
+    recordChirpEvidence(deviceId, null, ownPulseObservation);
+  }, [deviceId, ownPulseObservation, phase, recordChirpEvidence]);
 
   // Host: recompute the room geometry about once a second and stage the
   // result for broadcast; peers receive it via onReconciliationState.
@@ -698,6 +888,7 @@ function reconciliationStateMessage(
     ranges: snapshot.ranges.map((range) => ({
       from: range.from,
       to: range.to,
+      method: range.method,
       meters: range.meters,
       uncertaintyMeters: range.uncertaintyMeters,
       coverage: range.coverage,
@@ -784,7 +975,9 @@ function ReconciliationPanel({
                 <span className="text-black/35">
                   {" "}
                   ±{range.uncertaintyMeters.toFixed(2)} ·{" "}
-                  {describeRangeState(range.confidence, range.coverage)}
+                  {range.method === "chirp"
+                    ? "chirp"
+                    : describeRangeState(range.confidence, range.coverage)}
                 </span>
               </span>
             </div>
@@ -1070,6 +1263,35 @@ function drawReconciliationMap(
       spot.y - 9,
     );
   }
+}
+
+// Play a scheduled chirp through the capture context: it was created inside
+// the user's tap gesture, so iOS lets it produce sound. A context created
+// here — outside any gesture — would stay suspended and the chirp would
+// silently never play, so without a capture context the turn is skipped.
+function scheduleOutputPulse(
+  pulse: AcousticPulse,
+  snapshot: SensorSnapshot,
+  schedulerRef: { current: PulseToneScheduler | null },
+  getCaptureContext: () => AudioContext | null,
+) {
+  const now = hostEpochNow(snapshot);
+  if (now === null || !getCaptureContext()) {
+    return;
+  }
+  schedulerRef.current ??= createPulseToneScheduler({
+    createContext: () => {
+      const captureContext = getCaptureContext();
+      if (!captureContext) {
+        throw new Error("capture context unavailable");
+      }
+      return captureContext;
+    },
+    ownsContext: false,
+  });
+  void schedulerRef.current
+    .schedule(pulse, { hostEpochNowMs: now })
+    .catch(() => undefined);
 }
 
 function hostEpochNow(snapshot: SensorSnapshot) {

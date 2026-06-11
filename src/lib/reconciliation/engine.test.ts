@@ -159,6 +159,49 @@ describe("ReconciliationEngine", () => {
     }
   }, SCENE_TIMEOUT_MS);
 
+  it("merges chirp seed ranges and lets them age out", () => {
+    const devices: SceneDevice[] = [
+      { deviceId: "alpha", x: 0, y: 0, clockErrorMs: 0 },
+      { deviceId: "bravo", x: 1.8, y: 0, clockErrorMs: 5 },
+    ];
+    const engine = new ReconciliationEngine({ anchorDeviceId: "alpha" });
+    const passive = runScenario(engine, {
+      devices,
+      utterances: 14,
+      talkerAt: circleAround({ x: 0.9, y: 0 }, 1.6, 14),
+    });
+    expect(passive.ranges).toHaveLength(1);
+    const passiveBias = passive.ranges[0].biasMs;
+
+    // A reciprocal chirp lands: instant, high-confidence, sample-domain.
+    engine.setSeedRange({
+      from: "bravo",
+      to: "alpha",
+      method: "chirp",
+      meters: 1.78,
+      uncertaintyMeters: 0.04,
+      biasMs: 0,
+      driftMsPerSecond: 0,
+      coverage: 1,
+      samplesUsed: 4,
+      confidence: 0.95,
+      observedAtHostEpochMs: passive.updatedAtHostEpochMs,
+    });
+    const seeded = engine.snapshot(passive.updatedAtHostEpochMs + 1_000);
+    expect(seeded.ranges).toHaveLength(1);
+    expect(seeded.ranges[0].method).toBe("chirp");
+    expect(seeded.ranges[0].meters).toBe(1.78);
+    // Canonical pair order and the passive bias survive the merge.
+    expect(seeded.ranges[0].from).toBe("alpha");
+    expect(seeded.ranges[0].biasMs).toBe(passiveBias);
+    expect(seeded.layout).not.toBeNull();
+
+    // Without fresh chirps the seed expires and passive takes back over.
+    const later = engine.snapshot(passive.updatedAtHostEpochMs + 50_000);
+    const range = later.ranges.find((entry) => entry.from === "alpha");
+    expect(range?.method).toBe("voice");
+  }, SCENE_TIMEOUT_MS);
+
   it("forgets pairs that involve a device that moved", () => {
     const devices: SceneDevice[] = [
       { deviceId: "alpha", x: 0, y: 0, clockErrorMs: 0 },

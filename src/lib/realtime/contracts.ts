@@ -170,6 +170,7 @@ export type RealtimeVoiceEventMessage = {
 export type RealtimeReconciliationRange = {
   from: string;
   to: string;
+  method: "voice" | "chirp";
   meters: number;
   uncertaintyMeters: number;
   // Convergence quality in [0, 1]; below ~0.5 the distance is still a lower

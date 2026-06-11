@@ -289,6 +289,7 @@ describe("realtime data channel messages", () => {
         {
           from: "host-device",
           to: "phone-b",
+          method: "voice" as const,
           meters: 2.13,
           uncertaintyMeters: 0.21,
           coverage: 0.8,
