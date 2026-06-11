@@ -187,6 +187,10 @@ export type RealtimeReconciliationStateMessage = {
   fromDeviceId: string;
   updatedAtHostEpochMs: number;
   ranges: RealtimeReconciliationRange[];
+  // Field diagnostics so any phone can show why ranging is (not) advancing:
+  // retained voice events per device, GCC matches per pair.
+  heardEvents: Array<{ deviceId: string; events: number }>;
+  pairProgress: Array<{ from: string; to: string; observations: number }>;
   // Anchor-centered layout, present with 2+ ranged devices.
   points: Record<string, { x: number; y: number }> | null;
   layoutQuality: number | null;

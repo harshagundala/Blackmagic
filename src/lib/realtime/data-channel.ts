@@ -342,9 +342,32 @@ function isValidReconciliationState(
     !nonEmptyString(value.fromDeviceId) ||
     !finiteNumber(value.updatedAtHostEpochMs) ||
     !Array.isArray(value.ranges) ||
-    value.ranges.length > MAX_RECONCILIATION_RANGES
+    value.ranges.length > MAX_RECONCILIATION_RANGES ||
+    !Array.isArray(value.heardEvents) ||
+    value.heardEvents.length > MAX_RECONCILIATION_RANGES ||
+    !Array.isArray(value.pairProgress) ||
+    value.pairProgress.length > MAX_RECONCILIATION_RANGES
   ) {
     return false;
+  }
+  for (const entry of value.heardEvents) {
+    if (
+      !isRecord(entry) ||
+      !nonEmptyString(entry.deviceId) ||
+      !finiteNumber(entry.events)
+    ) {
+      return false;
+    }
+  }
+  for (const entry of value.pairProgress) {
+    if (
+      !isRecord(entry) ||
+      !nonEmptyString(entry.from) ||
+      !nonEmptyString(entry.to) ||
+      !finiteNumber(entry.observations)
+    ) {
+      return false;
+    }
   }
   for (const range of value.ranges) {
     if (

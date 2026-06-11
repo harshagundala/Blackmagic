@@ -40,6 +40,11 @@ export type ReconciliationSnapshot = {
   layout: ConstellationLayout | null;
   talker: SourceHint | null;
   deviceIds: string[];
+  // Field diagnostics: voice events currently retained per device, and GCC
+  // matches accumulated per pair — make "why is nothing showing" answerable
+  // from the phone screen.
+  heardEvents: Array<{ deviceId: string; events: number }>;
+  pairProgress: Array<{ from: string; to: string; observations: number }>;
   updatedAtHostEpochMs: number;
 };
 
@@ -171,11 +176,24 @@ export class ReconciliationEngine {
     const layout = this.solveLayout(deviceIds, ranges);
     const talker = this.locateTalker(events, layout, ranges, nowHostEpochMs);
 
+    const heardEvents = deviceIds.map((deviceId) => ({
+      deviceId,
+      events: this.voiceEvents.get(deviceId)?.length ?? 0,
+    }));
+    const pairProgress = [...this.histories.entries()]
+      .map(([pairKey, history]) => {
+        const [from, to] = pairKey.split("|");
+        return { from, to, observations: history.observations.length };
+      })
+      .sort((a, b) => `${a.from}|${a.to}`.localeCompare(`${b.from}|${b.to}`));
+
     return {
       ranges,
       layout,
       talker,
       deviceIds,
+      heardEvents,
+      pairProgress,
       updatedAtHostEpochMs: nowHostEpochMs,
     };
   }

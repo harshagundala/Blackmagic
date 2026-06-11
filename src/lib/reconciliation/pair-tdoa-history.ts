@@ -81,7 +81,7 @@ const MAX_MEDIAN_DEVIATION_MS = 40;
 const MAX_ABS_TDOA_MS = 250;
 const MEDIAN_GATE_MIN_SAMPLES = 12;
 const RANGE_WINDOW_MS = 150_000;
-const MIN_RANGE_SAMPLES = 8;
+export const MIN_RANGE_SAMPLES = 8;
 const LOW_QUANTILE = 0.06;
 const HIGH_QUANTILE = 0.94;
 // Physical ADC sample-rate offsets sit within ~50 ppm; clamping keeps a

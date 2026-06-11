@@ -20,6 +20,7 @@ import {
   ReconciliationEngine,
   type ReconciliationSnapshot,
 } from "@/lib/reconciliation/engine";
+import { MIN_RANGE_SAMPLES as RANGE_TARGET_SAMPLES } from "@/lib/reconciliation/pair-tdoa-history";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 
 type Phase = "arriving" | "listening";
@@ -539,6 +540,8 @@ function reconciliationStateMessage(
       confidence: range.confidence,
       samplesUsed: range.samplesUsed,
     })),
+    heardEvents: snapshot.heardEvents,
+    pairProgress: snapshot.pairProgress,
     points: snapshot.layout?.points ?? null,
     layoutQuality: snapshot.layout?.quality ?? null,
     talker: snapshot.talker
@@ -625,7 +628,7 @@ function ReconciliationPanel({
         </div>
       ) : (
         <p className="px-4 pt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-black/35">
-          say something — distances appear as sound crosses the room
+          {describeReconciliationProgress(state, label)}
         </p>
       )}
       {points ? (
@@ -640,6 +643,38 @@ function ReconciliationPanel({
       </p>
     </section>
   );
+}
+
+// Pre-range progress line: show the deepest stage the pipeline has reached
+// so a silent panel is diagnosable from the phone — are voice events being
+// heard at all, and are they cross-matching between phones yet?
+function describeReconciliationProgress(
+  state: RealtimeReconciliationStateMessage | null,
+  label: (id: string) => string,
+) {
+  const matching = (state?.pairProgress ?? []).filter(
+    (pair) => pair.observations > 0,
+  );
+  if (matching.length > 0) {
+    return matching
+      .map(
+        (pair) =>
+          `${label(pair.from)} ↔ ${label(pair.to)} aligning ${Math.min(
+            pair.observations,
+            RANGE_TARGET_SAMPLES,
+          )}/${RANGE_TARGET_SAMPLES}`,
+      )
+      .join(" · ");
+  }
+
+  const heard = (state?.heardEvents ?? []).filter((entry) => entry.events > 0);
+  if (heard.length > 0) {
+    return `voice marks · ${(state?.heardEvents ?? [])
+      .map((entry) => `${label(entry.deviceId)} ${entry.events}`)
+      .join(" · ")}`;
+  }
+
+  return "say something — distances appear as sound crosses the room";
 }
 
 function describeRangeState(confidence: number, coverage: number) {

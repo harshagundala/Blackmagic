@@ -296,6 +296,11 @@ describe("realtime data channel messages", () => {
           samplesUsed: 41,
         },
       ],
+      heardEvents: [
+        { deviceId: "host-device", events: 5 },
+        { deviceId: "phone-b", events: 4 },
+      ],
+      pairProgress: [{ from: "host-device", to: "phone-b", observations: 41 }],
       points: {
         "host-device": { x: 0, y: 0 },
         "phone-b": { x: 2.1, y: 0.1 },
@@ -322,6 +327,8 @@ describe("realtime data channel messages", () => {
           fromDeviceId: "host-device",
           updatedAtHostEpochMs: 1,
           ranges: [],
+          heardEvents: [],
+          pairProgress: [],
           points: { a: { x: null, y: 0 } },
           layoutQuality: null,
           talker: null,

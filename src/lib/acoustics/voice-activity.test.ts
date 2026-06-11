@@ -70,6 +70,92 @@ describe("voice activity gate", () => {
     expect(second.event).not.toBeNull();
   });
 
+  // Real phone captures sit at ~1e-4 RMS in a quiet room with speech peaking
+  // around 1e-3 — far below the legacy absolute thresholds. The gate must
+  // learn the device's floor and fire on a relative rise.
+  test("adapts to a quiet real-phone capture floor", () => {
+    let gate: VoiceActivityGate = { open: false, lastEventHostEpochMs: null };
+    // Quiet room at iPhone raw-capture scale for the warm-up period.
+    for (let index = 0; index < 40; index += 1) {
+      const result = detectVoiceActivityEvent({
+        gate,
+        micLevel: 1e-4 + (index % 3) * 1e-5,
+        frame: audioFrame({ hostEstimatedEpochMs: 30_000 + index * 16 }),
+      });
+      gate = result.gate;
+      expect(result.event).toBeNull();
+    }
+
+    const speech = detectVoiceActivityEvent({
+      gate,
+      micLevel: 1.5e-3,
+      frame: audioFrame({ hostEstimatedEpochMs: 31_000 }),
+    });
+    expect(speech.event).not.toBeNull();
+    expect(speech.event!.confidence).toBeGreaterThan(0.5);
+    expect(speech.gate.open).toBe(true);
+
+    // Falling back to the floor closes the gate again.
+    const quiet = detectVoiceActivityEvent({
+      gate: speech.gate,
+      micLevel: 1.1e-4,
+      frame: audioFrame({ hostEstimatedEpochMs: 32_000 }),
+    });
+    expect(quiet.gate.open).toBe(false);
+  });
+
+  test("does not fire adaptively before the floor has warmed up", () => {
+    let gate: VoiceActivityGate = { open: false, lastEventHostEpochMs: null };
+    for (let index = 0; index < 5; index += 1) {
+      const result = detectVoiceActivityEvent({
+        gate,
+        micLevel: 1e-4,
+        frame: audioFrame({ hostEstimatedEpochMs: 40_000 + index * 16 }),
+      });
+      gate = result.gate;
+    }
+    const early = detectVoiceActivityEvent({
+      gate,
+      micLevel: 2e-3,
+      frame: audioFrame({ hostEstimatedEpochMs: 40_200 }),
+    });
+    expect(early.event).toBeNull();
+  });
+
+  test("speech bursts do not drag the learned floor up under themselves", () => {
+    let gate: VoiceActivityGate = { open: false, lastEventHostEpochMs: null };
+    for (let index = 0; index < 40; index += 1) {
+      gate = detectVoiceActivityEvent({
+        gate,
+        micLevel: 1e-4,
+        frame: audioFrame({ hostEstimatedEpochMs: 50_000 + index * 16 }),
+      }).gate;
+    }
+    // A long utterance holds the gate open...
+    for (let index = 0; index < 120; index += 1) {
+      gate = detectVoiceActivityEvent({
+        gate,
+        micLevel: 2e-3,
+        frame: audioFrame({ hostEstimatedEpochMs: 51_000 + index * 16 }),
+      }).gate;
+    }
+    expect(gate.open).toBe(true);
+    // ...and after a pause the next utterance still fires.
+    for (let index = 0; index < 30; index += 1) {
+      gate = detectVoiceActivityEvent({
+        gate,
+        micLevel: 1.2e-4,
+        frame: audioFrame({ hostEstimatedEpochMs: 53_000 + index * 16 }),
+      }).gate;
+    }
+    const next = detectVoiceActivityEvent({
+      gate,
+      micLevel: 2e-3,
+      frame: audioFrame({ hostEstimatedEpochMs: 54_000 }),
+    });
+    expect(next.event).not.toBeNull();
+  });
+
   test("carries motion stability into voice event confidence", () => {
     const stable = detectVoiceActivityEvent({
       gate: { open: false, lastEventHostEpochMs: null },
