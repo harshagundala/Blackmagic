@@ -118,6 +118,9 @@ export type SceneDevice = {
   // ADC sample-rate offset: device-local sample time drifts by this many ms
   // per true second (≈ ppm/1000 · 1000).
   clockDriftMsPerSecond?: number;
+  // Nominal capture rate (iOS voice-processed capture runs at 24 kHz while
+  // raw capture runs at 48 kHz; both must interoperate).
+  captureSampleRate?: number;
 };
 
 export type SyntheticVoiceEventInput = {
@@ -149,15 +152,16 @@ export function syntheticVoiceEvent({
     Math.hypot(talker.x - device.x, talker.y - device.y) / TEST_SPEED_OF_SOUND;
 
   const clockErrorMs = device.clockErrorMs;
+  const sampleRate = device.captureSampleRate ?? SAMPLE_RATE;
   const captureStartEpochMs = device.captureStartEpochMs ?? sessionStartEpochMs;
   // True ADC rate differs from nominal by the sample-rate offset; the device
   // labels indices nominally, so its sample-domain time drifts against true
   // time at clockDriftMsPerSecond.
   const rateScale = 1 + (device.clockDriftMsPerSecond ?? 0) / 1_000;
   const trueEpochOfSample = (sampleIndex: number) =>
-    captureStartEpochMs + (sampleIndex / (SAMPLE_RATE * rateScale)) * 1_000;
+    captureStartEpochMs + (sampleIndex / (sampleRate * rateScale)) * 1_000;
   const sampleAtTrueEpoch = (epochMs: number) =>
-    ((epochMs - captureStartEpochMs) / 1_000) * SAMPLE_RATE * rateScale;
+    ((epochMs - captureStartEpochMs) / 1_000) * sampleRate * rateScale;
 
   // Sound from the utterance arrives at utteranceEpochMs + delay; the VAD
   // fires nearby.
@@ -165,7 +169,7 @@ export function syntheticVoiceEvent({
   const centerSampleIndex = Math.round(
     sampleAtTrueEpoch(arrivalEpochMs + vadJitterMs),
   );
-  const windowSamples = Math.round(WINDOW_SECONDS * SAMPLE_RATE);
+  const windowSamples = Math.round(WINDOW_SECONDS * sampleRate);
   const startSampleIndex = centerSampleIndex - windowSamples / 2;
   const samples = new Float32Array(windowSamples);
   for (let index = 0; index < windowSamples; index += 1) {
@@ -177,7 +181,7 @@ export function syntheticVoiceEvent({
 
   const audioSnippet = captureAudioSnippet({
     samples,
-    sampleRate: SAMPLE_RATE,
+    sampleRate,
     startSampleIndex,
     centerSampleIndex,
   });
@@ -188,9 +192,9 @@ export function syntheticVoiceEvent({
   return {
     id: `voice-${device.deviceId}-${Math.round(utteranceEpochMs)}`,
     detectedAtHostEpochMs,
-    audioContextTimeSeconds: centerSampleIndex / SAMPLE_RATE,
+    audioContextTimeSeconds: centerSampleIndex / sampleRate,
     sampleIndex: centerSampleIndex,
-    sampleRate: SAMPLE_RATE,
+    sampleRate,
     audioLevel: 0.1,
     confidence: 0.9,
     clockOffsetMs: 0,

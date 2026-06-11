@@ -64,16 +64,17 @@ function buildObservation(
   signal: (t: number) => number,
   device: SyntheticDevice,
   seed: number,
+  sampleRate: number = SAMPLE_RATE,
 ): ReconciledAudioEventObservation {
   const random = mulberry32(seed);
   const onsetSeconds = 0.5;
   const centerSeconds = onsetSeconds + device.delayMs / 1_000 + device.vadJitterMs / 1_000;
-  const centerSampleIndex = Math.round(centerSeconds * SAMPLE_RATE);
-  const windowSamples = Math.round(0.4 * SAMPLE_RATE);
+  const centerSampleIndex = Math.round(centerSeconds * sampleRate);
+  const windowSamples = Math.round(0.4 * sampleRate);
   const startSampleIndex = centerSampleIndex - windowSamples / 2;
   const samples = new Float32Array(windowSamples);
   for (let index = 0; index < windowSamples; index += 1) {
-    const t = (startSampleIndex + index) / SAMPLE_RATE;
+    const t = (startSampleIndex + index) / sampleRate;
     samples[index] = device.corrupted
       ? (random() - 0.5) * 0.4
       : signal(t - device.delayMs / 1_000) + (random() - 0.5) * 0.01;
@@ -81,20 +82,20 @@ function buildObservation(
 
   const snippet = captureAudioSnippet({
     samples,
-    sampleRate: SAMPLE_RATE,
+    sampleRate,
     startSampleIndex,
     centerSampleIndex,
   });
   expect(snippet).not.toBeNull();
 
   const detectedAtHostEpochMs =
-    EPOCH0 + (centerSampleIndex / SAMPLE_RATE) * 1_000 + device.clockErrorMs;
+    EPOCH0 + (centerSampleIndex / sampleRate) * 1_000 + device.clockErrorMs;
   return {
     deviceId: device.deviceId,
     eventId: `voice-${device.deviceId}`,
     detectedAtHostEpochMs,
     sampleIndex: centerSampleIndex,
-    sampleRate: SAMPLE_RATE,
+    sampleRate,
     audioLevel: 0.1,
     confidence: 0.9,
     clockUncertaintyMs: 2,
@@ -160,6 +161,32 @@ describe("derivePairTdoaObservations", () => {
     for (const tdoaMs of results) {
       expect(Math.abs(tdoaMs - 5.8)).toBeLessThan(0.25);
     }
+  });
+
+  it("aligns a 24 kHz voice-processed capture against a 48 kHz one", () => {
+    // Field regression: iOS voice-processed capture runs at 24 kHz while raw
+    // capture runs at 48 kHz. Integer decimation landed them on different
+    // snippet rates and the aligner rejected every pair; exact resampling
+    // must make them interoperate with full precision.
+    const signal = makeSpeechLikeSignal(23);
+    const event = buildEvent([
+      buildObservation(
+        signal,
+        { deviceId: "alpha", delayMs: 1.2, clockErrorMs: 5, vadJitterMs: 2 },
+        71,
+        24_000,
+      ),
+      buildObservation(
+        signal,
+        { deviceId: "bravo", delayMs: 6.4, clockErrorMs: -8, vadJitterMs: -3 },
+        72,
+        48_000,
+      ),
+    ]);
+
+    const observations = derivePairTdoaObservations(event);
+    expect(observations).toHaveLength(1);
+    expect(Math.abs(observations[0].tdoaMs - 5.2)).toBeLessThan(0.3);
   });
 
   it("produces all pairs for a three-device event and they close the triangle", () => {

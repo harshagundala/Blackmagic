@@ -66,10 +66,15 @@ export function captureAudioSnippet({
     return null;
   }
 
-  const decimation = Math.max(1, Math.round(sampleRate / targetSampleRate));
-  const actualTargetRate = sampleRate / decimation;
+  // Exact-rate windowed-sinc resampling: capture rates differ across devices
+  // and modes (iOS voice-processed capture runs at 24 kHz, raw at 48 kHz,
+  // routes can flip to 44.1 kHz), and integer decimation would land each on
+  // a different effective rate — the cross-device aligner rejects mismatched
+  // rates outright. Every snippet therefore lands on targetSampleRate
+  // exactly, whatever the source rate.
+  const ratio = sampleRate / targetSampleRate;
   const windowSourceSamples = Math.round((windowMs / 1_000) * sampleRate);
-  const outputLength = Math.floor(windowSourceSamples / decimation);
+  const outputLength = Math.floor(windowSourceSamples / ratio);
   if (outputLength < 8 || outputLength > MAX_ENCODED_SAMPLES) {
     return null;
   }
@@ -84,20 +89,25 @@ export function captureAudioSnippet({
       : 0;
   };
 
-  // Windowed-sinc low pass at 80% of the target Nyquist before decimation.
-  const taps = lowPassTaps(
-    LOW_PASS_TAPS,
-    (0.8 * (actualTargetRate / 2)) / sampleRate,
-  );
-  const half = Math.floor(taps.length / 2);
+  // Anti-alias at 80% of the narrower Nyquist; the kernel is evaluated at
+  // fractional offsets so non-integer ratios stay phase-accurate.
+  const normalizedCutoff =
+    (0.8 * (Math.min(targetSampleRate, sampleRate) / 2)) / sampleRate;
+  const half = Math.floor(LOW_PASS_TAPS / 2);
   const output = new Float32Array(outputLength);
   let peak = 0;
   for (let outIndex = 0; outIndex < outputLength; outIndex += 1) {
-    const sourceIndex = windowStartIndex + outIndex * decimation;
+    const sourcePosition = windowStartIndex + outIndex * ratio;
+    const baseIndex = Math.floor(sourcePosition);
+    const fraction = sourcePosition - baseIndex;
     let value = 0;
-    for (let tap = 0; tap < taps.length; tap += 1) {
-      value += taps[tap] * sampleAt(sourceIndex + tap - half);
+    let kernelSum = 0;
+    for (let tap = -half; tap <= half; tap += 1) {
+      const kernel = resampleKernel(tap - fraction, normalizedCutoff, half);
+      value += kernel * sampleAt(baseIndex + tap);
+      kernelSum += kernel;
     }
+    value = kernelSum > 0 ? value / kernelSum : 0;
     output[outIndex] = value;
     peak = Math.max(peak, Math.abs(value));
   }
@@ -113,7 +123,7 @@ export function captureAudioSnippet({
   }
 
   return {
-    sampleRate: round(actualTargetRate, 3),
+    sampleRate: targetSampleRate,
     sourceSampleRate: sampleRate,
     startSampleIndex: windowStartIndex,
     centerSampleIndex: Math.round(centerSampleIndex),
@@ -150,7 +160,19 @@ export function decodeAudioSnippet(
 export function estimateRawAudioOffset(
   reference: AudioSnippet | null | undefined,
   candidate: AudioSnippet | null | undefined,
-  { maxLagMs = 40 }: { maxLagMs?: number } = {},
+  {
+    maxLagMs = 40,
+    minFrequencyHz,
+    maxFrequencyHz,
+  }: {
+    maxLagMs?: number;
+    // Optional band mask applied to the whitened cross-spectrum. PHAT gives
+    // every bin equal weight, so bins where the devices share no coherence
+    // (field captures lose inter-device coherence above ~1.5 kHz under iOS
+    // voice processing) only add noise to the peak.
+    minFrequencyHz?: number;
+    maxFrequencyHz?: number;
+  } = {},
 ): RawAudioOffsetEstimate | null {
   if (!reference || !candidate) {
     return null;
@@ -193,6 +215,14 @@ export function estimateRawAudioOffset(
   const crossRe = new Float64Array(fftSize);
   const crossIm = new Float64Array(fftSize);
   for (let bin = 0; bin < fftSize; bin += 1) {
+    const binFrequencyHz =
+      (Math.min(bin, fftSize - bin) * sampleRate) / fftSize;
+    if (
+      (minFrequencyHz !== undefined && binFrequencyHz < minFrequencyHz) ||
+      (maxFrequencyHz !== undefined && binFrequencyHz > maxFrequencyHz)
+    ) {
+      continue;
+    }
     const re = referenceRe[bin] * candidateRe[bin] + referenceIm[bin] * candidateIm[bin];
     const im = referenceRe[bin] * candidateIm[bin] - referenceIm[bin] * candidateRe[bin];
     const magnitude = Math.hypot(re, im);
@@ -343,25 +373,22 @@ function parabolicLag(
   return bestLag + Math.max(-0.5, Math.min(0.5, offset));
 }
 
-function lowPassTaps(tapCount: number, normalizedCutoff: number) {
-  const taps = new Float64Array(tapCount);
-  const half = (tapCount - 1) / 2;
-  let sum = 0;
-  for (let index = 0; index < tapCount; index += 1) {
-    const n = index - half;
-    const sinc =
-      n === 0
-        ? 2 * normalizedCutoff
-        : Math.sin(2 * Math.PI * normalizedCutoff * n) / (Math.PI * n);
-    const hamming =
-      0.54 - 0.46 * Math.cos((2 * Math.PI * index) / (tapCount - 1));
-    taps[index] = sinc * hamming;
-    sum += taps[index];
+// Continuous windowed-sinc kernel for fractional-offset resampling.
+function resampleKernel(
+  offset: number,
+  normalizedCutoff: number,
+  halfWidth: number,
+) {
+  const span = halfWidth + 1;
+  if (Math.abs(offset) >= span) {
+    return 0;
   }
-  for (let index = 0; index < tapCount; index += 1) {
-    taps[index] /= sum;
-  }
-  return taps;
+  const sinc =
+    offset === 0
+      ? 2 * normalizedCutoff
+      : Math.sin(2 * Math.PI * normalizedCutoff * offset) / (Math.PI * offset);
+  const hamming = 0.54 + 0.46 * Math.cos((Math.PI * offset) / span);
+  return sinc * hamming;
 }
 
 // Iterative radix-2 Cooley-Tukey transform, in place.

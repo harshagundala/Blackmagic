@@ -46,6 +46,12 @@ const MIN_PEAK_RATIO = 1.1;
 // windows still overlap enough at this lag to correlate.
 const MAX_LAG_MS = 48;
 const MAX_CLOSURE_RESIDUAL_MS = 1.5;
+// Field captures lose inter-device coherence above ~1.5-2 kHz (iOS voice
+// processing) while low bass is dominated by room rumble; PHAT weights all
+// bins equally, so restrict it to the band that actually carries shared
+// speech phase.
+const GCC_MIN_FREQUENCY_HZ = 250;
+const GCC_MAX_FREQUENCY_HZ = 2_000;
 
 export function derivePairTdoaObservations(
   event: ReconciledAudioEvent,
@@ -71,6 +77,8 @@ export function derivePairTdoaObservations(
       const to = eligible[j];
       const offset = estimateRawAudioOffset(from.audioSnippet, to.audioSnippet, {
         maxLagMs,
+        minFrequencyHz: GCC_MIN_FREQUENCY_HZ,
+        maxFrequencyHz: GCC_MAX_FREQUENCY_HZ,
       });
       if (
         !offset ||
