@@ -26,7 +26,10 @@ import {
 import { MIN_RANGE_SAMPLES as RANGE_TARGET_SAMPLES } from "@/lib/reconciliation/pair-tdoa-history";
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import { hasPulseLead } from "@/lib/calibration/cadence";
-import { createScheduledAcousticPulse } from "@/lib/calibration/pulse";
+import {
+  createMatchedToneObservation,
+  createScheduledAcousticPulse,
+} from "@/lib/calibration/pulse";
 import {
   createPulseToneScheduler,
   type PulseToneScheduler,
@@ -524,16 +527,30 @@ export function WaveformApp() {
     [],
   );
 
-  // Own chirp detections from the streaming matcher: stage for broadcast
-  // (the hook dedupes per peer) and fold into local evidence.
+  // Own chirp detections: prefer the streaming matcher's hit; when it
+  // missed, re-search the rolling audio window around the pulse's expected
+  // arrival (clock-bounded) with the matched-filter fallback — v1 field
+  // experience says the matcher alone leaves detections on the floor.
   const ownPulseObservation = sensors.snapshot.pulseObservation;
   useEffect(() => {
-    if (phase !== "listening" || !ownPulseObservation) {
+    if (phase !== "listening") {
       return;
     }
-    lastObservationRef.current = ownPulseObservation;
-    recordChirpEvidence(deviceId, null, ownPulseObservation);
-  }, [deviceId, ownPulseObservation, phase, recordChirpEvidence]);
+    const pulse = observablePulseRef.current;
+    const observation =
+      ownPulseObservation && (!pulse || ownPulseObservation.pulseId === pulse.id)
+        ? ownPulseObservation
+        : maybeCreateMatchedObservation(
+            pulse,
+            snapshotRef.current,
+            lastObservationRef.current?.pulseId ?? "",
+          );
+    if (!observation) {
+      return;
+    }
+    lastObservationRef.current = observation;
+    recordChirpEvidence(deviceId, null, observation);
+  }, [deviceId, ownPulseObservation, phase, recordChirpEvidence, sensors.snapshot]);
 
   // Host: recompute the room geometry about once a second and stage the
   // result for broadcast; peers receive it via onReconciliationState.
@@ -1263,6 +1280,55 @@ function drawReconciliationMap(
       spot.y - 9,
     );
   }
+}
+
+// Matched-filter fallback for chirps the streaming matcher missed: search
+// the rolling audio window around the pulse's expected arrival, bounded by
+// the clock uncertainty.
+function maybeCreateMatchedObservation(
+  pulse: AcousticPulse | null,
+  snapshot: SensorSnapshot,
+  observedPulseId: string,
+) {
+  if (
+    !pulse ||
+    pulse.id === observedPulseId ||
+    !snapshot.audioFrame ||
+    !snapshot.audioWindow
+  ) {
+    return null;
+  }
+
+  const sampleRate = snapshot.audioWindow.sampleRate;
+  const clockUncertaintyMs =
+    snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs;
+  const earlyMs = Math.max(80, clockUncertaintyMs * 2);
+  const lateMs = Math.max(180, clockUncertaintyMs * 3);
+  const expectedStartSampleIndex =
+    snapshot.audioFrame.sampleIndex +
+    ((pulse.emittedAtHostEpochMs - snapshot.audioFrame.hostEstimatedEpochMs) /
+      1_000) *
+      snapshot.audioFrame.sampleRate;
+
+  return createMatchedToneObservation({
+    pulse,
+    audioWindow: snapshot.audioWindow,
+    searchStartSample: Math.max(
+      0,
+      Math.floor(
+        expectedStartSampleIndex -
+          snapshot.audioWindow.startSampleIndex -
+          (earlyMs / 1_000) * sampleRate,
+      ),
+    ),
+    searchEndSample: Math.ceil(
+      expectedStartSampleIndex -
+        snapshot.audioWindow.startSampleIndex +
+        (lateMs / 1_000) * sampleRate,
+    ),
+    minScore: 0.45,
+    minPeakRatio: 2,
+  });
 }
 
 // Play a scheduled chirp through the capture context: it was created inside
