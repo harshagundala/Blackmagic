@@ -222,6 +222,11 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const rollingAudioRef = useRef<RollingSampleBuffer | null>(null);
   const captureRecorderRef = useRef(new CaptureRecorder());
   const lastSnapshotPublishPerfRef = useRef(0);
+  // Optional veto on voice events (e.g. chirp suppression windows). Checked
+  // before the expensive fingerprint/snippet enrichment.
+  const voiceEventGateRef = useRef<((hostEpochMs: number) => boolean) | null>(
+    null,
+  );
   const streamingMatcherRef = useRef<StreamingPulseMatcher | null>(null);
   const animationRef = useRef<number | null>(null);
   const clockTimerRef = useRef<number | null>(null);
@@ -538,7 +543,14 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     requestCaptureMode,
     startRecording,
     stopRecording,
+    setVoiceEventGate,
   };
+
+  function setVoiceEventGate(
+    gate: ((hostEpochMs: number) => boolean) | null,
+  ) {
+    voiceEventGateRef.current = gate;
+  }
 
   function startRecording(recordingId: string) {
     captureRecorderRef.current.begin({
@@ -696,10 +708,18 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         motionStability: motionMetadataRef.current.motionStability,
       });
       voiceGateRef.current = voiceActivity.gate;
+      const admittedVoiceEvent =
+        voiceActivity.event &&
+        (voiceEventGateRef.current?.(
+          voiceActivity.event.detectedAtHostEpochMs,
+        ) ??
+          true)
+          ? voiceActivity.event
+          : null;
 
       const nowPerfMs = performance.now();
       if (
-        !voiceActivity.event &&
+        !admittedVoiceEvent &&
         nowPerfMs - lastSnapshotPublishPerfRef.current <
           SNAPSHOT_PUBLISH_INTERVAL_MS
       ) {
@@ -714,8 +734,8 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
         rollingAudioRef.current,
         clockModelRef.current,
       );
-      const voiceEvent = voiceActivity.event
-        ? attachSpeechFingerprint(voiceActivity.event, timing.audioWindow)
+      const voiceEvent = admittedVoiceEvent
+        ? attachSpeechFingerprint(admittedVoiceEvent, timing.audioWindow)
         : null;
       setSnapshot((current) => ({
         ...current,

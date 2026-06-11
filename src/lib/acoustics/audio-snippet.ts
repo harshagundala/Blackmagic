@@ -92,25 +92,31 @@ export function captureAudioSnippet({
       : 0;
   };
 
-  // Anti-alias at 80% of the narrower Nyquist; the kernel is evaluated at
-  // fractional offsets so non-integer ratios stay phase-accurate.
+  // Anti-alias at 80% of the narrower Nyquist. Kernels for fractional
+  // offsets come from a phase-quantized table (1/64-sample steps ≈ 0.3 µs at
+  // 48 kHz — far below the cm-scale precision target) so the hot loop runs
+  // multiply-adds only; evaluating windowed-sinc trig per tap cost ~260k
+  // Math.sin calls per snippet and showed up as main-thread jank on phones.
   const normalizedCutoff =
     (0.8 * (Math.min(targetSampleRate, sampleRate) / 2)) / sampleRate;
   const half = Math.floor(LOW_PASS_TAPS / 2);
+  const phases = resampleKernelPhases(normalizedCutoff, half);
+  const tapCount = 2 * half + 1;
   const output = new Float32Array(outputLength);
   let peak = 0;
   for (let outIndex = 0; outIndex < outputLength; outIndex += 1) {
     const sourcePosition = windowStartIndex + outIndex * ratio;
-    const baseIndex = Math.floor(sourcePosition);
-    const fraction = sourcePosition - baseIndex;
-    let value = 0;
-    let kernelSum = 0;
-    for (let tap = -half; tap <= half; tap += 1) {
-      const kernel = resampleKernel(tap - fraction, normalizedCutoff, half);
-      value += kernel * sampleAt(baseIndex + tap);
-      kernelSum += kernel;
+    let baseIndex = Math.floor(sourcePosition);
+    let phaseIndex = Math.round((sourcePosition - baseIndex) * KERNEL_PHASES);
+    if (phaseIndex === KERNEL_PHASES) {
+      phaseIndex = 0;
+      baseIndex += 1;
     }
-    value = kernelSum > 0 ? value / kernelSum : 0;
+    const taps = phases[phaseIndex];
+    let value = 0;
+    for (let tap = 0; tap < tapCount; tap += 1) {
+      value += taps[tap] * sampleAt(baseIndex + tap - half);
+    }
     output[outIndex] = value;
     peak = Math.max(peak, Math.abs(value));
   }
@@ -398,6 +404,45 @@ function resampleKernel(
       : Math.sin(2 * Math.PI * normalizedCutoff * offset) / (Math.PI * offset);
   const hamming = 0.54 + 0.46 * Math.cos((Math.PI * offset) / span);
   return sinc * hamming;
+}
+
+const KERNEL_PHASES = 64;
+const kernelPhaseCache = new Map<string, Float64Array[]>();
+
+// Normalized (unity-DC) kernel tables for each quantized fractional phase,
+// cached per cutoff so repeated snippets at the same rates cost nothing.
+function resampleKernelPhases(normalizedCutoff: number, halfWidth: number) {
+  const key = `${normalizedCutoff.toFixed(8)}|${halfWidth}`;
+  const cached = kernelPhaseCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const tapCount = 2 * halfWidth + 1;
+  const phases: Float64Array[] = [];
+  for (let phase = 0; phase < KERNEL_PHASES; phase += 1) {
+    const fraction = phase / KERNEL_PHASES;
+    const taps = new Float64Array(tapCount);
+    let sum = 0;
+    for (let tap = -halfWidth; tap <= halfWidth; tap += 1) {
+      const value = resampleKernel(tap - fraction, normalizedCutoff, halfWidth);
+      taps[tap + halfWidth] = value;
+      sum += value;
+    }
+    if (sum > 0) {
+      for (let index = 0; index < tapCount; index += 1) {
+        taps[index] /= sum;
+      }
+    }
+    phases.push(taps);
+  }
+  kernelPhaseCache.set(key, phases);
+  if (kernelPhaseCache.size > 16) {
+    const oldest = kernelPhaseCache.keys().next().value;
+    if (oldest !== undefined) {
+      kernelPhaseCache.delete(oldest);
+    }
+  }
+  return phases;
 }
 
 // Iterative radix-2 Cooley-Tukey transform, in place.

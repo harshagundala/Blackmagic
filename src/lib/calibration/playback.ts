@@ -35,7 +35,7 @@ export type PulseToneAudioContext = {
 export type PulseToneScheduler = {
   schedule(
     pulse: AcousticPulse,
-    timing: { hostEpochNowMs: number },
+    timing: { hostEpochNowMs: number; peakGain?: number },
   ): Promise<void>;
   close(): Promise<void>;
 };
@@ -78,7 +78,7 @@ export function createPulseToneScheduler({
   }
 
   return {
-    async schedule(pulse, { hostEpochNowMs }) {
+    async schedule(pulse, { hostEpochNowMs, peakGain: pulseGain }) {
       const activeContext = await audioContext();
       const startTime = pulseStartTimeSeconds({
         pulse,
@@ -86,7 +86,7 @@ export function createPulseToneScheduler({
         audioContextCurrentTimeSeconds: activeContext.currentTime,
         minimumLeadSeconds,
       });
-      scheduleTone(activeContext, pulse, startTime, peakGain);
+      scheduleTone(activeContext, pulse, startTime, pulseGain ?? peakGain);
     },
 
     async close() {

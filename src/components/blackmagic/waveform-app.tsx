@@ -61,22 +61,43 @@ const CHIRP_TURN_OPTIONS = {
   pulseDurationMs: 80,
 };
 // Every device chirps in its own frequency lane so simultaneous or adjacent
-// chirps never confuse the matched filters. All lanes sit below 12 kHz: loud
-// through phone speakers, inside the Nyquist of 24 kHz voice-processed
-// capture, and above the speech band the passive GCC uses.
-const CHIRP_BANDS = [
+// chirps never confuse the matched filters. Preferred lanes are
+// near-ultrasonic (≥15.5 kHz — silent to most ears) and only usable when
+// every phone in the room captures fast enough to see them; a 24 kHz
+// voice-processed capture (Nyquist 12 kHz) forces the room down to sub-12 kHz
+// lanes, played quietly since they are audible.
+const ULTRASONIC_CHIRP_BANDS = [
+  { frequencyHz: 15_500, endFrequencyHz: 16_250 },
+  { frequencyHz: 16_250, endFrequencyHz: 17_000 },
+  { frequencyHz: 17_000, endFrequencyHz: 17_750 },
+  { frequencyHz: 17_750, endFrequencyHz: 18_400 },
+] as const;
+const AUDIBLE_CHIRP_BANDS = [
   { frequencyHz: 8_500, endFrequencyHz: 9_500 },
   { frequencyHz: 9_500, endFrequencyHz: 10_500 },
   { frequencyHz: 10_500, endFrequencyHz: 11_500 },
   { frequencyHz: 11_500, endFrequencyHz: 11_950 },
 ] as const;
+// Speakers and mics roll off hard near-ultrasonic, so those lanes get driven
+// hard; audible lanes ride the matched filter's ~19 dB processing gain and
+// stay at a whisper.
+const ULTRASONIC_CHIRP_GAIN = 0.9;
+const AUDIBLE_CHIRP_GAIN = 0.22;
+const LOW_CAPTURE_RATE_HZ = 40_000;
 
-function chirpBandFor(deviceId: string) {
+function chirpBandFor(deviceId: string, audible: boolean) {
   let hash = 0;
   for (let index = 0; index < deviceId.length; index += 1) {
     hash = (hash * 31 + deviceId.charCodeAt(index)) | 0;
   }
-  return CHIRP_BANDS[Math.abs(hash) % CHIRP_BANDS.length];
+  const bands = audible ? AUDIBLE_CHIRP_BANDS : ULTRASONIC_CHIRP_BANDS;
+  return bands[Math.abs(hash) % bands.length];
+}
+
+function chirpGainFor(pulse: AcousticPulse) {
+  return pulse.frequencyHz >= 14_000
+    ? ULTRASONIC_CHIRP_GAIN
+    : AUDIBLE_CHIRP_GAIN;
 }
 // How many times the matched-filter fallback may re-search the rolling
 // window for one pulse; it is main-thread DSP, so unbounded retries at
@@ -160,6 +181,12 @@ export function WaveformApp() {
   useEffect(() => {
     roomDevicesRef.current = roomState?.devices ?? [];
   }, [roomState?.devices]);
+
+  const setVoiceEventGate = sensors.setVoiceEventGate;
+  useEffect(() => {
+    setVoiceEventGate((hostEpochMs) => !isChirpWindow(hostEpochMs));
+    return () => setVoiceEventGate(null);
+  }, [isChirpWindow, setVoiceEventGate]);
 
   const recordChirpEvidence = useCallback(
     (
@@ -546,13 +573,22 @@ export function WaveformApp() {
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
+      // Drop to the audible band only when some phone in the room cannot
+      // capture near-ultrasonic (voice-processed 24 kHz capture).
+      const audibleBand =
+        (snapshotRef.current.sampleRate ?? 48_000) < LOW_CAPTURE_RATE_HZ ||
+        roomDevicesRef.current.some(
+          (device) =>
+            typeof device.sampleRate === "number" &&
+            device.sampleRate < LOW_CAPTURE_RATE_HZ,
+        );
       const pulse = createScheduledAcousticPulse({
         deviceId,
         sequence: turn.sequence,
         hostEpochNowMs: nowMs,
         leadMs: turn.pulseEmittedAtHostEpochMs - nowMs,
         durationMs: turn.pulseDurationMs,
-        ...chirpBandFor(deviceId),
+        ...chirpBandFor(deviceId, audibleBand),
       });
       if (
         !hasPulseLead(pulse, nowMs, MIN_CHIRP_LEAD_MS) ||
@@ -1471,12 +1507,9 @@ function scheduleOutputPulse(
       return captureContext;
     },
     ownsContext: false,
-    // Full scale: the lanes sit at 8.5-12 kHz where phone speakers roll off,
-    // and a chirp the peer cannot hear wastes its whole rotation slot.
-    peakGain: 1,
   });
   void schedulerRef.current
-    .schedule(pulse, { hostEpochNowMs: now })
+    .schedule(pulse, { hostEpochNowMs: now, peakGain: chirpGainFor(pulse) })
     .catch(() => undefined);
 }
 
