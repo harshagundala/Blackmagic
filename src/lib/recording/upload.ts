@@ -5,11 +5,15 @@
 
 import { upload } from "@vercel/blob/client";
 import { encodeWavPcm16 } from "./wav";
+import { recordingBasePath } from "./paths";
 import type { RecordedTake } from "./capture-recorder";
 
 export type RecordingUploadContext = {
   deviceId: string;
   sessionKey: string;
+  // The room URL this device joined with; the token route verifies the
+  // device is a member of that room before minting an upload token.
+  sessionUrl: string;
   role: "host" | "phone";
   sampleRateReported: number | null;
   captureMode: string | null;
@@ -30,9 +34,15 @@ export async function uploadRecordedTake(
   take: RecordedTake,
   context: RecordingUploadContext,
 ): Promise<RecordingUploadResult> {
-  const base = `blackmagic/recordings/${sanitizeSegment(
+  const base = recordingBasePath(
     context.sessionKey,
-  )}/${sanitizeSegment(take.recordingId)}/${sanitizeSegment(context.deviceId)}`;
+    take.recordingId,
+    context.deviceId,
+  );
+  const clientPayload = JSON.stringify({
+    url: context.sessionUrl,
+    deviceId: context.deviceId,
+  });
 
   const wavBlob = new Blob([encodeWavPcm16(take.samples, take.sampleRate)], {
     type: "audio/wav",
@@ -41,6 +51,7 @@ export async function uploadRecordedTake(
     access: "public",
     handleUploadUrl: "/api/recordings/upload",
     contentType: "audio/wav",
+    clientPayload,
   });
 
   const metadata = {
@@ -72,13 +83,9 @@ export async function uploadRecordedTake(
       access: "public",
       handleUploadUrl: "/api/recordings/upload",
       contentType: "application/json",
+      clientPayload,
     },
   );
 
   return { wavUrl: wavResult.url, metaUrl: metaResult.url };
-}
-
-function sanitizeSegment(value: string) {
-  const cleaned = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned.length > 0 ? cleaned.slice(0, 80) : "unknown";
 }

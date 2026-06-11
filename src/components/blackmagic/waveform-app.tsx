@@ -133,6 +133,7 @@ export function WaveformApp() {
         const result = await uploadRecordedTake(take, {
           deviceId,
           sessionKey: sessionKeyRef.current,
+          sessionUrl: window.location.href,
           role: isHostRef.current ? "host" : "phone",
           sampleRateReported: snapshot.sampleRate,
           captureMode: snapshot.captureMode,
@@ -164,7 +165,7 @@ export function WaveformApp() {
     }
     const current = activeRecordingRef.current;
     if (!current) {
-      const id = `take-${Date.now().toString(36)}`;
+      const id = `take-${crypto.randomUUID().slice(0, 8)}`;
       recordControlRef.current = {
         type: "record-control",
         version: 1,
