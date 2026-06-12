@@ -27,6 +27,11 @@ import { MIN_RANGE_SAMPLES as RANGE_TARGET_SAMPLES } from "@/lib/reconciliation/
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import { hasPulseLead } from "@/lib/calibration/cadence";
 import {
+  chirpBandFor,
+  roomNeedsAudibleChirpLanes,
+} from "@/lib/calibration/chirp-lanes";
+import { shouldAutoPromoteRawCapture } from "@/lib/acoustics/capture-health";
+import {
   createMatchedToneObservation,
   createScheduledAcousticPulse,
 } from "@/lib/calibration/pulse";
@@ -61,39 +66,11 @@ const CHIRP_TURN_OPTIONS = {
   minLeadMs: 700,
   pulseDurationMs: 80,
 };
-// Every device chirps in its own frequency lane so simultaneous or adjacent
-// chirps never confuse the matched filters. Preferred lanes are
-// near-ultrasonic (≥15.5 kHz — silent to most ears) and only usable when
-// every phone in the room captures fast enough to see them; a 24 kHz
-// voice-processed capture (Nyquist 12 kHz) forces the room down to sub-12 kHz
-// lanes, played quietly since they are audible.
-const ULTRASONIC_CHIRP_BANDS = [
-  { frequencyHz: 15_500, endFrequencyHz: 16_250 },
-  { frequencyHz: 16_250, endFrequencyHz: 17_000 },
-  { frequencyHz: 17_000, endFrequencyHz: 17_750 },
-  { frequencyHz: 17_750, endFrequencyHz: 18_400 },
-] as const;
-const AUDIBLE_CHIRP_BANDS = [
-  { frequencyHz: 8_500, endFrequencyHz: 9_500 },
-  { frequencyHz: 9_500, endFrequencyHz: 10_500 },
-  { frequencyHz: 10_500, endFrequencyHz: 11_500 },
-  { frequencyHz: 11_500, endFrequencyHz: 11_950 },
-] as const;
 // Speakers and mics roll off hard near-ultrasonic, so those lanes get driven
 // hard; audible lanes ride the matched filter's ~19 dB processing gain and
 // stay at a whisper.
 const ULTRASONIC_CHIRP_GAIN = 0.9;
 const AUDIBLE_CHIRP_GAIN = 0.22;
-const LOW_CAPTURE_RATE_HZ = 40_000;
-
-function chirpBandFor(deviceId: string, audible: boolean) {
-  let hash = 0;
-  for (let index = 0; index < deviceId.length; index += 1) {
-    hash = (hash * 31 + deviceId.charCodeAt(index)) | 0;
-  }
-  const bands = audible ? AUDIBLE_CHIRP_BANDS : ULTRASONIC_CHIRP_BANDS;
-  return bands[Math.abs(hash) % bands.length];
-}
 
 function chirpGainFor(pulse: AcousticPulse) {
   return pulse.frequencyHz >= 14_000
@@ -578,6 +555,44 @@ export function WaveformApp() {
     }
   }, [deviceId, hostEngine, isChirpWindow, isHost, ownVoiceEvent]);
 
+  // Chirp ranging needs voice processing off: AEC deletes this phone's own
+  // chirp from its capture (no self-anchor, so no reciprocal range) and NS
+  // attenuates the near-ultrasonic lanes. Once a multi-device room is live
+  // on the default processed capture, try the raw pipeline once per session
+  // — without persisting it: the silence watchdog demotes back to processed
+  // within seconds when raw capture is dead on this device, and a raw
+  // capture that proves healthy persists itself as the known-good mode.
+  const autoRawAttemptedRef = useRef(false);
+  const captureSnapshot = sensors.snapshot;
+  const requestCaptureMode = sensors.requestCaptureMode;
+  const roomDeviceCount = roomState?.devices?.length ?? 0;
+  useEffect(() => {
+    if (
+      phase !== "listening" ||
+      autoRawAttemptedRef.current ||
+      !shouldAutoPromoteRawCapture({
+        mic: captureSnapshot.mic,
+        audioContextState: captureSnapshot.audioContextState,
+        captureMode: captureSnapshot.captureMode,
+        rawCaptureVerified:
+          captureSnapshot.captureProcessing?.rawCaptureVerified ?? false,
+        roomDeviceCount,
+      })
+    ) {
+      return;
+    }
+    autoRawAttemptedRef.current = true;
+    requestCaptureMode("raw", { persist: false });
+  }, [
+    captureSnapshot.audioContextState,
+    captureSnapshot.captureMode,
+    captureSnapshot.captureProcessing,
+    captureSnapshot.mic,
+    phase,
+    requestCaptureMode,
+    roomDeviceCount,
+  ]);
+
   // Chirp emitter rotation: every capturing device computes the same
   // host-clock turn schedule; on its turn it announces the pulse over the
   // data channel, listens for itself, and plays it through the capture
@@ -604,15 +619,16 @@ export function WaveformApp() {
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
-      // Drop to the audible band only when some phone in the room cannot
-      // capture near-ultrasonic (voice-processed 24 kHz capture).
-      const audibleBand =
-        (snapshotRef.current.sampleRate ?? 48_000) < LOW_CAPTURE_RATE_HZ ||
-        roomDevicesRef.current.some(
-          (device) =>
-            typeof device.sampleRate === "number" &&
-            device.sampleRate < LOW_CAPTURE_RATE_HZ,
-        );
+      // Drop to the audible band when some phone in the room cannot capture
+      // near-ultrasonic — too low a sample rate, or voice processing still
+      // active (AEC/NS attenuates the band even at 48 kHz).
+      const audibleBand = roomNeedsAudibleChirpLanes({
+        self: {
+          sampleRate: snapshotRef.current.sampleRate,
+          captureProcessing: snapshotRef.current.captureProcessing,
+        },
+        devices: roomDevicesRef.current,
+      });
       const pulse = createScheduledAcousticPulse({
         deviceId,
         sequence: turn.sequence,
@@ -875,11 +891,14 @@ export function WaveformApp() {
                 {self ? (
                   <button
                     className="pointer-events-auto block w-full px-4 pb-2 text-left font-mono text-[9px] uppercase tracking-[0.12em] text-black/30"
-                    onClick={() =>
+                    onClick={() => {
+                      // A manual switch is an explicit choice: the automatic
+                      // raw promotion must not override it moments later.
+                      autoRawAttemptedRef.current = true;
                       sensors.requestCaptureMode(
                         nextCaptureMode(sensors.snapshot.captureMode),
-                      )
-                    }
+                      );
+                    }}
                     onPointerDown={(event) => event.stopPropagation()}
                     type="button"
                   >

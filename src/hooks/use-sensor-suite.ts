@@ -34,6 +34,10 @@ import {
 } from "@/lib/acoustics/voice-activity";
 import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
 import {
+  HEALTHY_CAPTURE_RMS,
+  captureRecoveryFuseMs,
+} from "@/lib/acoustics/capture-health";
+import {
   CaptureRecorder,
   type RecordedTake,
 } from "@/lib/recording/capture-recorder";
@@ -136,24 +140,12 @@ const idleSnapshot: SensorSnapshot = {
 const CLOCK_SYNC_INTERVAL_MS = 1_000;
 const CLOCK_SYNC_WARMUP_COUNT = 4;
 const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
-// A live microphone never reads near digital silence for seconds — even a
-// quiet room has a noise floor well above 1e-4 RMS. Sustained near-zeros
-// from a "running" context mean the capture pipeline is broken: iOS
-// sample-rate mismatch, a track muted by an interruption, or WebKit's
-// "capture failure" states where the track silently never recovers. The
-// recovery ladder follows what production WebRTC SDKs ship for iOS Safari:
-// rebuild the graph on a fresh context, then stop the tracks and call
-// getUserMedia again (no re-prompt), then fall back to processed (default
-// constraint) capture, which uses a different iOS capture path.
-const SILENT_CAPTURE_RMS = 1e-5;
-// Between exact silence and a healthy noise floor sits a dead zone where a
-// broken iOS capture path can leak faint processing noise. Recover from that
-// band too, just on a longer fuse so a genuinely tomb-quiet room does not
-// trigger churn.
-const QUIET_CAPTURE_RMS = 3e-5;
-const HEALTHY_CAPTURE_RMS = 1e-4;
-const SILENT_CAPTURE_REBUILD_MS = 3_000;
-const QUIET_CAPTURE_REBUILD_MS = 9_000;
+// The silence thresholds and fuse policy live in capture-health (with the
+// history of why there is no dead zone between "silent" and "healthy"). The
+// recovery ladder here follows what production WebRTC SDKs ship for iOS
+// Safari: rebuild the graph on a fresh context, then stop the tracks and
+// call getUserMedia again (no re-prompt), then fall back to processed
+// (default constraint) capture, which uses a different iOS capture path.
 const MAX_CAPTURE_RECOVERIES = 5;
 // Envelope series shared with peers: 25 ms buckets, 16 per chunk (400 ms),
 // sent every sensor frame (~220 ms) so one dropped frame costs nothing.
@@ -330,16 +322,24 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
 
   // Switches the live capture pipeline (raw / processed / video-assisted) by
   // re-acquiring the stream. Call from a user gesture: the "video" mode can
-  // show a camera permission prompt. reacquireCaptureStream is a hoisted
-  // helper that only touches refs, so its identity is irrelevant here.
-  const requestCaptureMode = useCallback((mode: CaptureConstraintMode) => {
-    captureRebuildCountRef.current = 0;
-    captureSilentSincePerfMsRef.current = null;
-    lastStoredCaptureModeRef.current = mode;
-    storeCaptureMode(mode);
-    void reacquireCaptureStream(mode);
+  // show a camera permission prompt. With persist:false the switch is an
+  // experiment — the mode is only remembered across reloads once the
+  // watchdog sees a healthy signal level on it. reacquireCaptureStream is a
+  // hoisted helper that only touches refs, so its identity is irrelevant
+  // here.
+  const requestCaptureMode = useCallback(
+    (mode: CaptureConstraintMode, options?: { persist?: boolean }) => {
+      captureRebuildCountRef.current = 0;
+      captureSilentSincePerfMsRef.current = null;
+      if (options?.persist !== false) {
+        lastStoredCaptureModeRef.current = mode;
+        storeCaptureMode(mode);
+      }
+      void reacquireCaptureStream(mode);
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    [],
+  );
 
   const stop = useCallback(() => {
     if (animationRef.current !== null) {
@@ -770,9 +770,10 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       }
       return;
     }
+    const requiredQuietMs = captureRecoveryFuseMs(micLevel);
     if (
       (audioContext.state as AudioContextRunState) !== "running" ||
-      micLevel > QUIET_CAPTURE_RMS
+      requiredQuietMs === null
     ) {
       captureSilentSincePerfMsRef.current = null;
       return;
@@ -780,10 +781,6 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
 
     const now = performance.now();
     captureSilentSincePerfMsRef.current ??= now;
-    const requiredQuietMs =
-      micLevel <= SILENT_CAPTURE_RMS
-        ? SILENT_CAPTURE_REBUILD_MS
-        : QUIET_CAPTURE_REBUILD_MS;
     if (now - captureSilentSincePerfMsRef.current < requiredQuietMs) {
       return;
     }
