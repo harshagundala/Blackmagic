@@ -39,10 +39,17 @@ type RoomSession = {
 
 export type RoomSessionOptions = {
   pollIntervalMs?: number;
+  // Joining is a mutation: the first claimer becomes the room's host and
+  // clock reference. A page that was merely opened must NOT claim — a
+  // lurking pre-tap tab that wins the host role has no capture running and
+  // strands every real phone's clock sync. Pass false until the user
+  // actually begins; reads (room state polling) stay available throughout.
+  join?: boolean;
 };
 
 export function useRoomSession({
   pollIntervalMs = IDLE_ROOM_POLL_INTERVAL_MS,
+  join = true,
 }: RoomSessionOptions = {}): RoomSession {
   const deviceId = useMemo(() => getOrCreateDeviceId(), []);
   const [role, setRole] = useState<SessionRole | null>(null);
@@ -56,6 +63,9 @@ export function useRoomSession({
 
   useEffect(() => {
     urlRef.current = window.location.href;
+    if (!join) {
+      return;
+    }
     let cancelled = false;
 
     async function claim() {
@@ -78,7 +88,7 @@ export function useRoomSession({
     return () => {
       cancelled = true;
     };
-  }, [deviceId]);
+  }, [deviceId, join]);
 
   const applyRoomState = useCallback((state: RoomState) => {
     const revision =
@@ -251,18 +261,29 @@ function isRoomState(value: unknown): value is RoomState {
   );
 }
 
+// Per-TAB identity (sessionStorage), not per-browser (localStorage): the
+// device id keys the realtime signal inbox and the room membership, so two
+// tabs sharing one id steal each other's WebRTC offers/answers and corrupt
+// the room. A reload keeps its tab's id (sessionStorage survives reload), so
+// identity stays stable where it matters; a genuinely new tab is honestly a
+// new device that joins on its own.
 function getOrCreateDeviceId() {
   if (typeof window === "undefined") {
     return "server";
   }
 
   const key = "blackmagic.device";
-  const existing = window.localStorage.getItem(key);
-  if (existing) {
-    return existing;
+  try {
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) {
+      return existing;
+    }
+    const next = crypto.randomUUID();
+    window.sessionStorage.setItem(key, next);
+    return next;
+  } catch {
+    // Storage unavailable (private mode quirks): a volatile id still works
+    // for the life of the page.
+    return crypto.randomUUID();
   }
-
-  const next = crypto.randomUUID();
-  window.localStorage.setItem(key, next);
-  return next;
 }

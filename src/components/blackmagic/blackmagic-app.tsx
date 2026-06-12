@@ -71,6 +71,8 @@ export function BlackmagicApp() {
     pollIntervalMs: roomStatePollingIntervalMs({
       listening: phase === "listening",
     }),
+    // Join (and possibly win the host role) only after the user taps in.
+    join: phase === "listening",
   });
   const sensors = useSensorSuite();
   const trackSensorPulse = sensors.trackPulse;

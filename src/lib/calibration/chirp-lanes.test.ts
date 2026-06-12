@@ -10,7 +10,7 @@ describe("chirpBandFor", () => {
 
   it("only ever assigns inaudible lanes — there is no audible fallback", () => {
     for (const id of ["a", "b", "c", "d", "e", "device-1", "device-2"]) {
-      expect(chirpBandFor(id).frequencyHz).toBeGreaterThanOrEqual(15_500);
+      expect(chirpBandFor(id).frequencyHz).toBeGreaterThanOrEqual(16_300);
     }
   });
 });

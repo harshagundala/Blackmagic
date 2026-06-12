@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "backtest": "tsx scripts/blackmagic-backtest.ts",
     "trace:validation": "node scripts/blackmagic-validation-trace.mjs",
     "trial:live": "tsx scripts/blackmagic-live-trial.ts",
     "trial:report": "tsx scripts/blackmagic-trial-report.ts",

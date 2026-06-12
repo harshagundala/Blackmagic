@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRoomSession } from "@/hooks/use-room-session";
+import { useStaleBuildReload } from "@/hooks/use-stale-build-reload";
 import {
   useSensorSuite,
   type CaptureConstraintMode,
@@ -90,6 +91,10 @@ export function WaveformApp() {
     pollIntervalMs: roomStatePollingIntervalMs({
       listening: phase === "listening",
     }),
+    // Joining (and possibly winning the host role) must wait for the tap:
+    // a merely-opened tab that claims the room strands real phones on a
+    // host with no capture or clock.
+    join: phase === "listening",
   });
   const sensors = useSensorSuite();
   const offerClockExchange = sensors.offerClockExchange;
@@ -239,6 +244,10 @@ export function WaveformApp() {
     startedAtPerfMs: number;
   } | null>(null);
   const activeRecordingRef = useRef(activeRecording);
+
+  // A tab left open across a deploy silently breaks the room (mismatched
+  // chirp parameters between versions); reload it as soon as it is safe.
+  useStaleBuildReload({ holdReload: activeRecording !== null });
   const [recordingStatuses, setRecordingStatuses] = useState<
     Record<string, RealtimeRecordingStatusMessage>
   >({});

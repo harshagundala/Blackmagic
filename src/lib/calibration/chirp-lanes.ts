@@ -7,11 +7,15 @@
 // pipeline (the room auto-promotes to it) and a device that cannot capture
 // the band simply contributes no chirp anchors while passive ranging keeps
 // covering it.
+// All lanes sit above 16.3 kHz: 15.5-16 kHz is still faintly audible to
+// young ears, and ground-truth takes show even the top lane (17.75-18.4)
+// detecting at 0.46-0.50 score on real phones, so the rolloff cost of
+// starting higher is affordable.
 export const ULTRASONIC_CHIRP_BANDS = [
-  { frequencyHz: 15_500, endFrequencyHz: 16_250 },
-  { frequencyHz: 16_250, endFrequencyHz: 17_000 },
-  { frequencyHz: 17_000, endFrequencyHz: 17_750 },
-  { frequencyHz: 17_750, endFrequencyHz: 18_400 },
+  { frequencyHz: 16_300, endFrequencyHz: 16_900 },
+  { frequencyHz: 16_900, endFrequencyHz: 17_500 },
+  { frequencyHz: 17_500, endFrequencyHz: 18_100 },
+  { frequencyHz: 18_100, endFrequencyHz: 18_700 },
 ] as const;
 
 // Phone speakers and mics roll off hard near-ultrasonic; the matched filter
