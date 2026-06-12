@@ -293,20 +293,17 @@ function reciprocalTimingUncertaintyMs(
   return quantizationMs + rateDriftMs + detectionMs;
 }
 
+// No absolute-amplitude term: a room-scale chirp on a phone transducer
+// arrives around 1e-3 full-scale, so loudness-anchored scores zero out real
+// ranges. The anchors' confidences already encode how unambiguous each
+// matched-filter detection was; timing closes the loop.
 function reciprocalRangeConfidence(
   anchors: SampleAnchor[],
   timingUncertaintyMs: number,
 ) {
   const confidenceMean = average(anchors.map((anchor) => anchor.confidence));
-  const amplitudeScore = Math.min(
-    1,
-    Math.max(0, average(anchors.map((anchor) => anchor.amplitude))) / 0.28,
-  );
   const timingScore = 1 / (1 + Math.max(0, timingUncertaintyMs) / 2);
-  return round(
-    Math.max(0, Math.min(1, confidenceMean * amplitudeScore * timingScore)),
-    3,
-  );
+  return round(Math.max(0, Math.min(1, confidenceMean * timingScore)), 3);
 }
 
 function acousticPulseHistory(device: RoomDevice) {

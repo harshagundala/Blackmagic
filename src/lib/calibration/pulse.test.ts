@@ -44,7 +44,10 @@ describe("active acoustic pulse metadata", () => {
       pulseId: "host-a:1:20000",
       detectedAtHostEpochMs: 20_006,
       amplitude: 0.08,
-      confidence: 0.6,
+      // Confidence rates the clock behind the timestamp only — amplitude is
+      // deliberately excluded (room-scale chirps arrive near 1e-3 full-scale,
+      // so loudness-anchored confidence zeroed out real observations).
+      confidence: 0.9,
       clockUncertaintyMs: 2,
     });
     expect(

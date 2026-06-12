@@ -746,8 +746,9 @@ function maybeCreateObservation(
     pulse,
     audioWindow: snapshot.audioWindow,
     ...pulseSearchBounds(pulse, snapshot),
-    minScore: 0.45,
-    minPeakRatio: 2,
+    // Field-calibrated alongside the v2 pipeline: see waveform-app.
+    minScore: 0.05,
+    minPeakRatio: 4,
   });
 }
 

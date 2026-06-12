@@ -68,6 +68,8 @@ type PeerRuntime = {
   peerId: string;
   connection: RTCPeerConnection;
   channel: RTCDataChannel | null;
+  createdAtPerfMs: number;
+  channelOpenedAtPerfMs: number | null;
   pendingCandidates: RTCIceCandidateInit[];
   lastClockProbeAt: number;
   clockProbeSequence: number;
@@ -82,6 +84,15 @@ type PeerRuntime = {
 const SIGNAL_POLL_MS = 420;
 const SENSOR_FRAME_MS = 220;
 const CLOCK_PROBE_MS = 300;
+// Device ids persist across reloads and signal inboxes outlive a page, so a
+// reloaded page polling from seq 0 replays its whole history — including
+// offers/answers from page instances that no longer exist. Applying a stale
+// answer to a fresh offer deadlocks ICE permanently (the valid answer is
+// then ignored). Age-gate what we apply, and tear down any connection whose
+// channel has not opened in time so a poisoned handshake heals with a fresh
+// offer instead of sitting in "linking" forever.
+const MAX_SIGNAL_AGE_MS = 60_000;
+const CHANNEL_OPEN_TIMEOUT_MS = 10_000;
 // A burst right after the channel opens fills the clock model fast and gives
 // the robust estimator a pool of round trips to pick the quietest from; the
 // displayed sync error tracks the BEST round trip, so more samples directly
@@ -244,6 +255,34 @@ export function useWebRtcRoom({
     const poll = async () => {
       if (cancelled) {
         return;
+      }
+      // Open-timeout watchdog: a handshake poisoned by stale signals (or a
+      // lost answer on the polling transport) never reaches "failed" — it
+      // just never opens. Tear it down; the next effect pass re-creates it
+      // with a fresh offer.
+      for (const runtime of [...peersRef.current.values()]) {
+        if (
+          runtime.channelOpenedAtPerfMs === null &&
+          runtime.channel?.readyState !== "open" &&
+          nowPerfMs() - runtime.createdAtPerfMs > CHANNEL_OPEN_TIMEOUT_MS
+        ) {
+          closePeer(peersRef.current, runtime.peerId);
+          syncOpenPeerCount();
+        }
+      }
+      for (const peerId of peerTargets) {
+        if (!peersRef.current.has(peerId) && isHost) {
+          void createPeerRuntime({
+            deviceId,
+            peerId,
+            initiator: true,
+            peers: peersRef.current,
+            publishSignal,
+            handleMessage,
+            syncOpenPeerCount,
+            onChannelOpen: burstClockProbes,
+          });
+        }
       }
       await pollSignals({
         deviceId,
@@ -468,26 +507,36 @@ export function useWebRtcRoom({
         if (!isHostRef.current) {
           maybeSendClockProbe(runtime, deviceId, sentAtClientPerfMs);
         }
+        // Latch the dedupe keys only on a confirmed send: a schedule or
+        // observation offered while the channel is still connecting must be
+        // retried on the next tick, not silently dropped — a lost
+        // observation costs the whole reciprocal exchange it anchored.
         if (pulse && runtime.lastPulseId !== pulse.id) {
-          runtime.lastPulseId = pulse.id;
-          sendDataChannelMessage(runtime, {
-            type: "chirp-schedule",
-            version: 1,
-            fromDeviceId: deviceId,
-            pulse,
-          });
+          if (
+            sendDataChannelMessage(runtime, {
+              type: "chirp-schedule",
+              version: 1,
+              fromDeviceId: deviceId,
+              pulse,
+            })
+          ) {
+            runtime.lastPulseId = pulse.id;
+          }
         }
         const observationKey = observation
           ? `${observation.pulseId}:${observation.detectedSampleIndex ?? ""}:${observation.detectedAtHostEpochMs}`
           : "";
         if (observation && observationKey !== runtime.lastObservationKey) {
-          runtime.lastObservationKey = observationKey;
-          sendDataChannelMessage(runtime, {
-            type: "pulse-observation",
-            version: 1,
-            fromDeviceId: deviceId,
-            observation,
-          });
+          if (
+            sendDataChannelMessage(runtime, {
+              type: "pulse-observation",
+              version: 1,
+              fromDeviceId: deviceId,
+              observation,
+            })
+          ) {
+            runtime.lastObservationKey = observationKey;
+          }
         }
         if (voiceEvent && voiceEvent.id !== runtime.lastVoiceEventId) {
           if (
@@ -583,6 +632,8 @@ async function createPeerRuntime({
     peerId,
     connection,
     channel: null,
+    createdAtPerfMs: nowPerfMs(),
+    channelOpenedAtPerfMs: null,
     pendingCandidates: [],
     lastClockProbeAt: 0,
     clockProbeSequence: 0,
@@ -659,6 +710,7 @@ function attachDataChannel(
   runtime.channel = channel;
   channel.binaryType = "arraybuffer";
   channel.onopen = () => {
+    runtime.channelOpenedAtPerfMs = nowPerfMs();
     syncOpenPeerCount();
     onChannelOpen?.(runtime);
   };
@@ -719,6 +771,16 @@ async function pollSignals({
     if (!targets.has(signal.fromDeviceId)) {
       continue;
     }
+    // Device ids persist across reloads, so a fresh page polling from seq 0
+    // replays signals addressed to page instances that no longer exist.
+    // Applying a stale offer or answer poisons the live handshake (a
+    // mismatched answer deadlocks ICE while the valid one gets ignored).
+    if (
+      typeof signal.createdAt === "number" &&
+      Date.now() - signal.createdAt > MAX_SIGNAL_AGE_MS
+    ) {
+      continue;
+    }
     let runtime = peers.get(signal.fromDeviceId);
     if (!runtime) {
       await createPeerRuntime({
@@ -734,7 +796,12 @@ async function pollSignals({
       runtime = peers.get(signal.fromDeviceId);
     }
     if (runtime) {
-      await applyRealtimeSignal(runtime, signal, publishSignal);
+      // One malformed or out-of-state signal (e.g. a replayed offer hitting
+      // the wrong signaling state) must not abort the rest of the batch —
+      // the valid answer is often the very next entry.
+      await applyRealtimeSignal(runtime, signal, publishSignal).catch(
+        () => undefined,
+      );
     }
   }
 }

@@ -27,6 +27,15 @@ export type PulseDetection = {
 
 const SCORE_TIE_EPSILON = 0.015;
 
+// Confidence reference for the envelope score. A matched filter never scores
+// anywhere near 1.0 on real room audio — multipath, transducer rolloff, and
+// in-band noise cap clean phone-to-phone chirp receptions around 0.2-0.5
+// (measured on field recordings), while template-free windows score below
+// 0.01. Normalizing against this achievable reference makes confidence mean
+// "how clearly was the pulse seen" instead of "how loud was it" — a quiet
+// reception with an unambiguous correlation peak is strong evidence.
+const REFERENCE_ENVELOPE_SCORE = 0.3;
+
 export function synthesizeTonePulse({
   frequencyHz,
   durationMs,
@@ -172,7 +181,7 @@ export function detectPulse(
     bestScore,
   );
   const segment = samples.slice(bestStart, bestStart + template.length);
-  const scoreConfidence = (bestScore - minScore) / Math.max(0.001, 1 - minScore);
+  const scoreConfidence = clamp01(bestScore / REFERENCE_ENVELOPE_SCORE);
   const ratioConfidence =
     peakRatio === Number.POSITIVE_INFINITY
       ? 1

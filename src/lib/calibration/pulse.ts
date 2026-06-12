@@ -112,7 +112,7 @@ export function createToneObservation({
     detectedAtHostEpochMs,
     amplitude: round(Math.min(1, Math.max(0, micLevel)), 3),
     confidence: round(
-      observationConfidence(micLevel, clockUncertaintyMs) *
+      observationConfidence(clockUncertaintyMs) *
         Math.max(0, Math.min(1, confidenceScale)),
       3,
     ),
@@ -159,7 +159,7 @@ export function createMatchedToneObservation({
     sampleRate: audioWindow.sampleRate,
     amplitude: round(Math.min(1, Math.max(0, detection.amplitude)), 3),
     confidence: round(
-      observationConfidence(detection.amplitude, audioWindow.clockUncertaintyMs) *
+      observationConfidence(audioWindow.clockUncertaintyMs) *
         Math.max(0, Math.min(1, detection.confidence)),
       3,
     ),
@@ -205,7 +205,7 @@ export function createSampledToneObservation({
     sampleRate,
     amplitude: round(Math.min(1, Math.max(0, amplitude)), 3),
     confidence: round(
-      observationConfidence(amplitude, clockUncertaintyMs) *
+      observationConfidence(clockUncertaintyMs) *
         Math.max(0, Math.min(1, detectionConfidence)),
       3,
     ),
@@ -213,10 +213,17 @@ export function createSampledToneObservation({
   };
 }
 
-function observationConfidence(micLevel: number, clockUncertaintyMs: number) {
-  const levelScore = Math.min(1, micLevel / 0.12);
-  const timingScore = 1 / (1 + Math.max(0, clockUncertaintyMs) / 18);
-  return round(Math.max(0, Math.min(1, levelScore * timingScore)), 3);
+// Deliberately NOT a function of amplitude: room-scale chirps on phone
+// transducers arrive around 1e-3 full-scale (measured on field recordings),
+// so any absolute-loudness term collapses the whole confidence chain to
+// zero. Detection quality lives in the matched filter's statistics (score
+// and peak ratio), which callers pass in as the detection confidence; the
+// only thing left to rate here is the clock behind the timestamp.
+function observationConfidence(clockUncertaintyMs: number) {
+  return round(
+    Math.max(0, Math.min(1, 1 / (1 + Math.max(0, clockUncertaintyMs) / 18))),
+    3,
+  );
 }
 
 function round(value: number, decimals: number) {

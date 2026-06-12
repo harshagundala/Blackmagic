@@ -624,10 +624,12 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     const streamingMatcher = new StreamingPulseMatcher({
       sampleRate: audioContext.sampleRate,
       historySamples: ROLLING_AUDIO_HISTORY_SAMPLES,
-      // Room-scale chirps on phone transducers arrive weak; the consensus and
-      // outlier layers in ranging absorb the occasional marginal detection.
-      minScore: 0.45,
-      minPeakRatio: 2,
+      // Field-calibrated against ground-truth takes: real chirp receptions
+      // score 0.07-0.5 with peak ratios 6-50; chirp-free audio stays below
+      // 0.01 score. The peak ratio is the discriminative statistic, so it
+      // carries the gate; consensus layers in ranging absorb stragglers.
+      minScore: 0.05,
+      minPeakRatio: 4,
     });
     streamingMatcherRef.current = streamingMatcher;
     updateStreamingMatcherPulse(

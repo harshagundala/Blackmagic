@@ -27,8 +27,9 @@ import { MIN_RANGE_SAMPLES as RANGE_TARGET_SAMPLES } from "@/lib/reconciliation/
 import type { VoiceActivityEvent } from "@/lib/session/audio-events";
 import { hasPulseLead } from "@/lib/calibration/cadence";
 import {
+  MIN_ULTRASONIC_CAPTURE_RATE_HZ,
+  ULTRASONIC_CHIRP_GAIN,
   chirpBandFor,
-  roomNeedsAudibleChirpLanes,
 } from "@/lib/calibration/chirp-lanes";
 import { shouldAutoPromoteRawCapture } from "@/lib/acoustics/capture-health";
 import {
@@ -60,23 +61,16 @@ type Phase = "arriving" | "listening";
 // delivery of the schedule before the tone plays.
 const MIN_CHIRP_LEAD_MS = 550;
 const CHIRP_TURN_POLL_MS = 400;
+// 200 ms sweeps: near-ultrasonic receptions are transducer-rolloff-limited,
+// and matched-filter gain grows with duration (~4 dB over the original
+// 80 ms). The pulse plus search margins must still fit the 1 s rolling
+// capture window when the fallback search runs ~250 ms after arrival.
 const CHIRP_TURN_OPTIONS = {
   slotDurationMs: 1_800,
   pulseOffsetMs: 1_000,
   minLeadMs: 700,
-  pulseDurationMs: 80,
+  pulseDurationMs: 200,
 };
-// Speakers and mics roll off hard near-ultrasonic, so those lanes get driven
-// hard; audible lanes ride the matched filter's ~19 dB processing gain and
-// stay at a whisper.
-const ULTRASONIC_CHIRP_GAIN = 0.9;
-const AUDIBLE_CHIRP_GAIN = 0.22;
-
-function chirpGainFor(pulse: AcousticPulse) {
-  return pulse.frequencyHz >= 14_000
-    ? ULTRASONIC_CHIRP_GAIN
-    : AUDIBLE_CHIRP_GAIN;
-}
 // How many times the matched-filter fallback may re-search the rolling
 // window for one pulse; it is main-thread DSP, so unbounded retries at
 // render cadence freeze the UI.
@@ -607,9 +601,16 @@ export function WaveformApp() {
         return;
       }
       // Only devices that are actually capturing take emitter turns: a
-      // suspended phone cannot self-record its chirp.
+      // suspended phone cannot self-record its chirp, and one capturing
+      // below the ultrasonic Nyquist cannot self-anchor an inaudible sweep.
       const capableIds = roomDevicesRef.current
-        .filter((device) => device.mic === "active" && device.audioFrame)
+        .filter(
+          (device) =>
+            device.mic === "active" &&
+            device.audioFrame &&
+            (typeof device.sampleRate !== "number" ||
+              device.sampleRate >= MIN_ULTRASONIC_CAPTURE_RATE_HZ),
+        )
         .map((device) => device.deviceId);
       const turn = selectUpcomingCalibrationTurn(
         capableIds,
@@ -619,23 +620,13 @@ export function WaveformApp() {
       if (!turn || turn.emitterId !== deviceId) {
         return;
       }
-      // Drop to the audible band when some phone in the room cannot capture
-      // near-ultrasonic — too low a sample rate, or voice processing still
-      // active (AEC/NS attenuates the band even at 48 kHz).
-      const audibleBand = roomNeedsAudibleChirpLanes({
-        self: {
-          sampleRate: snapshotRef.current.sampleRate,
-          captureProcessing: snapshotRef.current.captureProcessing,
-        },
-        devices: roomDevicesRef.current,
-      });
       const pulse = createScheduledAcousticPulse({
         deviceId,
         sequence: turn.sequence,
         hostEpochNowMs: nowMs,
         leadMs: turn.pulseEmittedAtHostEpochMs - nowMs,
         durationMs: turn.pulseDurationMs,
-        ...chirpBandFor(deviceId, audibleBand),
+        ...chirpBandFor(deviceId),
       });
       if (
         !hasPulseLead(pulse, nowMs, MIN_CHIRP_LEAD_MS) ||
@@ -1554,8 +1545,12 @@ function maybeCreateMatchedObservation(
     audioWindow: snapshot.audioWindow,
     searchStartSample: Math.max(searchStartSample, bestAt - refineHalf),
     searchEndSample: Math.min(searchEndSample, bestAt + hop + refineHalf),
-    minScore: 0.45,
-    minPeakRatio: 2,
+    // Field-calibrated: real phone-to-phone chirps score 0.07-0.5 with peak
+    // ratios of 6-50, while template-free windows (speech included) stay
+    // below 0.01 score and ~6 ratio. The old 0.45 score gate rejected every
+    // genuine reception in the ground-truth takes.
+    minScore: 0.05,
+    minPeakRatio: 4,
   });
 }
 
@@ -1584,7 +1579,7 @@ function scheduleOutputPulse(
     ownsContext: false,
   });
   void schedulerRef.current
-    .schedule(pulse, { hostEpochNowMs: now, peakGain: chirpGainFor(pulse) })
+    .schedule(pulse, { hostEpochNowMs: now, peakGain: ULTRASONIC_CHIRP_GAIN })
     .catch(() => undefined);
 }
 
