@@ -143,6 +143,28 @@ export function WaveformApp() {
   // masquerade as voice events.
   const recentPulsesRef = useRef<AcousticPulse[]>([]);
 
+  // Self-hearing health: a phone hears its own chirp from ~10 cm every turn,
+  // so consecutive misses mean ITS output or capture is degraded (media
+  // volume down, blocked ports, a case) — a state that silently kills
+  // reciprocal ranging for the whole room and that only this phone can
+  // detect. Field case: one phone's volume was lowered and the room never
+  // ranged again, with zero indication why.
+  const ownChirpLogRef = useRef<Array<{ id: string; deadlineEpochMs: number }>>([]);
+  const heardOwnChirpIdsRef = useRef<Set<string>>(new Set());
+  const [cannotHearOwnChirps, setCannotHearOwnChirps] = useState(false);
+  const updateOwnChirpHealth = useCallback((nowEpochMs: number) => {
+    const expired = ownChirpLogRef.current.filter(
+      (entry) => entry.deadlineEpochMs <= nowEpochMs,
+    );
+    if (expired.length < 2) {
+      return;
+    }
+    const lastTwo = expired.slice(-2);
+    setCannotHearOwnChirps(
+      lastTwo.every((entry) => !heardOwnChirpIdsRef.current.has(entry.id)),
+    );
+  }, []);
+
   const noteRecentPulse = useCallback((pulse: AcousticPulse) => {
     recentPulsesRef.current = [...recentPulsesRef.current.slice(-7), pulse];
   }, []);
@@ -648,6 +670,16 @@ export function WaveformApp() {
       observablePulseRef.current = pulse;
       noteRecentPulse(pulse);
       recordChirpEvidence(deviceId, pulse, null);
+      ownChirpLogRef.current = [
+        ...ownChirpLogRef.current.slice(-5),
+        {
+          id: pulse.id,
+          // Past this point the matched-filter fallback has had both its
+          // bounded attempts; an unheard pulse is genuinely unheard.
+          deadlineEpochMs:
+            pulse.emittedAtHostEpochMs + pulse.durationMs + 1_500,
+        },
+      ];
       scheduleOutputPulse(
         pulse,
         snapshotRef.current,
@@ -655,14 +687,22 @@ export function WaveformApp() {
         sensors.getAudioContext,
       );
     };
-    emit();
-    const timer = window.setInterval(emit, CHIRP_TURN_POLL_MS);
+    const emitAndCheck = () => {
+      emit();
+      const nowMs = hostEpochNow(snapshotRef.current);
+      if (nowMs !== null) {
+        updateOwnChirpHealth(nowMs);
+      }
+    };
+    emitAndCheck();
+    const timer = window.setInterval(emitAndCheck, CHIRP_TURN_POLL_MS);
     return () => window.clearInterval(timer);
   }, [
     deviceId,
     noteRecentPulse,
     phase,
     recordChirpEvidence,
+    updateOwnChirpHealth,
     roomState,
     sensors.getAudioContext,
   ]);
@@ -722,6 +762,12 @@ export function WaveformApp() {
       return;
     }
     lastObservationRef.current = observation;
+    // Only an observation of one of OUR pulses proves this phone can hear
+    // itself — hearing a peer's chirp says nothing about our own output.
+    if (ownChirpLogRef.current.some((entry) => entry.id === observation.pulseId)) {
+      heardOwnChirpIdsRef.current.add(observation.pulseId);
+      setCannotHearOwnChirps(false);
+    }
     recordChirpEvidence(deviceId, null, observation);
   }, [deviceId, ownPulseObservation, phase, recordChirpEvidence, sensors.snapshot]);
 
@@ -847,6 +893,10 @@ export function WaveformApp() {
           ) : sensors.snapshot.audioContextState &&
             sensors.snapshot.audioContextState !== "running" ? (
             <span className="text-[#b45309]">audio paused — tap</span>
+          ) : cannotHearOwnChirps ? (
+            <span className="text-[#b45309]">
+              can&apos;t hear own chirps — raise volume, remove case
+            </span>
           ) : null}
         </span>
       </header>

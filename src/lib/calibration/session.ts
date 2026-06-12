@@ -91,7 +91,13 @@ export function selectUpcomingCalibrationTurn(
   hostEpochNowMs: number,
   options: LiveCalibrationTurnOptions = {},
 ): LiveCalibrationTurn | null {
-  const ids = [...new Set(participantIds.filter(Boolean))];
+  // Canonical order, NOT caller order: every device computes this schedule
+  // independently from its own polled room state, and the store does not
+  // guarantee device ordering (Redis hgetall). Two phones disagreeing on the
+  // order map the same slot to different emitters and chirp on top of each
+  // other — observed in the field as two overlapping chirp trains ~170 ms
+  // apart (the skew being their differing audio output latencies).
+  const ids = [...new Set(participantIds.filter(Boolean))].sort();
   if (ids.length < 2 || !Number.isFinite(hostEpochNowMs)) {
     return null;
   }

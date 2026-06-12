@@ -32,7 +32,10 @@ const PRODUCTION_MIN_SCORE = 0.05;
 const PRODUCTION_MIN_PEAK_RATIO = 4;
 // Profiles a take may contain, newest first (older takes ran older builds).
 const EMISSION_PROFILES = [
-  { label: "ultrasonic-200ms", durationMs: 200, bands: [
+  { label: "fullband-200ms", durationMs: 200, bands: [
+    { frequencyHz: 16_300, endFrequencyHz: 18_700 },
+  ]},
+  { label: "laned-ultrasonic-200ms", durationMs: 200, bands: [
     { frequencyHz: 16_300, endFrequencyHz: 16_900 },
     { frequencyHz: 16_900, endFrequencyHz: 17_500 },
     { frequencyHz: 17_500, endFrequencyHz: 18_100 },
@@ -435,16 +438,18 @@ async function blobList(prefix?: string) {
 }
 
 async function listTakes() {
-  const result = await blobList();
-  const takes = new Map<string, string>();
+  const { list } = await import("@vercel/blob");
+  const result = await list({ limit: 200 });
+  const takes = new Map<string, number>();
   for (const blob of result.blobs) {
     const match = blob.pathname.match(/(take-[a-f0-9]+)\//);
     if (match) {
-      takes.set(match[1], blob.uploadedAt as unknown as string);
+      const at = new Date(blob.uploadedAt).getTime();
+      takes.set(match[1], Math.max(takes.get(match[1]) ?? 0, at));
     }
   }
-  for (const [take, at] of [...takes.entries()].sort((a, b) => (a[1] < b[1] ? 1 : -1))) {
-    console.log(`${at}  ${take}`);
+  for (const [take, at] of [...takes.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`${new Date(at).toISOString()}  ${take}`);
   }
 }
 

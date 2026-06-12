@@ -58,7 +58,7 @@ describe("pairwise calibration session", () => {
     expect(
       selectUpcomingCalibrationTurn(["host", "a", "b"], 100, options),
     ).toEqual({
-      emitterId: "host",
+      emitterId: "a",
       sequence: 0,
       slotStartsAtHostEpochMs: 0,
       pulseEmittedAtHostEpochMs: 600,
@@ -69,13 +69,30 @@ describe("pairwise calibration session", () => {
       selectUpcomingCalibrationTurn(["host", "a", "b"], 400, options),
     ).toEqual(
       expect.objectContaining({
-        emitterId: "a",
+        emitterId: "b",
         sequence: 1,
         pulseEmittedAtHostEpochMs: 1_600,
       }),
     );
 
     expect(selectUpcomingCalibrationTurn(["host"], 100, options)).toBeNull();
+  });
+
+  test("assigns the same emitter regardless of participant ordering", () => {
+    // Field regression: room-state device order is not stable across pollers
+    // (Redis hgetall), and order-sensitive assignment made two phones claim
+    // the same slot and chirp on top of each other.
+    const options = {
+      slotDurationMs: 1_000,
+      pulseOffsetMs: 600,
+      minLeadMs: 250,
+      pulseDurationMs: 40,
+    };
+    for (const nowMs of [100, 1_400, 2_900, 7_777]) {
+      const fromSorted = selectUpcomingCalibrationTurn(["a", "b", "host"], nowMs, options);
+      const fromShuffled = selectUpcomingCalibrationTurn(["host", "b", "a"], nowMs, options);
+      expect(fromShuffled).toEqual(fromSorted);
+    }
   });
 
   test("chooses the closest pulse that should be observed, including self chirps", () => {
