@@ -32,6 +32,19 @@ describe("captureRecoveryFuseMs", () => {
   });
 });
 
+describe("captureRateIsNarrowband", () => {
+  it("flags routes that cannot represent the chirp band", async () => {
+    const { captureRateIsNarrowband } = await import("./capture-health");
+    // Field regression: an iOS capture landed on a 24 kHz route (healthy
+    // signal level, Nyquist 12 kHz) and silently disabled chirp ranging.
+    expect(captureRateIsNarrowband(24_000)).toBe(true);
+    expect(captureRateIsNarrowband(16_000)).toBe(true);
+    expect(captureRateIsNarrowband(44_100)).toBe(false);
+    expect(captureRateIsNarrowband(48_000)).toBe(false);
+    expect(captureRateIsNarrowband(null)).toBe(false);
+  });
+});
+
 describe("shouldAutoPromoteRawCapture", () => {
   const promotable = {
     mic: "active" as const,

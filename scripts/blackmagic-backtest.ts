@@ -100,7 +100,16 @@ async function main() {
     process.stderr.write(`need 2 devices in take, found ${devices.length}\n`);
     process.exit(1);
   }
-  console.log(`take loaded: ${devices.map((d) => `${d.deviceId.slice(0, 4)}(${d.role}, clock ±${d.clockUncertaintyMs}ms)`).join(", ")}`);
+  console.log(`take loaded: ${devices.map((d) => `${d.deviceId.slice(0, 4)}(${d.role}, ${d.sampleRate / 1_000}kHz, clock ±${d.clockUncertaintyMs}ms)`).join(", ")}`);
+  for (const device of devices) {
+    if (device.sampleRate < 40_000) {
+      console.log(
+        `NARROWBAND CAPTURE: ${device.deviceId.slice(0, 4)} recorded at ${device.sampleRate / 1_000} kHz ` +
+        `(Nyquist ${device.sampleRate / 2_000} kHz) — it cannot see ultrasonic chirps at all. ` +
+        `Likely a Bluetooth headset mic or iOS voice route on that phone.`,
+      );
+    }
+  }
 
   // 1. Discover the distinct chirp trains present in the take (band ×
   //    duration), without assuming who emitted them: at close range both

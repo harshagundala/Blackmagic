@@ -35,6 +35,7 @@ import {
 import { captureAudioSnippet } from "@/lib/acoustics/audio-snippet";
 import {
   HEALTHY_CAPTURE_RMS,
+  captureRateIsNarrowband,
   captureRecoveryFuseMs,
 } from "@/lib/acoustics/capture-health";
 import {
@@ -147,6 +148,9 @@ const CLOCK_SYNC_WARMUP_SPACING_MS = 160;
 // call getUserMedia again (no re-prompt), then fall back to processed
 // (default constraint) capture, which uses a different iOS capture path.
 const MAX_CAPTURE_RECOVERIES = 5;
+// Give a fresh capture a few seconds to settle before judging its route's
+// sample rate — getUserMedia itself triggers route changes.
+const NARROWBAND_REBUILD_MS = 5_000;
 // Envelope series shared with peers: 25 ms buckets, 16 per chunk (400 ms),
 // sent every sensor frame (~220 ms) so one dropped frame costs nothing.
 const WAVE_HISTORY_MS = 8_000;
@@ -238,6 +242,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
   const captureGraphRef = useRef<CaptureGraph | null>(null);
   const waveSeriesRef = useRef(new WaveSeries(WAVE_HISTORY_MS));
   const captureSilentSincePerfMsRef = useRef<number | null>(null);
+  const captureNarrowbandSincePerfMsRef = useRef<number | null>(null);
   const captureRebuildCountRef = useRef(0);
   const captureRebuildInFlightRef = useRef(false);
   // Resolved lazily (not in render) so localStorage is read once, on start.
@@ -694,6 +699,7 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
       }
       const micLevel = Math.sqrt(sum / samples.length);
       maybeRecoverSilentCapture(micLevel, audioContext);
+      maybeRecoverNarrowbandCapture(audioContext);
       // The frame timestamp is cheap and feeds the wave series and the voice
       // gate every frame; the audio WINDOW copies the whole rolling buffer,
       // so it is only built on frames that actually publish a snapshot.
@@ -788,6 +794,32 @@ export function useSensorSuite(activePulse: AcousticPulse | null = null) {
     }
 
     captureSilentSincePerfMsRef.current = null;
+    runCaptureRecoveryLadder();
+  }
+
+  // A narrowband capture route (Bluetooth headset mic, iOS voice route)
+  // reads healthy signal levels yet cannot represent the chirp band at all
+  // — the phone silently stops anchoring ranges. A re-acquired stream often
+  // lands back on the 48 kHz built-in mic; when it cannot (headset still
+  // routed), the bounded ladder stops and the UI hint takes over.
+  function maybeRecoverNarrowbandCapture(audioContext: AudioContext) {
+    if (
+      !captureRateIsNarrowband(audioContext.sampleRate) ||
+      (audioContext.state as AudioContextRunState) !== "running"
+    ) {
+      captureNarrowbandSincePerfMsRef.current = null;
+      return;
+    }
+    const now = performance.now();
+    captureNarrowbandSincePerfMsRef.current ??= now;
+    if (now - captureNarrowbandSincePerfMsRef.current < NARROWBAND_REBUILD_MS) {
+      return;
+    }
+    captureNarrowbandSincePerfMsRef.current = null;
+    runCaptureRecoveryLadder();
+  }
+
+  function runCaptureRecoveryLadder() {
     if (
       captureRebuildInFlightRef.current ||
       captureRebuildCountRef.current >= MAX_CAPTURE_RECOVERIES

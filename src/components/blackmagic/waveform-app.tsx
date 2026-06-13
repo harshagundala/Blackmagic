@@ -32,7 +32,10 @@ import {
   ULTRASONIC_CHIRP_GAIN,
   chirpBandFor,
 } from "@/lib/calibration/chirp-lanes";
-import { shouldAutoPromoteRawCapture } from "@/lib/acoustics/capture-health";
+import {
+  captureRateIsNarrowband,
+  shouldAutoPromoteRawCapture,
+} from "@/lib/acoustics/capture-health";
 import {
   createMatchedToneObservation,
   createScheduledAcousticPulse,
@@ -893,6 +896,10 @@ export function WaveformApp() {
           ) : sensors.snapshot.audioContextState &&
             sensors.snapshot.audioContextState !== "running" ? (
             <span className="text-[#b45309]">audio paused — tap</span>
+          ) : captureRateIsNarrowband(sensors.snapshot.sampleRate) ? (
+            <span className="text-[#b45309]">
+              {`narrowband mic (${Math.round((sensors.snapshot.sampleRate ?? 0) / 1_000)}k) — unpair bluetooth headset`}
+            </span>
           ) : cannotHearOwnChirps ? (
             <span className="text-[#b45309]">
               can&apos;t hear own chirps — raise volume, remove case
@@ -1052,7 +1059,12 @@ function describePeerLink(
       ? Math.round(nowHostMs - frame.wave.endHostEpochMs)
       : null;
   const age = ageMs === null ? "" : ` · Δ${ageMs}ms`;
-  return `${syncLabel} · lvl ${level}${age}`;
+  // A narrowband capture route cannot see chirps at all — the single most
+  // common silent reason a healthy-looking phone anchors no distances.
+  const narrowband = captureRateIsNarrowband(frame.sampleRate)
+    ? ` · ${Math.round((frame.sampleRate ?? 0) / 1_000)}k mic — no chirps`
+    : "";
+  return `${syncLabel} · lvl ${level}${age}${narrowband}`;
 }
 
 function shortId(deviceId: string) {

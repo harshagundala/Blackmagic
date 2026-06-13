@@ -30,6 +30,19 @@ export function captureRecoveryFuseMs(micLevel: number): number | null {
     : QUIET_CAPTURE_REBUILD_MS;
 }
 
+// A capture route below this rate (e.g. a Bluetooth headset mic at 16-24 kHz
+// or an iOS voice route) cannot represent the near-ultrasonic chirp band at
+// all — the phone is healthy by signal level yet blind to every chirp,
+// including its own. Field case: a 24 kHz route silently disabled chirp
+// ranging for the whole room. Treat it like a broken capture: attempt the
+// recovery ladder (a re-acquired stream often lands back on the 48 kHz
+// built-in mic), and surface it when recovery cannot fix the route.
+export const FULLBAND_CAPTURE_RATE_HZ = 40_000;
+
+export function captureRateIsNarrowband(sampleRate: number | null): boolean {
+  return typeof sampleRate === "number" && sampleRate > 0 && sampleRate < FULLBAND_CAPTURE_RATE_HZ;
+}
+
 // Chirp ranging needs voice processing off: echo cancellation deletes a
 // phone's own chirp from its capture (no self-anchor, so no reciprocal
 // range) and noise suppression attenuates the near-ultrasonic lanes. Once a
