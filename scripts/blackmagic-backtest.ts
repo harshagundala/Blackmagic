@@ -13,14 +13,15 @@
 //
 // The script discovers each device's chirp train empirically (current and
 // legacy lane/duration profiles), replays the REAL detection chain
-// (createMatchedToneObservation with production thresholds), then feeds the
-// REAL ranging math (deriveAcousticRanges) incrementally the way the edge
-// pipeline does — reporting detection rate, time to first range, and the
-// range trajectory against the expected distance.
+// (detectScheduledPulse — the same bounded two-stage matched filter the live
+// app runs, including the energy pre-scan), then feeds the REAL ranging math
+// (deriveAcousticRanges) incrementally the way the edge pipeline does —
+// reporting detection rate, time to first range, and the range trajectory
+// against the expected distance.
 
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { createMatchedToneObservation } from "../src/lib/calibration/pulse";
+import { detectScheduledPulse } from "../src/lib/calibration/scheduled-pulse-detector";
 import { deriveAcousticRanges } from "../src/lib/session/ranging";
 import type {
   AcousticObservation,
@@ -28,8 +29,6 @@ import type {
   RoomDevice,
 } from "../src/lib/session/registry";
 
-const PRODUCTION_MIN_SCORE = 0.05;
-const PRODUCTION_MIN_PEAK_RATIO = 4;
 // Profiles a take may contain, newest first (older takes ran older builds).
 const EMISSION_PROFILES = [
   { label: "fullband-200ms", durationMs: 200, bands: [
@@ -197,19 +196,37 @@ async function main() {
   console.log(`stability: max-min spread ${spread.toFixed(2)}m across the take`);
 }
 
+// Replay the EXACT live detection path: the bounded two-stage matched-filter
+// fallback (detectScheduledPulse), with a snapshot frame reconstructed the
+// way the live capture loop builds it — so the backtest exercises the energy
+// pre-scan and window math, not a clean full-window search that would mask
+// pre-scan bugs.
 function observeWithProductionChain(
   listener: TakeDevice,
   pulse: AcousticPulse,
   nearSeconds: number,
 ): AcousticObservation | null {
   const { sampleRate, samples } = listener;
-  const start = Math.max(0, Math.round((nearSeconds - 0.2) * sampleRate));
-  const end = Math.min(samples.length, Math.round((nearSeconds + pulse.durationMs / 1_000 + 0.25) * sampleRate));
+  // The live window is the most-recent ~1 s of capture, evaluated once the
+  // pulse has arrived (output latency included). Anchor "now" there.
+  const nowSeconds = nearSeconds + pulse.durationMs / 1_000 + 0.45;
+  const nowSampleIndex = Math.round(nowSeconds * sampleRate);
+  const windowSamples = Math.min(48_000, nowSampleIndex);
+  const start = nowSampleIndex - windowSamples;
+  const end = Math.min(samples.length, nowSampleIndex);
   if (end - start < (pulse.durationMs / 1_000) * sampleRate) {
     return null;
   }
-  return createMatchedToneObservation({
+  const hostNowEpochMs =
+    listener.startedAtEpochMs - listener.clockOffsetMs + nowSeconds * 1_000;
+  return detectScheduledPulse({
     pulse,
+    frame: {
+      sampleIndex: listener.firstSampleIndex + nowSampleIndex,
+      hostEstimatedEpochMs: hostNowEpochMs,
+      sampleRate,
+      clockUncertaintyMs: listener.clockUncertaintyMs,
+    },
     audioWindow: {
       samples: samples.slice(start, end),
       sampleRate,
@@ -221,10 +238,7 @@ function observeWithProductionChain(
       clockOffsetMs: listener.clockOffsetMs,
       clockUncertaintyMs: listener.clockUncertaintyMs,
     },
-    searchStartSample: 0,
-    searchEndSample: end - start,
-    minScore: PRODUCTION_MIN_SCORE,
-    minPeakRatio: PRODUCTION_MIN_PEAK_RATIO,
+    clockUncertaintyMs: listener.clockUncertaintyMs,
   });
 }
 

@@ -36,10 +36,11 @@ import {
   captureRateIsNarrowband,
   shouldAutoPromoteRawCapture,
 } from "@/lib/acoustics/capture-health";
+import { createScheduledAcousticPulse } from "@/lib/calibration/pulse";
 import {
-  createMatchedToneObservation,
-  createScheduledAcousticPulse,
-} from "@/lib/calibration/pulse";
+  CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS,
+  detectScheduledPulse,
+} from "@/lib/calibration/scheduled-pulse-detector";
 import {
   createPulseToneScheduler,
   type PulseToneScheduler,
@@ -79,10 +80,6 @@ const CHIRP_TURN_OPTIONS = {
 // window for one pulse; it is main-thread DSP, so unbounded retries at
 // render cadence freeze the UI.
 const MAX_MATCH_ATTEMPTS_PER_PULSE = 3;
-// Scheduled audio leaves an iPhone speaker well after its scheduled instant
-// (output latency measured at 130-230 ms in field takes); searches and
-// arrival gates must absorb it with headroom.
-const CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS = 450;
 
 // The trailing window each row renders, and how far behind "now" the right
 // edge sits so remote chunks (sent every ~220 ms) have arrived by the time
@@ -140,10 +137,48 @@ export function WaveformApp() {
   const edgeEvidenceRef = useRef(createEdgeEvidence());
   const publishedPulseIdRef = useRef("");
   const activePulseRef = useRef<AcousticPulse | null>(null);
-  const observablePulseRef = useRef<AcousticPulse | null>(null);
+  // Every chirp this phone should try to hear — its own AND every peer's —
+  // each pending until detected or aged out. A single slot (the prior
+  // design) let a peer's incoming schedule evict our own just-emitted chirp
+  // before we confirmed hearing it: two such evictions falsely tripped the
+  // "can't hear own chirps" warning even on healthy audio.
+  const observablePulsesRef = useRef<AcousticPulse[]>([]);
+  const observedPulseIdsRef = useRef<Set<string>>(new Set());
   const lastObservationRef = useRef<AcousticObservation | null>(null);
   const pulseSchedulerRef = useRef<PulseToneScheduler | null>(null);
   const matchAttemptsRef = useRef(new Map<string, number>());
+
+  // Enqueue a pulse to listen for, deduped by id and bounded; drop entries
+  // whose arrival window has fully passed so the queue cannot grow unbounded.
+  const enqueueObservablePulse = useCallback((pulse: AcousticPulse) => {
+    const nowMs = hostEpochNow(snapshotRef.current);
+    const pending = observablePulsesRef.current.filter((entry) => {
+      if (entry.id === pulse.id) {
+        return false;
+      }
+      if (nowMs === null) {
+        return true;
+      }
+      return (
+        nowMs <=
+        entry.emittedAtHostEpochMs +
+          entry.durationMs +
+          CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS +
+          1_500
+      );
+    });
+    pending.push(pulse);
+    const next = pending.slice(-8);
+    observablePulsesRef.current = next;
+    // The observed-id set only needs entries for pulses still pending, so it
+    // stays bounded to the queue instead of growing for the whole session.
+    const liveIds = new Set(next.map((entry) => entry.id));
+    for (const id of observedPulseIdsRef.current) {
+      if (!liveIds.has(id)) {
+        observedPulseIdsRef.current.delete(id);
+      }
+    }
+  }, []);
   const roomDevicesRef = useRef<RoomDevice[]>([]);
   // Chirps loud enough to range with are loud enough to trip the voice gate;
   // every scheduled pulse opens a suppression window so chirps never
@@ -453,17 +488,13 @@ export function WaveformApp() {
           return;
         }
         const deltaMs = pulse.emittedAtHostEpochMs - nowMs;
-        if (
-          deltaMs > -200 &&
-          deltaMs < 5_500 &&
-          observablePulseRef.current?.id !== pulse.id
-        ) {
+        if (deltaMs > -200 && deltaMs < 5_500) {
           // Armed for the bounded matched-filter search after arrival; the
           // continuous streaming matcher stays off (main-thread cost).
-          observablePulseRef.current = pulse;
+          enqueueObservablePulse(pulse);
         }
       },
-      [noteRecentPulse, recordChirpEvidence],
+      [enqueueObservablePulse, noteRecentPulse, recordChirpEvidence],
     ),
     onPulseObservation: useCallback(
       (observation: AcousticObservation, fromDeviceId: string) => {
@@ -692,7 +723,7 @@ export function WaveformApp() {
       }
       publishedPulseIdRef.current = pulse.id;
       activePulseRef.current = pulse;
-      observablePulseRef.current = pulse;
+      enqueueObservablePulse(pulse);
       noteRecentPulse(pulse);
       recordChirpEvidence(deviceId, pulse, null);
       ownChirpStatsRef.current.emitted += 1;
@@ -726,6 +757,7 @@ export function WaveformApp() {
     return () => window.clearInterval(timer);
   }, [
     deviceId,
+    enqueueObservablePulse,
     noteRecentPulse,
     phase,
     recordChirpEvidence,
@@ -742,74 +774,98 @@ export function WaveformApp() {
     [],
   );
 
-  // Own chirp detections: prefer the streaming matcher's hit; when it
-  // missed, re-search the rolling audio window around the pulse's expected
-  // arrival with the matched-filter fallback. The fallback is main-thread
-  // DSP, so it is strictly bounded: only after the pulse has fully arrived,
-  // and at most twice per pulse — unbounded retries at snapshot cadence
-  // freeze the UI and starve audio scheduling.
-  const ownPulseObservation = sensors.snapshot.pulseObservation;
+  // Chirp detections (own and every peer's): re-search the rolling audio
+  // window around each pending pulse's arrival with the matched-filter
+  // fallback. It is main-thread DSP, so it is strictly bounded — only after
+  // a pulse has fully arrived (output latency included), at most a few
+  // attempts each, and one detection per tick so a single observation per
+  // tick reaches the broadcast slot. The streaming matcher is off in v2 (it
+  // needs a tracked pulse the suite never receives here), so this is the
+  // sole detection path.
+  const snapshotPulseObservation = sensors.snapshot.pulseObservation;
   useEffect(() => {
     if (phase !== "listening") {
       return;
     }
-    const pulse = observablePulseRef.current;
-    let observation =
-      ownPulseObservation && (!pulse || ownPulseObservation.pulseId === pulse.id)
-        ? ownPulseObservation
-        : null;
-
-    if (!observation && pulse) {
-      const nowMs = hostEpochNow(snapshotRef.current);
-      const attempts = matchAttemptsRef.current.get(pulse.id) ?? 0;
-      // "Arrived" must absorb output latency: a pulse can leave the speaker
-      // hundreds of ms after its scheduled instant, so searching at the
-      // nominal arrival finds a window the chirp has not yet entered.
-      const arrived =
-        nowMs !== null &&
-        nowMs >=
-          pulse.emittedAtHostEpochMs +
-            pulse.durationMs +
-            CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS;
-      if (
-        arrived &&
-        attempts < MAX_MATCH_ATTEMPTS_PER_PULSE &&
-        lastObservationRef.current?.pulseId !== pulse.id
-      ) {
-        matchAttemptsRef.current.set(pulse.id, attempts + 1);
-        if (matchAttemptsRef.current.size > 32) {
-          const oldest = matchAttemptsRef.current.keys().next().value;
-          if (oldest !== undefined) {
-            matchAttemptsRef.current.delete(oldest);
-          }
-        }
-        observation = maybeCreateMatchedObservation(
-          pulse,
-          snapshotRef.current,
-          lastObservationRef.current?.pulseId ?? "",
-        );
-      }
-    }
-
-    if (!observation) {
+    const nowMs = hostEpochNow(snapshotRef.current);
+    if (nowMs === null) {
       return;
     }
-    lastObservationRef.current = observation;
-    // Only an observation of one of OUR pulses proves this phone can hear
-    // itself — hearing a peer's chirp says nothing about our own output.
-    const ownEntry = ownChirpLogRef.current.find(
-      (entry) => entry.id === observation.pulseId,
-    );
-    if (ownEntry) {
-      heardOwnChirpIdsRef.current.add(observation.pulseId);
-      ownChirpStatsRef.current.selfHeard += 1;
-      ownChirpStatsRef.current.lastSelfLatencyMs = Math.round(
-        observation.detectedAtHostEpochMs - ownEntry.emittedAtHostEpochMs,
+
+    const recordHit = (observation: AcousticObservation) => {
+      observedPulseIdsRef.current.add(observation.pulseId);
+      lastObservationRef.current = observation;
+      // Only an observation of one of OUR pulses proves this phone can hear
+      // itself — hearing a peer's chirp says nothing about our own output.
+      const ownEntry = ownChirpLogRef.current.find(
+        (entry) => entry.id === observation.pulseId,
       );
-      setCannotHearOwnChirps(false);
+      if (ownEntry) {
+        heardOwnChirpIdsRef.current.add(observation.pulseId);
+        ownChirpStatsRef.current.selfHeard += 1;
+        ownChirpStatsRef.current.lastSelfLatencyMs = Math.round(
+          observation.detectedAtHostEpochMs - ownEntry.emittedAtHostEpochMs,
+        );
+        setCannotHearOwnChirps(false);
+      }
+      recordChirpEvidence(deviceId, null, observation);
+    };
+
+    // The streaming matcher (off in v2) would deliver a ready observation;
+    // honor it if one ever appears.
+    if (
+      snapshotPulseObservation &&
+      !observedPulseIdsRef.current.has(snapshotPulseObservation.pulseId)
+    ) {
+      recordHit(snapshotPulseObservation);
+      return;
     }
-    recordChirpEvidence(deviceId, null, observation);
-  }, [deviceId, ownPulseObservation, phase, recordChirpEvidence, sensors.snapshot]);
+
+    // Otherwise run the bounded fallback for the oldest pending pulse that
+    // has arrived and is not yet detected; one per tick.
+    for (const pulse of [...observablePulsesRef.current].sort(
+      (a, b) => a.emittedAtHostEpochMs - b.emittedAtHostEpochMs,
+    )) {
+      if (observedPulseIdsRef.current.has(pulse.id)) {
+        continue;
+      }
+      const arrived =
+        nowMs >=
+        pulse.emittedAtHostEpochMs +
+          pulse.durationMs +
+          CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS;
+      const attempts = matchAttemptsRef.current.get(pulse.id) ?? 0;
+      if (!arrived || attempts >= MAX_MATCH_ATTEMPTS_PER_PULSE) {
+        continue;
+      }
+      matchAttemptsRef.current.set(pulse.id, attempts + 1);
+      if (matchAttemptsRef.current.size > 64) {
+        const oldest = matchAttemptsRef.current.keys().next().value;
+        if (oldest !== undefined) {
+          matchAttemptsRef.current.delete(oldest);
+        }
+      }
+      const snapshot = snapshotRef.current;
+      const observation =
+        snapshot.audioFrame && snapshot.audioWindow
+          ? detectScheduledPulse({
+              pulse,
+              frame: {
+                sampleIndex: snapshot.audioFrame.sampleIndex,
+                hostEstimatedEpochMs: snapshot.audioFrame.hostEstimatedEpochMs,
+                sampleRate: snapshot.audioFrame.sampleRate,
+                clockUncertaintyMs: snapshot.audioFrame.clockUncertaintyMs,
+              },
+              audioWindow: snapshot.audioWindow,
+              clockUncertaintyMs: snapshot.clock?.uncertaintyMs,
+            })
+          : null;
+      if (observation) {
+        recordHit(observation);
+        return;
+      }
+    }
+  }, [deviceId, snapshotPulseObservation, phase, recordChirpEvidence, sensors.snapshot]);
 
   // Host: recompute the room geometry about once a second and stage the
   // result for broadcast; peers receive it via onReconciliationState.
@@ -1587,93 +1643,6 @@ function drawReconciliationMap(
       spot.y - 9,
     );
   }
-}
-
-// Matched-filter fallback for chirps the streaming matcher missed: search
-// the rolling audio window around the pulse's expected arrival, bounded by
-// the clock uncertainty.
-function maybeCreateMatchedObservation(
-  pulse: AcousticPulse | null,
-  snapshot: SensorSnapshot,
-  observedPulseId: string,
-) {
-  if (
-    !pulse ||
-    pulse.id === observedPulseId ||
-    !snapshot.audioFrame ||
-    !snapshot.audioWindow
-  ) {
-    return null;
-  }
-
-  const sampleRate = snapshot.audioWindow.sampleRate;
-  const clockUncertaintyMs =
-    snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs;
-  const earlyMs = Math.max(80, clockUncertaintyMs * 2);
-  // The dominant lateness is NOT clock error: scheduled audio leaves an
-  // iPhone speaker 130-230 ms after its scheduled instant (output latency,
-  // measured on ground-truth takes), and the peer's emission adds its own.
-  // A window that only tolerates ~180 ms silently missed most chirps.
-  const lateMs = Math.max(CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS, clockUncertaintyMs * 3);
-  const expectedStartSampleIndex =
-    snapshot.audioFrame.sampleIndex +
-    ((pulse.emittedAtHostEpochMs - snapshot.audioFrame.hostEstimatedEpochMs) /
-      1_000) *
-      snapshot.audioFrame.sampleRate;
-  const searchStartSample = Math.max(
-    0,
-    Math.floor(
-      expectedStartSampleIndex -
-        snapshot.audioWindow.startSampleIndex -
-        (earlyMs / 1_000) * sampleRate,
-    ),
-  );
-  const searchEndSample = Math.min(
-    snapshot.audioWindow.samples.length,
-    Math.ceil(
-      expectedStartSampleIndex -
-        snapshot.audioWindow.startSampleIndex +
-        ((lateMs + pulse.durationMs) / 1_000) * sampleRate,
-    ),
-  );
-
-  // Two-stage search keeps this main-thread-cheap: a 4 ms-hop energy scan
-  // finds the burst, then the full matched filter refines only ±25 ms
-  // around it. The scan runs on the second difference of the signal — a
-  // crude high-pass with ~60 dB of gain at the chirp band over speech
-  // frequencies — because an ultrasonic chirp does NOT dominate broadband
-  // energy: a person talking (which passive ranging encourages) otherwise
-  // captures the energy peak and the refinement searches the wrong spot.
-  const samples = snapshot.audioWindow.samples;
-  const hop = Math.max(32, Math.round(0.004 * sampleRate));
-  let bestEnergy = -1;
-  let bestAt = searchStartSample;
-  for (let start = searchStartSample; start + hop <= searchEndSample; start += hop) {
-    let energy = 0;
-    for (let index = Math.max(start, 2); index < start + hop; index += 1) {
-      const highpassed =
-        samples[index] - 2 * samples[index - 1] + samples[index - 2];
-      energy += highpassed * highpassed;
-    }
-    if (energy > bestEnergy) {
-      bestEnergy = energy;
-      bestAt = start;
-    }
-  }
-  const refineHalf = Math.round(0.025 * sampleRate);
-
-  return createMatchedToneObservation({
-    pulse,
-    audioWindow: snapshot.audioWindow,
-    searchStartSample: Math.max(searchStartSample, bestAt - refineHalf),
-    searchEndSample: Math.min(searchEndSample, bestAt + hop + refineHalf),
-    // Field-calibrated: real phone-to-phone chirps score 0.07-0.5 with peak
-    // ratios of 6-50, while template-free windows (speech included) stay
-    // below 0.01 score and ~6 ratio. The old 0.45 score gate rejected every
-    // genuine reception in the ground-truth takes.
-    minScore: 0.05,
-    minPeakRatio: 4,
-  });
 }
 
 // Play a scheduled chirp through the capture context: it was created inside
