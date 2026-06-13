@@ -22,6 +22,19 @@ const SPEED_OF_SOUND_METERS_PER_SECOND = 343;
 const DEFAULT_MAX_RANGE_AGE_MS = 18_000;
 const MAX_SAME_ROOM_PROPAGATION_MS = 45;
 const MAX_RECIPROCAL_TURN_MS = 12_000;
+// Motion-adaptive smoothing of the per-pair distance. When the reciprocal
+// measurements agree (phones still), a long memory averages out detector
+// noise for sub-decimeter precision; when they are changing (phones being
+// moved apart), recent measurements must dominate so the map tracks in real
+// time instead of crawling up from a window-averaged middle value. The
+// half-life is the age at which a measurement's weight halves.
+const STABLE_RANGE_HALF_LIFE_MS = 9_000;
+const MOVING_RANGE_HALF_LIFE_MS = 1_400;
+// Motion is read from how far the measurements spread relative to their own
+// per-measurement uncertainty: ~1 means stationary jitter, large means the
+// distance is genuinely moving.
+const STATIONARY_SPREAD_RATIO = 1.5;
+const MOVING_SPREAD_RATIO = 4;
 
 type PulseWithDevice = {
   device: RoomDevice;
@@ -343,39 +356,94 @@ function aggregateRanges(
   }
 
   return [...groups.values()].flatMap((group) => {
-    const kept = consensusRanges(group.ranges);
+    const byTime = [...group.ranges].sort(
+      (a, b) => a.observedAtHostEpochMs - b.observedAtHostEpochMs,
+    );
+    const kept = rejectTemporalOutliers(byTime);
     if (kept.length === 0) {
       return [];
     }
-    const weightSum = kept.reduce(
-      (sum, item) => sum + Math.max(0.001, item.confidence),
-      0,
+    const newestEpochMs = kept[kept.length - 1].observedAtHostEpochMs;
+    const meanUncertainty = Math.max(
+      0.08,
+      kept.reduce((sum, item) => sum + item.distanceUncertaintyMeters, 0) /
+        kept.length,
     );
-    const meters =
+    // Spread of the measurements relative to their own uncertainty is the
+    // motion signal; it sets how fast the memory forgets (short half-life
+    // while moving, long while still).
+    const center =
+      kept.reduce((sum, item) => sum + item.meters, 0) / kept.length;
+    const rmsSpread = Math.sqrt(
+      kept.reduce((sum, item) => sum + (item.meters - center) ** 2, 0) /
+        kept.length,
+    );
+    const spreadRatio = rmsSpread / meanUncertainty;
+    const motion = clamp01(
+      (spreadRatio - STATIONARY_SPREAD_RATIO) /
+        (MOVING_SPREAD_RATIO - STATIONARY_SPREAD_RATIO),
+    );
+    const halfLifeMs =
+      STABLE_RANGE_HALF_LIFE_MS +
+      motion * (MOVING_RANGE_HALF_LIFE_MS - STABLE_RANGE_HALF_LIFE_MS);
+
+    const weightOf = (item: RawAcousticRange) =>
+      Math.max(0.001, item.confidence) *
+      2 ** (-(newestEpochMs - item.observedAtHostEpochMs) / halfLifeMs);
+    const weightSum = kept.reduce((sum, item) => sum + weightOf(item), 0);
+    const weightedMeanMeters =
+      kept.reduce((sum, item) => sum + item.meters * weightOf(item), 0) /
+      weightSum;
+
+    // A recency-weighted mean still TRAILS a steady drag by a time constant
+    // (it is a low-pass filter and a moving distance is a ramp). Estimating
+    // the trend's slope and reading it at the newest measurement cancels that
+    // lag, so the map tracks the drag in real time. The slope correction is
+    // scaled by `motion`, so still phones collapse to the precise weighted
+    // mean (no slope jitter) while moving ones get the lag-free estimate.
+    const secondsBeforeNewest = (item: RawAcousticRange) =>
+      (item.observedAtHostEpochMs - newestEpochMs) / 1_000;
+    const meanTime =
+      kept.reduce((sum, item) => sum + secondsBeforeNewest(item) * weightOf(item), 0) /
+      weightSum;
+    let varTime = 0;
+    let covTimeMeters = 0;
+    for (const item of kept) {
+      const w = weightOf(item);
+      const dt = secondsBeforeNewest(item) - meanTime;
+      varTime += w * dt * dt;
+      covTimeMeters += w * dt * (item.meters - weightedMeanMeters);
+    }
+    const slopeMetersPerSecond = varTime > 1e-6 ? covTimeMeters / varTime : 0;
+    // Evaluate the fitted line at the newest measurement (t = 0): the trailing
+    // measurements sit at negative time, so this projects the estimate forward
+    // to where the trend says the phones are now. Cap the correction to the
+    // data's own spread so a noisy slope can never extrapolate wildly.
+    const rawCorrection = motion * slopeMetersPerSecond * -meanTime;
+    const correction = clampMagnitude(rawCorrection, 1.5 * rmsSpread);
+    const meters = Math.max(0, weightedMeanMeters + correction);
+    // Uncertainty and confidence are weighted the same way, so a stale
+    // pre-move measurement neither inflates the error bar nor drags the
+    // estimate once recent measurements disagree with it.
+    const timingUncertaintyMs =
+      kept.reduce((sum, item) => sum + item.timingUncertaintyMs * weightOf(item), 0) /
+      weightSum;
+    const weightedSpread =
       kept.reduce(
-        (sum, item) => sum + item.meters * Math.max(0.001, item.confidence),
+        (sum, item) => sum + Math.abs(item.meters - meters) * weightOf(item),
         0,
       ) / weightSum;
-    const timingUncertaintyMs =
-      kept.reduce((sum, item) => sum + item.timingUncertaintyMs, 0) /
-      kept.length;
-    const spread =
-      kept.reduce((sum, item) => sum + Math.abs(item.meters - meters), 0) /
-      kept.length;
     const confidenceMean =
-      kept.reduce((sum, item) => sum + item.confidence, 0) / kept.length;
-    const latest = [...kept].sort(
-      (a, b) => b.observedAtHostEpochMs - a.observedAtHostEpochMs,
-    )[0];
+      kept.reduce((sum, item) => sum + item.confidence * weightOf(item), 0) /
+      weightSum;
+    const latest = kept[kept.length - 1];
 
     return {
       from: group.from,
       to: group.to,
       pulseId: latest.pulseId,
       pulseIds: uniqueBy(
-        kept
-          .sort((a, b) => a.observedAtHostEpochMs - b.observedAtHostEpochMs)
-          .flatMap((item) => item.pulseIds),
+        kept.flatMap((item) => item.pulseIds),
         (pulseId) => pulseId,
       ),
       samplesUsed: kept.length,
@@ -386,7 +454,7 @@ function aggregateRanges(
         2,
       ),
       confidence: round(
-        Math.max(0, Math.min(1, confidenceMean / (1 + spread))),
+        Math.max(0, Math.min(1, confidenceMean / (1 + weightedSpread))),
         3,
       ),
       observedAtHostEpochMs: latest.observedAtHostEpochMs,
@@ -394,29 +462,47 @@ function aggregateRanges(
   });
 }
 
-function consensusRanges(ranges: RawAcousticRange[]) {
-  const candidates = ranges.filter((range) => range.confidence >= 0.2);
+// Time-aware outlier rejection: a measurement is dropped only when it
+// disagrees with its immediate TIME-neighbors (an isolated bad detection),
+// not when it disagrees with the window's global median. Rejecting by global
+// median treats the new, farther position during a move as an outlier and is
+// exactly what made the map crawl behind a drag; a local-median test keeps a
+// genuine trend while still discarding lone spikes.
+function rejectTemporalOutliers(sortedByTime: RawAcousticRange[]) {
+  const candidates = sortedByTime.filter((range) => range.confidence >= 0.2);
   if (candidates.length <= 1) {
     return candidates;
   }
-
-  const sorted = [...candidates].sort((a, b) => a.meters - b.meters);
-  const tolerance = rangeConsensusTolerance(sorted);
-
-  if (sorted.length === 2) {
-    return sorted[1].meters - sorted[0].meters <= tolerance ? sorted : [];
+  const tolerance = rangeConsensusTolerance(candidates);
+  // Two measurements that disagree beyond tolerance cannot be arbitrated —
+  // there is no third opinion to say which is the bad detection — so neither
+  // is trusted. (A genuine move is confirmed by a third measurement on the
+  // next exchange, at which point the local-median test below keeps it.)
+  if (candidates.length === 2) {
+    return Math.abs(candidates[0].meters - candidates[1].meters) <= tolerance
+      ? candidates
+      : [];
   }
+  return candidates.filter((item, index) => {
+    const low = Math.max(0, index - 1);
+    const high = Math.min(candidates.length - 1, index + 1);
+    const localMedian = median(
+      candidates.slice(low, high + 1).map((range) => range.meters),
+    );
+    return Math.abs(item.meters - localMedian) <= tolerance;
+  });
+}
 
-  const centerMeters = median(sorted.map((range) => range.meters));
-  const deviations = sorted
-    .map((item) => Math.abs(item.meters - centerMeters))
-    .sort((a, b) => a - b);
-  const medianDeviation = median(deviations);
-  const threshold = Math.max(tolerance, medianDeviation * 3);
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
 
-  return sorted.filter(
-    (item) => Math.abs(item.meters - centerMeters) <= threshold,
-  );
+function clampMagnitude(value: number, limit: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const bound = Math.max(0, limit);
+  return Math.max(-bound, Math.min(bound, value));
 }
 
 function rangeConsensusTolerance(ranges: RawAcousticRange[]) {

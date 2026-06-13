@@ -75,7 +75,9 @@ describe("acoustic room ranging", () => {
       expect.objectContaining({
         from: "host",
         to: "phone-a",
-        pulseId: "phone-pulse-1",
+        // The representative pulse is the newest kept exchange, not the
+        // oldest — recency now drives the aggregate.
+        pulseId: "phone-pulse-2",
         pulseIds: [
           "host-pulse-1",
           "phone-pulse-1",
@@ -138,6 +140,43 @@ describe("acoustic room ranging", () => {
     });
 
     expect(deriveAcousticRanges(devices)).toEqual([]);
+  });
+
+  test("tracks a moving distance in real time instead of the window average", () => {
+    // Phones dragged 0.5 ft -> 10 ft over six 1.8 s exchanges. A plain window
+    // average would report the midpoint (~6 ft); the motion-adaptive estimate
+    // must report near the current 10 ft.
+    const FEET_TO_M = 0.3048;
+    const distancesFt = [0.5, 2, 4, 6, 8, 10];
+    const devices = movingReciprocalDevices(
+      distancesFt.map((ft) => ft * FEET_TO_M),
+    );
+    const ranges = deriveAcousticRanges(devices);
+    expect(ranges).toHaveLength(1);
+    const trueLatestMeters = 10 * FEET_TO_M;
+    const windowAverageMeters =
+      (distancesFt.reduce((sum, ft) => sum + ft, 0) / distancesFt.length) *
+      FEET_TO_M;
+    // Tracks the current position, not the average of where it has been.
+    expect(ranges[0].meters).toBeCloseTo(trueLatestMeters, 1);
+    expect(Math.abs(ranges[0].meters - trueLatestMeters)).toBeLessThan(
+      Math.abs(ranges[0].meters - windowAverageMeters),
+    );
+  });
+
+  test("stays precise and stable when the phones are still", () => {
+    // Small measurement jitter around 5 ft must average out to a tight,
+    // repeatable estimate — the velocity term must not turn noise into drift.
+    const FEET_TO_M = 0.3048;
+    const fiveFeet = 5 * FEET_TO_M;
+    const jitter = [0.02, -0.03, 0.01, -0.02, 0.03, -0.01];
+    const devices = movingReciprocalDevices(
+      jitter.map((delta) => fiveFeet + delta),
+    );
+    const ranges = deriveAcousticRanges(devices);
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].meters).toBeCloseTo(fiveFeet, 1);
+    expect(ranges[0].confidence).toBeGreaterThan(0.6);
   });
 
   test("rejects scheduled emission anchors until self-chirp detections arrive", () => {
@@ -330,6 +369,42 @@ function reciprocalDevices({
       acousticObservations: phoneObservations,
     },
   ];
+}
+
+// A sequence of reciprocal exchanges at the given distances, one per 1.8 s
+// slot, each with distinct host-epoch timestamps so recency/motion logic is
+// exercised. Each exchange's intervals encode its own time-of-flight, so the
+// derived distance for exchange i is distancesMeters[i].
+function movingReciprocalDevices(distancesMeters: number[]): RoomDevice[] {
+  const turnaround = SAMPLE_RATE; // 1 s, arbitrary common turnaround
+  const hostPulses: AcousticPulse[] = [];
+  const phonePulses: AcousticPulse[] = [];
+  const hostObservations: AcousticObservation[] = [];
+  const phoneObservations: AcousticObservation[] = [];
+  distancesMeters.forEach((meters, index) => {
+    const tof = Math.round((meters / SPEED_OF_SOUND_METERS_PER_SECOND) * SAMPLE_RATE);
+    const baseEpoch = 10_000 + index * 1_800;
+    const hp = `host-pulse-${index}`;
+    const pp = `phone-pulse-${index}`;
+    hostPulses.push(pulse(hp, baseEpoch));
+    phonePulses.push(pulse(pp, baseEpoch + 100));
+    // Host clock: self at 1000, hears phone at 1000 + turnaround + tof.
+    hostObservations.push(observation(hp, baseEpoch, 1_000, 0.34, 0.9));
+    hostObservations.push(
+      observation(pp, baseEpoch + 500, 1_000 + turnaround + tof, 0.32, 0.88),
+    );
+    // Phone clock: hears host at 2000 + tof, self at 2000 + turnaround.
+    phoneObservations.push(observation(hp, baseEpoch + 200, 2_000 + tof, 0.32, 0.88));
+    phoneObservations.push(
+      observation(pp, baseEpoch + 700, 2_000 + turnaround, 0.32, 0.88),
+    );
+  });
+  return reciprocalDevices({
+    hostPulses,
+    phonePulses,
+    hostObservations,
+    phoneObservations,
+  });
 }
 
 function hostExchangeObservations(
