@@ -78,7 +78,11 @@ const CHIRP_TURN_OPTIONS = {
 // How many times the matched-filter fallback may re-search the rolling
 // window for one pulse; it is main-thread DSP, so unbounded retries at
 // render cadence freeze the UI.
-const MAX_MATCH_ATTEMPTS_PER_PULSE = 2;
+const MAX_MATCH_ATTEMPTS_PER_PULSE = 3;
+// Scheduled audio leaves an iPhone speaker well after its scheduled instant
+// (output latency measured at 130-230 ms in field takes); searches and
+// arrival gates must absorb it with headroom.
+const CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS = 450;
 
 // The trailing window each row renders, and how far behind "now" the right
 // edge sits so remote chunks (sent every ~220 ms) have arrived by the time
@@ -173,10 +177,17 @@ export function WaveformApp() {
   }, []);
 
   const isChirpWindow = useCallback((hostEpochMs: number) => {
+    // The window extends past the scheduled end by the output-latency
+    // allowance: the tone actually plays that late, and a chirp leaking
+    // through the voice gate pollutes passive ranging.
     return recentPulsesRef.current.some(
       (pulse) =>
         hostEpochMs >= pulse.emittedAtHostEpochMs - 150 &&
-        hostEpochMs <= pulse.emittedAtHostEpochMs + pulse.durationMs + 350,
+        hostEpochMs <=
+          pulse.emittedAtHostEpochMs +
+            pulse.durationMs +
+            CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS +
+            200,
     );
   }, []);
 
@@ -738,9 +749,15 @@ export function WaveformApp() {
     if (!observation && pulse) {
       const nowMs = hostEpochNow(snapshotRef.current);
       const attempts = matchAttemptsRef.current.get(pulse.id) ?? 0;
+      // "Arrived" must absorb output latency: a pulse can leave the speaker
+      // hundreds of ms after its scheduled instant, so searching at the
+      // nominal arrival finds a window the chirp has not yet entered.
       const arrived =
         nowMs !== null &&
-        nowMs >= pulse.emittedAtHostEpochMs + pulse.durationMs + 250;
+        nowMs >=
+          pulse.emittedAtHostEpochMs +
+            pulse.durationMs +
+            CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS;
       if (
         arrived &&
         attempts < MAX_MATCH_ATTEMPTS_PER_PULSE &&
@@ -1569,7 +1586,11 @@ function maybeCreateMatchedObservation(
   const clockUncertaintyMs =
     snapshot.clock?.uncertaintyMs ?? snapshot.audioFrame.clockUncertaintyMs;
   const earlyMs = Math.max(80, clockUncertaintyMs * 2);
-  const lateMs = Math.max(180, clockUncertaintyMs * 3);
+  // The dominant lateness is NOT clock error: scheduled audio leaves an
+  // iPhone speaker 130-230 ms after its scheduled instant (output latency,
+  // measured on ground-truth takes), and the peer's emission adds its own.
+  // A window that only tolerates ~180 ms silently missed most chirps.
+  const lateMs = Math.max(CHIRP_OUTPUT_LATENCY_ALLOWANCE_MS, clockUncertaintyMs * 3);
   const expectedStartSampleIndex =
     snapshot.audioFrame.sampleIndex +
     ((pulse.emittedAtHostEpochMs - snapshot.audioFrame.hostEstimatedEpochMs) /
@@ -1594,15 +1615,21 @@ function maybeCreateMatchedObservation(
 
   // Two-stage search keeps this main-thread-cheap: a 4 ms-hop energy scan
   // finds the burst, then the full matched filter refines only ±25 ms
-  // around it (the chirp dominates the window's energy at full gain).
+  // around it. The scan runs on the second difference of the signal — a
+  // crude high-pass with ~60 dB of gain at the chirp band over speech
+  // frequencies — because an ultrasonic chirp does NOT dominate broadband
+  // energy: a person talking (which passive ranging encourages) otherwise
+  // captures the energy peak and the refinement searches the wrong spot.
   const samples = snapshot.audioWindow.samples;
   const hop = Math.max(32, Math.round(0.004 * sampleRate));
   let bestEnergy = -1;
   let bestAt = searchStartSample;
   for (let start = searchStartSample; start + hop <= searchEndSample; start += hop) {
     let energy = 0;
-    for (let index = start; index < start + hop; index += 1) {
-      energy += samples[index] * samples[index];
+    for (let index = Math.max(start, 2); index < start + hop; index += 1) {
+      const highpassed =
+        samples[index] - 2 * samples[index - 1] + samples[index - 2];
+      energy += highpassed * highpassed;
     }
     if (energy > bestEnergy) {
       bestEnergy = energy;

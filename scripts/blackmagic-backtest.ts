@@ -114,7 +114,38 @@ async function main() {
   // 1. Discover the distinct chirp trains present in the take (band ×
   //    duration), without assuming who emitted them: at close range both
   //    phones hear a chirp equally loudly, so loudness cannot attribute.
-  const trains = discoverTrains(devices);
+  let trains = discoverTrains(devices);
+  // Full-band emissions are spectrally identical, so two devices' rotations
+  // merge into one discovered train at slot cadence; split it back into the
+  // two interleaved per-device trains.
+  if (trains.length === 1 && trains[0].timesSeconds.length >= 6) {
+    const merged = trains[0];
+    // Assign each chirp to a slot-grid index so missing chirps cannot
+    // desynchronize the alternation.
+    const gaps = merged.timesSeconds.slice(1).map((t, i) => t - merged.timesSeconds[i]);
+    const slotSeconds = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+    const t0 = merged.timesSeconds[0];
+    const even: number[] = [];
+    const odd: number[] = [];
+    for (const t of merged.timesSeconds) {
+      (Math.round((t - t0) / slotSeconds) % 2 === 0 ? even : odd).push(t);
+    }
+    if (even.length >= 3 && odd.length >= 3) {
+      // A same-band rotation means a current-era take: replay with the real
+      // emitted sweep parameters, regardless of which (possibly partial)
+      // template discovered the times — transducer rolloff makes narrow
+      // slice templates win discovery, but anchor timing needs the true
+      // full-band template, exactly like the live pipeline.
+      const fullBand = EMISSION_PROFILES[0];
+      trains = [
+        { ...merged, band: fullBand.bands[0], durationMs: fullBand.durationMs, profile: fullBand.label, timesSeconds: even },
+        { ...merged, band: fullBand.bands[0], durationMs: fullBand.durationMs, profile: fullBand.label, timesSeconds: odd },
+      ];
+      console.log(
+        `single same-band train split by slot grid into ${even.length}+${odd.length} interleaved emitter trains (replayed as ${fullBand.label})`,
+      );
+    }
+  }
   for (const train of trains) {
     console.log(
       `train: ${train.timesSeconds.length} chirps · ${train.band.frequencyHz}-${train.band.endFrequencyHz}Hz ` +
@@ -311,19 +342,33 @@ function discoverTrains(devices: TakeDevice[]): Train[] {
       }
     }
   }
-  // Distinct trains only: overlapping bands in different profiles (legacy vs
-  // current lanes) can double-count one train — two trains are the same if
-  // their chirp times interleave within a slot.
+  // Distinct trains only: overlapping bands and partial-band templates can
+  // each pick up the same physical emission — two trains are the same if
+  // their chirp times interleave within a slot. Among duplicates prefer the
+  // NEWEST emission profile (EMISSION_PROFILES order): a 750 Hz slice
+  // template weakly matches a full-band sweep and wins on burst count, but
+  // replaying with the wrong sweep parameters wrecks anchor timing.
+  const profilePriority = (train: Train) =>
+    EMISSION_PROFILES.findIndex((profile) => profile.label === train.profile);
+  const sorted = found.sort((a, b) => b.timesSeconds.length - a.timesSeconds.length);
   const distinct: Train[] = [];
-  for (const train of found.sort((a, b) => b.timesSeconds.length - a.timesSeconds.length)) {
-    const duplicate = distinct.some((kept) => {
+  for (const train of sorted) {
+    const overlappingIndex = distinct.findIndex((kept) => {
       const matches = train.timesSeconds.filter((t) =>
         kept.timesSeconds.some((k) => Math.abs(k - t) < 0.4),
       ).length;
       return matches >= train.timesSeconds.length * 0.5;
     });
-    if (!duplicate) {
+    if (overlappingIndex < 0) {
       distinct.push(train);
+      continue;
+    }
+    const kept = distinct[overlappingIndex];
+    if (
+      profilePriority(train) < profilePriority(kept) &&
+      train.timesSeconds.length >= kept.timesSeconds.length * 0.6
+    ) {
+      distinct[overlappingIndex] = train;
     }
   }
   return distinct.slice(0, 2);
@@ -366,7 +411,10 @@ function findSweepBursts(
   let candidate: { s: number; score: number } | null = null;
   for (let s = 0; s + N <= x.length; s += coarseHop) {
     const score = scoreAt(s);
-    if (score >= 0.12) {
+    // Field receptions score as low as ~0.08; the periodicity requirement
+    // and per-band dedupe absorb the extra false candidates a low floor lets
+    // through.
+    if (score >= 0.08) {
       if (!candidate || score > candidate.score) {
         candidate = { s, score };
       }
