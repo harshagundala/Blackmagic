@@ -156,8 +156,15 @@ export function WaveformApp() {
   // reciprocal ranging for the whole room and that only this phone can
   // detect. Field case: one phone's volume was lowered and the room never
   // ranged again, with zero indication why.
-  const ownChirpLogRef = useRef<Array<{ id: string; deadlineEpochMs: number }>>([]);
+  const ownChirpLogRef = useRef<
+    Array<{ id: string; emittedAtHostEpochMs: number; deadlineEpochMs: number }>
+  >([]);
   const heardOwnChirpIdsRef = useRef<Set<string>>(new Set());
+  const ownChirpStatsRef = useRef({
+    emitted: 0,
+    selfHeard: 0,
+    lastSelfLatencyMs: null as number | null,
+  });
   const [cannotHearOwnChirps, setCannotHearOwnChirps] = useState(false);
   const updateOwnChirpHealth = useCallback((nowEpochMs: number) => {
     const expired = ownChirpLogRef.current.filter(
@@ -348,6 +355,10 @@ export function WaveformApp() {
                 samplesUsed: snapshot.clock.samplesUsed,
               }
             : null,
+          chirp: {
+            buildId: process.env.NEXT_PUBLIC_BUILD_ID ?? null,
+            ...ownChirpStatsRef.current,
+          },
         });
         publishRecordingStatus(recordingId, "uploaded", result.wavUrl, null);
       } catch (error) {
@@ -684,11 +695,13 @@ export function WaveformApp() {
       observablePulseRef.current = pulse;
       noteRecentPulse(pulse);
       recordChirpEvidence(deviceId, pulse, null);
+      ownChirpStatsRef.current.emitted += 1;
       ownChirpLogRef.current = [
         ...ownChirpLogRef.current.slice(-5),
         {
           id: pulse.id,
-          // Past this point the matched-filter fallback has had both its
+          emittedAtHostEpochMs: pulse.emittedAtHostEpochMs,
+          // Past this point the matched-filter fallback has had all its
           // bounded attempts; an unheard pulse is genuinely unheard.
           deadlineEpochMs:
             pulse.emittedAtHostEpochMs + pulse.durationMs + 1_500,
@@ -784,8 +797,15 @@ export function WaveformApp() {
     lastObservationRef.current = observation;
     // Only an observation of one of OUR pulses proves this phone can hear
     // itself — hearing a peer's chirp says nothing about our own output.
-    if (ownChirpLogRef.current.some((entry) => entry.id === observation.pulseId)) {
+    const ownEntry = ownChirpLogRef.current.find(
+      (entry) => entry.id === observation.pulseId,
+    );
+    if (ownEntry) {
       heardOwnChirpIdsRef.current.add(observation.pulseId);
+      ownChirpStatsRef.current.selfHeard += 1;
+      ownChirpStatsRef.current.lastSelfLatencyMs = Math.round(
+        observation.detectedAtHostEpochMs - ownEntry.emittedAtHostEpochMs,
+      );
       setCannotHearOwnChirps(false);
     }
     recordChirpEvidence(deviceId, null, observation);
@@ -1111,8 +1131,12 @@ function captureDiagnostics(snapshot: SensorSnapshot) {
   const recoveries =
     snapshot.captureRecoveries > 0 ? ` · fix ${snapshot.captureRecoveries}` : "";
   const muted = snapshot.trackMuted ? " · muted" : "";
-  return `${rate} ${contextState} · ${mode} · lvl ${level}${recoveries}${muted}`;
+  // The running bundle's build id, so "is this phone on the latest deploy"
+  // is answerable from the screen instead of by guessing.
+  return `${rate} ${contextState} · ${mode} · lvl ${level}${recoveries}${muted} · ${BUILD_TAG}`;
 }
+
+const BUILD_TAG = (process.env.NEXT_PUBLIC_BUILD_ID ?? "dev").slice(0, 7);
 
 // Chrome/Firefox/Edge on iOS are WKWebView shells where getUserMedia and
 // WebRTC support is limited and microphone capture is unreliable; only

@@ -23,6 +23,15 @@ export type RecordingUploadContext = {
     maxErrorMs: number | null;
     samplesUsed: number | null;
   } | null;
+  // Live chirp pipeline state at upload time, so a take can answer "was the
+  // phone detecting its own chirps in the session" without guessing from
+  // audio alone.
+  chirp?: {
+    buildId: string | null;
+    emitted: number;
+    selfHeard: number;
+    lastSelfLatencyMs: number | null;
+  } | null;
 };
 
 export type RecordingUploadResult = {
@@ -70,6 +79,7 @@ export async function uploadRecordedTake(
     endedAtEpochMs: take.endedAtEpochMs,
     captureMode: context.captureMode,
     clock: context.clock,
+    chirp: context.chirp ?? null,
     userAgent:
       typeof navigator !== "undefined" ? navigator.userAgent : null,
     format: "pcm16-mono-wav",
