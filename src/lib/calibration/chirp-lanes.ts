@@ -6,16 +6,23 @@
 // simply contributes no chirp anchors while passive ranging keeps covering
 // it.
 //
+// Band floor sits at 18.5 kHz, ABOVE the iPhone speaker's ~16.5 kHz
+// resonance. Field measurement: that resonance radiates the 16.3-17 kHz part
+// of the old sweep at ~63 dB SNR — loud enough that a young listener "clearly"
+// heard it with the phone to her ear. 18.5 kHz is ~37 dB quieter (transducer
+// rolloff) AND past the threshold of human hearing, so it is inaudible to
+// essentially everyone while the speaker/mic still deliver it (18-22 dB raw
+// SNR up to 21 kHz on an iPhone 17). The lower raw SNR up here is recovered
+// by isolateChirpBand() + the matched filter (see scheduled-pulse-detector),
+// which together also reject voice/noise — the band is speech-free, so the
+// chirp survives even while people talk (the meeting-app requirement).
+//
 // Every device sweeps the SAME full band: the emitter rotation already
-// separates devices in time (1.8 s slots), and matched-filter gain grows
-// with bandwidth×duration — the full 2.4 kHz sweep buys ~6 dB over the old
-// per-device 600 Hz lanes plus a 4× sharper correlation peak, which is what
-// makes room-scale (4 m+) receptions detectable. The band floor sits at
-// 16.3 kHz because 15.5-16 kHz is still faintly audible to young ears;
-// 4 m field takes show receptions detect fine all the way up to 18.7 kHz.
+// separates devices in time (1.8 s slots), and matched-filter gain grows with
+// bandwidth×duration.
 export const ULTRASONIC_CHIRP_BAND = {
-  frequencyHz: 16_300,
-  endFrequencyHz: 18_700,
+  frequencyHz: 18_500,
+  endFrequencyHz: 20_500,
 } as const;
 
 // Phone speakers and mics roll off hard near-ultrasonic; the matched filter

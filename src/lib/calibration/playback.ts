@@ -51,12 +51,18 @@ export type PulseToneSchedulerOptions = {
 };
 
 const DEFAULT_MINIMUM_LEAD_SECONDS = 0.02;
-// The chirp band (17-19 kHz) is near-inaudible, but phone speakers and mics
-// both roll off hard up there. A timid gain leaves the matched filter with
-// nothing to correlate beyond arm's length, so drive the tone hard.
+// The chirp band (≥18.5 kHz) is inaudible, but phone speakers and mics both
+// roll off hard up there. A timid gain leaves the matched filter with nothing
+// to correlate beyond arm's length, so drive the tone hard.
 const DEFAULT_PEAK_GAIN = 0.8;
 const FLOOR_GAIN = 0.0001;
-const ATTACK_SECONDS = 0.008;
+// A slow attack/release matters for inaudibility: a fast onset of a loud tone
+// splatters broadband energy (an audible "tick") across the spectrum, even
+// when the tone itself is ultrasonic. 25 ms cosine-like ramps keep the onset
+// and tail smooth so nothing audible leaks; the chirp is long enough (200 ms)
+// that the ramps cost little correlation energy.
+const ATTACK_SECONDS = 0.025;
+const RELEASE_SECONDS = 0.025;
 
 export function createPulseToneScheduler({
   createContext,
@@ -141,11 +147,16 @@ function scheduleTone(
     oscillator.frequency.linearRampToValueAtTime(pulse.endFrequencyHz, endTime);
   }
 
+  // Flat-top (Tukey) envelope: smooth attack, hold at peak, smooth release.
+  // Holding the peak instead of decaying across the whole tone keeps the
+  // chirp energy near-constant — what the matched-filter template expects —
+  // while the tapered edges avoid an audible onset/offset click.
+  const attack = Math.min(ATTACK_SECONDS, durationSeconds / 3);
+  const release = Math.min(RELEASE_SECONDS, durationSeconds / 3);
+  const peak = Math.max(FLOOR_GAIN, peakGain);
   gain.gain.setValueAtTime(FLOOR_GAIN, startTime);
-  gain.gain.exponentialRampToValueAtTime?.(
-    Math.max(FLOOR_GAIN, peakGain),
-    roundTime(startTime + Math.min(ATTACK_SECONDS, durationSeconds / 2)),
-  );
+  gain.gain.exponentialRampToValueAtTime?.(peak, roundTime(startTime + attack));
+  gain.gain.setValueAtTime?.(peak, roundTime(endTime - release));
   gain.gain.exponentialRampToValueAtTime?.(FLOOR_GAIN, endTime);
 
   oscillator.connect(gain);

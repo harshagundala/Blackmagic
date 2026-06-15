@@ -31,6 +31,9 @@ import type {
 
 // Profiles a take may contain, newest first (older takes ran older builds).
 const EMISSION_PROFILES = [
+  { label: "inaudible-200ms", durationMs: 200, bands: [
+    { frequencyHz: 18_500, endFrequencyHz: 20_500 },
+  ]},
   { label: "fullband-200ms", durationMs: 200, bands: [
     { frequencyHz: 16_300, endFrequencyHz: 18_700 },
   ]},
@@ -130,18 +133,16 @@ async function main() {
       (Math.round((t - t0) / slotSeconds) % 2 === 0 ? even : odd).push(t);
     }
     if (even.length >= 3 && odd.length >= 3) {
-      // A same-band rotation means a current-era take: replay with the real
-      // emitted sweep parameters, regardless of which (possibly partial)
-      // template discovered the times — transducer rolloff makes narrow
-      // slice templates win discovery, but anchor timing needs the true
-      // full-band template, exactly like the live pipeline.
-      const fullBand = EMISSION_PROFILES[0];
+      // A same-band rotation: split into the two interleaved emitter trains,
+      // replaying both with the band the rotation was discovered at (the full
+      // sweep matched by discovery — old takes at 16.3-18.7, current ones at
+      // 18.5-20.5), exactly like the live pipeline.
       trains = [
-        { ...merged, band: fullBand.bands[0], durationMs: fullBand.durationMs, profile: fullBand.label, timesSeconds: even },
-        { ...merged, band: fullBand.bands[0], durationMs: fullBand.durationMs, profile: fullBand.label, timesSeconds: odd },
+        { ...merged, timesSeconds: even },
+        { ...merged, timesSeconds: odd },
       ];
       console.log(
-        `single same-band train split by slot grid into ${even.length}+${odd.length} interleaved emitter trains (replayed as ${fullBand.label})`,
+        `single same-band train split by slot grid into ${even.length}+${odd.length} interleaved emitter trains (${merged.band.frequencyHz}-${merged.band.endFrequencyHz}Hz, ${merged.profile})`,
       );
     }
   }

@@ -2,6 +2,7 @@ import {
   createMatchedToneObservation,
   type AudioPulseWindow,
 } from "./pulse";
+import { isolateChirpBand } from "../acoustics/bandpass";
 import type { AcousticObservation, AcousticPulse } from "@/lib/session/registry";
 
 // Scheduled audio leaves an iPhone speaker well AFTER its scheduled instant —
@@ -73,17 +74,30 @@ export function detectScheduledPulse({
     return null;
   }
 
-  const samples = audioWindow.samples;
+  // Strip sub-chirp-band energy (voice, wind, room noise) before BOTH the
+  // pre-scan and the matched filter. The matched filter normalizes the chirp
+  // correlation by the segment's total energy; in a loud room or with people
+  // talking that energy is dominated by sub-10 kHz content, which deflates an
+  // otherwise-perfect correlation to nothing (the score collapsed ~7x on a
+  // loud field take, dropping detection to ~40%). Filtering to the chirp band
+  // makes the score reflect true in-band SNR, so the chirp is found even
+  // while people talk. The filter is zero-phase, so timing is unbiased; the
+  // matched filter then runs on the same filtered samples.
+  const filtered = isolateChirpBand(
+    audioWindow.samples,
+    sampleRate,
+    pulse.frequencyHz,
+  );
+  const filteredWindow: AudioPulseWindow = { ...audioWindow, samples: filtered };
+  const samples = filtered;
   const durationSamples = Math.round((pulse.durationMs / 1_000) * sampleRate);
   const hop = Math.max(32, Math.round(0.004 * sampleRate));
   let bestEnergy = -1;
   let bestAt = searchStartSample;
   for (let start = searchStartSample; start + hop <= searchEndSample; start += hop) {
     let energy = 0;
-    for (let index = Math.max(start, 2); index < start + hop; index += 1) {
-      const highpassed =
-        samples[index] - 2 * samples[index - 1] + samples[index - 2];
-      energy += highpassed * highpassed;
+    for (let index = start; index < start + hop; index += 1) {
+      energy += samples[index] * samples[index];
     }
     if (energy > bestEnergy) {
       bestEnergy = energy;
@@ -100,7 +114,7 @@ export function detectScheduledPulse({
   const refineMargin = Math.round(0.025 * sampleRate);
   return createMatchedToneObservation({
     pulse,
-    audioWindow,
+    audioWindow: filteredWindow,
     searchStartSample: Math.max(
       searchStartSample,
       bestAt - durationSamples - refineMargin,
