@@ -1096,14 +1096,6 @@ export function WaveformApp() {
         >
           blackmagic
         </h1>
-        <p
-          className="font-mono text-[11px] uppercase tracking-[0.22em] text-black/40"
-          style={{
-            animation: "arrival-rise 1.1s cubic-bezier(.2,.8,.2,1) 220ms both",
-          }}
-        >
-          tap anywhere — every phone becomes a waveform
-        </p>
       </div>
     </main>
   );
